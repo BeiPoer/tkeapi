@@ -1,23 +1,41 @@
 # TokensByte — LLM API 网关
 
-Rust + React 构建的高性能大模型 API 分发与管理平台一台。
+Rust + React 构建的高性能大模型 API 分发与管理平台：统一接入、计费、限流、审计。
 
-开源这套系统的是为了可以更加好便利的让CN大模型出海，CN大模型各种模型计费转发都不一样；
+计费规则+转发规则+模型转发 可以任意添加不同的模型；目前支持各种模型，开源系统核心功能开源。
 
-本系统架构非常好的支持各种计费规则和转发
+支持模型
 
-优势直至Seedance等
+Seedance2.0计费，各种模型计费，DeepSeek分时计费、GLM、K3
 
-> 目录
+Openai-GPT/Google-Gemini/Anthropic-Claude/XAI-Grok  全线支持
 
-- [功能概览](#功能概览)
-- [技术栈](#技术栈)
-- [快速部署](#快速部署)
-- [使用入门](#使用入门)
-- [本地开发](#本地开发)
-- [约定与运维要点](#约定与运维要点)
-- [常见问题](#常见问题)
-- [贡献与许可](#贡献与许可)
+核心功能
+
+
+| ![1785405934199](docs/images/moxa.png) | ![1785405944507](docs/images/moxb.png) | 模型管理 |
+| ------------------------------------------------------- | ------------------------------------------------- | -------- |
+| ![1785405950685](docs/images/shangyoua.png)       | ![1785405955542](docs/images/shangyoub.png) | 上游配置 |
+| ![1785406156586](docs/images/ha.png)       | ![1785406165726](docs/images/menhu.png) | 基础插件 |
+
+## 
+
+目录
+
+- [TokensByte — LLM API 网关](#tokensbyte--llm-api-网关)
+  - [](#)
+  - [功能概览](#功能概览)
+  - [技术栈](#技术栈)
+  - [快速部署](#快速部署)
+    - [1）一键启动](#1一键启动)
+    - [2）交互式部署（推荐）](#2交互式部署推荐)
+    - [3）自定义 / 外部数据库](#3自定义--外部数据库)
+    - [模式对照](#模式对照)
+  - [使用入门](#使用入门)
+  - [本地开发](#本地开发)
+    - [目录结构（精简）](#目录结构精简)
+  - [常见问题](#常见问题)
+  - [贡献与许可](#贡献与许可)
 
 ## 功能概览
 
@@ -37,7 +55,14 @@ Rust + React 构建的高性能大模型 API 分发与管理平台一台。
 | ---- | ----------------------------------------------------------------------- |
 | 后端 | Rust · Axum · Tokio · SQLx (PostgreSQL only)                         |
 | 前端 | React 19 · TypeScript · Ant Design 6 · Tailwind 4 · Zustand · Vite |
-| 部署 | Docker Compose · Nginx · PostgreSQL 18.4## 快速部署                   |
+| 部署 | Docker Compose · Nginx · PostgreSQL 18.4                              |
+
+```
+客户端 / SDK  ──▶  API 网关(鉴权/限流/路由)  ──▶  上游模型
+管理后台      ──▶  业务层(配额/计费/统计)    ──▶  PostgreSQL
+```
+
+## 快速部署
 
 **环境**：Docker 20.10+、Compose 2.x；建议 4C / 8G / 50GB。
 
@@ -51,9 +76,9 @@ docker compose up -d --build
 
 - 前台：`http://localhost:8080`
 - 管理端：`http://localhost:8080/admin1688`
-- 默认管理员：`admin` / `admin`（可用环境变量 `ADMIN_PASSWORD` 覆盖）
+- 首次访问管理端走网页初始化页设置管理员账号（不再用环境变量启动种子化）
 
-生产请务必修改 `.env` 中的数据库密码、JWT 密钥与管理员密码。
+生产请务必修改 `.env` 中的数据库密码与 JWT 密钥；并设置 `CORS_ORIGINS`（前端来源）。若前面有 Nginx/Caddy 反代，请正确设置 `X-Forwarded-For` / `X-Real-IP`，注册与登录 IP 会优先读取这些头。
 
 ### 2）交互式部署（推荐）
 
@@ -61,7 +86,7 @@ docker compose up -d --build
 chmod +x deploy.sh && ./deploy.sh
 ```
 
-引导生成 DB 密码、JWT、管理员密码，并可选开发/生产模式。
+引导生成 DB 密码、JWT，并可选开发/生产模式。
 
 ### 3）自定义 / 外部数据库
 
@@ -82,9 +107,33 @@ docker compose up -d
 | `dev.sh` / `dev.ps1`       | 本机前后端热重载（共用 Docker Postgres） |
 | `dev-os.sh`                | 开源版本地启动                           |
 
-离线镜像导出：`./export-images.sh`（Windows：`.\export-images.ps1`）。Apple Silicon **不建议本机打 `linux/amd64`**（QEMU 跑 rustc 易 segfault）；M 系列请优先 `linux/arm64`，x86 云请在 Linux/CI 导出 amd64。
+离线镜像导出：`./export-images.sh`（Windows：`.\export-images.ps1`）。**Mac 后端强制宿主机 `cargo-zigbuild`** 生成 `tokensbyte-server-bin` 再 `USE_PREBUILT=1` 打包，避免 Docker 内 cargo OOM/QEMU；失败会直接退出（`ALLOW_DOCKER_CARGO=1` 才允许容器内编译）。详见 `docs/Mac开发环境打包与交叉编译指南.md`。
 
-打包提速（不影响线上运行时逻辑）：同架构 + 保留 BuildKit cache；Mac 可 `EXPORT_FAST=1 ./export-images.sh`（需 Desktop ≥12GB）；仅重新打 tar 用 `SKIP_BUILD=1`；正式发版优先 CI 推镜像后服务器 `pull`。
+打包提速（不影响线上运行时逻辑）：
+
+- **同架构**构建 + 保留 BuildKit Cargo cache（`ENABLE_CARGO_CACHE=1`，默认开）；勿随意 `docker builder prune`，否则会丢缓存变回全量编译
+- **Mac**：脚本内联 zigbuild + `--features cross_compile`；`USE_PREBUILT=1` 时前后端并行；外置盘自动迁 `CARGO_TARGET_DIR`；`FORCE_ZIGBUILD=1` 重编；失败即停（`ALLOW_DOCKER_CARGO=1` 才允许容器内编译）
+- **Windows**：`.\export-images.ps1` / `.\push-images.ps1` 默认 `JOBS=2`；OOM 时 `$env:CARGO_BUILD_JOBS=1`；同样勿随意 prune；根目录放 Linux ELF `tokensbyte-server-bin` 会自动 `USE_PREBUILT=1`
+- **Windows 中文路径**：脚本已 UTF-8 + 自动把中文目录名映射为 ASCII 的 `PROJECT_NAME`（也可手动 `$env:PROJECT_NAME='myproject'`）；**仓库路径仍建议纯英文**（否则 Docker COPY/挂载可能失败）
+- 同架构 Linux 上先编好 `tokensbyte-server-bin`（ELF）再导出：脚本会自动 `USE_PREBUILT=1`，镜像阶段跳过容器内 Rust 编译
+- 仅重新打 tar：`SKIP_BUILD=1`（bash）或 `$env:SKIP_BUILD=1`（PowerShell）；正式发版优先 CI 推镜像后服务器 `pull`
+
+## 使用入门
+
+1. 登录管理端 → 配置渠道与模型
+2. 用户端创建 API 令牌并设置额度
+3. 业务侧将 Base URL 指向网关 `/v1`，使用令牌调用
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer sk-xxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-3.5-turbo","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+健康检查：`GET /api/health`。
+
+常用管理 API 前缀：`/api/v1/auth`、`/users`、`/channels`、`/models`、`/tokens`、`/finance`、`/logs`、`/settings`。
 
 ## 本地开发
 
@@ -96,7 +145,7 @@ docker compose up -d
 .\dev.ps1 1 fg        # Windows 前台看日志
 ```
 
-可选环境变量：`BACKEND_PORT` / `FRONTEND_PORT` / `POSTGRES_PORT` / `DEV_WAIT_MAX` / `DEV_ATTACH=1` / `TOKENSBYTE_FAST_LINK=0`。`[profile.dev]` 减小调试信息；Windows（`dev.ps1`）默认 `rust-lld`；Linux 可选 mold/lld。
+可选环境变量：`BACKEND_PORT` / `FRONTEND_PORT` / `POSTGRES_PORT` / `DEV_WAIT_MAX` / `DEV_ATTACH=1` / `TOKENSBYTE_FAST_LINK=0` / `TOKENSBYTE_LOCAL_TARGET=0` / `TOKENSBYTE_SCCACHE=0` / `TOKENSBYTE_AUTO_BREW=0` / `RUST_LOG`（本地 `dev.sh`/`dev.ps1` 默认 `info`；要 debug：`RUST_LOG=debug ./dev.sh`；部署/`docker-compose` 亦默认 `info`）。仓库在 `/Volumes/...` 外置盘时，`dev.sh` 会把 `CARGO_TARGET_DIR` 迁到 `~/Library/Caches/tokensbyte-dev/target/...`（本机 SSD）以加速编译；macOS 默认会自动 `brew install sccache`（不自动装巨型 `llvm`；若本机已有 `ld64.lld` 仍会启用链接加速）。`[profile.dev]` 开启增量并减小调试信息；Windows（`dev.ps1`）默认 `rust-lld`（中文路径会重定向 `CARGO_TARGET_DIR` 到 `%LOCALAPPDATA%\tokensbyte-dev\target\...`）；Linux 可选 mold/lld。**勿随意删除 `backend/target` 或本机 `CARGO_TARGET_DIR`（Windows 含上述重定向目录）**，否则下次启动会冷编译；链接加速仅影响本机开发耗时，不改变运行行为。
 
 原生方式：
 
@@ -125,23 +174,7 @@ tokensbyte/
 └── data/            # 持久化（本地）
 ```
 
-## 约定与运维要点
-
-### 金额精度
-
-站点内部账本（日志 `cost`、扣费结算、余额 / 赠送金 / 信控、充值调账、额度）统一 **小数点后 6 位**（四舍五入）。
-
-- 后端：`backend/src/money.rs` → `round_money` / `format_money`
-- 前端：展示层统一 `toFixed(6)` / `precision={6}`（与后端 6 位账本对齐）
-- **例外**：微信 / 支付宝等支付通道对外法币仍按通道要求（通常 2 位）
-
-### 时间与日志
-
-- 业务时间列统一 `TIMESTAMPTZ`；范围查询使用 `?::timestamptz`
-- 日志详情清理：`storage_settings.log_retention_days`（默认 30）
-- 冷归档：`storage_settings.log_row_retention_days`（默认 0=关闭）→ `logs_archive`
-
-### 常见问题
+## 常见问题
 
 **只支持哪些数据库？**
 仅 PostgreSQL。勿把 `DATABASE_URL` 指到其他引擎。
@@ -152,8 +185,8 @@ tokensbyte/
 **如何备份？**
 `pg_dump` / `pg_restore`。应用启动会自动跑增量迁移。
 
-**默认管理员密码对不上？**
-Compose / `.env` 以 `ADMIN_PASSWORD` 为准；默认未设置时固定为 `admin`。
+**管理员怎么创建？**
+首次打开管理端走网页初始化页设置账号密码；后端不再读取 `ADMIN_PASSWORD` / `SEED_ADMIN_ON_BOOT`。
 
 ## 贡献与许可
 
