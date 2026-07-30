@@ -1423,8 +1423,6 @@ mod upstream_asset_forward_tests {
         assert_eq!(r.upstream_path, "/api/v3/contents/generations/tasks");
     }
 }
-    }
-}
 
 // ── 域名智能推断（无转发规则时的自动识别）─────────────────────
 
