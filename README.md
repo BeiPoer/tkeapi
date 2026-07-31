@@ -27,8 +27,8 @@ Openai-GPT/Google-Gemini/Anthropic-Claude/XAI-Grok  全线支持
   - [功能概览](#功能概览)
   - [技术栈](#技术栈)
   - [快速部署](#快速部署)
-    - [1）一键启动](#1一键启动)
-    - [2）交互式部署（推荐）](#2交互式部署推荐)
+    - [1）一键脚本部署（推荐）](#1一键脚本部署推荐)
+    - [2）Docker Compose 标准部署](#2docker-compose-标准部署)
     - [3）自定义 / 外部数据库](#3自定义--外部数据库)
     - [模式对照](#模式对照)
   - [使用入门](#使用入门)
@@ -64,38 +64,38 @@ Openai-GPT/Google-Gemini/Anthropic-Claude/XAI-Grok  全线支持
 
 ## 快速部署
 
-**环境**：Docker 20.10+、Compose 2.x；建议 4C / 8G / 50GB。
+**环境**：Docker 20.10+、Compose 2.x；建议 2C / 4G / 20GB+。
 
-### 1）一键启动
+### 1）一键脚本部署（推荐）
+
+推荐使用交互式脚本 `deploy.sh`，脚本会自动引导生成数据库强密码与 JWT 密钥，并从 CNB（`docker.cnb.cool`）镜像仓库极速拉取预编译镜像，开箱即用：
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/aiqachat/tokensbyte.git
 cd tokensbyte
-docker compose up -d --build
-```
-
-- 前台：`http://localhost:8080`
-- 管理端：`http://localhost:8080/admin1688`
-- 首次访问管理端走网页初始化页设置管理员账号（不再用环境变量启动种子化）
-
-生产请务必修改 `.env` 中的数据库密码与 JWT 密钥；并设置 `CORS_ORIGINS`（前端来源）。若前面有 Nginx/Caddy 反代，请正确设置 `X-Forwarded-For` / `X-Real-IP`，注册与登录 IP 会优先读取这些头。
-
-### 2）交互式部署（推荐）
-
-```bash
 chmod +x deploy.sh && ./deploy.sh
 ```
 
-引导生成 DB 密码、JWT，并可选开发/生产模式。
+- 输入 `2` 选择生产环境，根据提示完成初始化即可。
+- **用户端**：`http://localhost:8080`
+- **管理后台**：`http://localhost:8080/admin1688`
+- 首次访问管理端走网页初始化页设置管理员账号。
+
+生产请务必修改 `.env` 中的数据库密码与 JWT 密钥；并设置 `CORS_ORIGINS`（前端来源）。若前面有 Nginx/Caddy 反代，请正确设置 `X-Forwarded-For` / `X-Real-IP`。
+
+### 2）Docker Compose 标准部署
+
+适用于熟悉命令行调用的开发者：
+
+```bash
+cp .env.example .env   # 按注释修改密码与密钥
+docker compose pull    # 检查并拉取 CNB 预编译镜像
+docker compose up -d   # 启动服务（自动复用预编译镜像）
+```
 
 ### 3）自定义 / 外部数据库
 
-```bash
-cp .env.example .env   # 按注释修改
-docker compose up -d
-```
-
-使用外部 PostgreSQL：改 `DATABASE_URL`，并在 `docker-compose.yml` 中停用内置 `postgres` 服务。
+使用外部 PostgreSQL（如阿里云/腾讯云 RDS）：在 `.env` 中修改 `DATABASE_URL`，并在 `docker-compose.yml` 中注释掉 `postgres` 服务段落及其依赖。
 
 ### 模式对照
 
@@ -194,7 +194,7 @@ tokensbyte/
 2. Rust：`fmt` + `clippy -D warnings` + `test`；前端遵循 ESLint
 3. 提交信息建议：`type(scope): description`
 
-许可证：[MIT](LICENSE)
+许可证：[GNU AGPLv3](LICENSE)
 
 问题反馈：GitHub Issues
 
