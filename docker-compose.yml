@@ -39,7 +39,7 @@ services:
       retries: 5
 
   backend:
-    image: ${BACKEND_IMAGE:-ghcr.io/aiqachat/tokensbyte-backend:dev}
+    image: ${BACKEND_IMAGE:-docker.cnb.cool/netbcloud/tokensbyte/backend:latest}
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -96,7 +96,7 @@ services:
           cpus: '0.5'
 
   frontend:
-    image: ${FRONTEND_IMAGE:-ghcr.io/aiqachat/tokensbyte-frontend:dev}
+    image: ${FRONTEND_IMAGE:-docker.cnb.cool/netbcloud/tokensbyte/frontend:latest}
     build:
       context: ./frontend
       dockerfile: Dockerfile
