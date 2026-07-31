@@ -15,8 +15,6 @@ services:
       - PORT=3000
       - DATABASE_URL=${DATABASE_URL:-postgres://tokensapi:tokensapi@postgres:5432/tokensapi}
       - JWT_SECRET=${JWT_SECRET:-tokensbyte-change-me-in-development}
-      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
       - REGISTER_ENABLED=${REGISTER_ENABLED:-true}
       - RUST_LOG=${RUST_LOG:-info}
       - CARGO_TARGET_DIR=/usr/src/app/target

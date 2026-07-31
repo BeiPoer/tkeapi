@@ -68,13 +68,7 @@ if [ ! -f .env ]; then
     fi
     echo ""
     
-    echo "3️⃣  管理员密码"
-    echo "   (管理后台登录密码)"
-    read -p "   请输入管理员密码 (默认: admin): " admin_password
-    ADMIN_PASSWORD=${admin_password:-admin}
-    echo ""
-    
-    echo "4️⃣  是否允许用户注册？"
+    echo "3️⃣  是否允许用户注册？"
     read -p "   是/否 (默认: 是): " register_input
     case $register_input in
         [Nn]|[Ff]|[Oo]|否|false)
@@ -101,10 +95,6 @@ POSTGRES_DB=tokensapi
 # JWT 密钥
 JWT_SECRET=${JWT_SECRET}
 
-# 管理员账号
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=${ADMIN_PASSWORD}
-
 # 端口配置
 BACKEND_PORT=3000
 FRONTEND_PORT=8080
@@ -121,7 +111,7 @@ EOF
     echo "📋 配置摘要:"
     echo "   - 数据库密码: [已自动生成 16 位强密码]"
     echo "   - JWT_SECRET: [已自动生成 64 位随机密钥]"
-    echo "   - 管理员密码: ${ADMIN_PASSWORD}"
+    echo "   - 管理员账号: [首次访问网页初始化页设置]"
     echo "   - 用户注册: $([ "$REGISTER_ENABLED" = "true" ] && echo "允许" || echo "禁止")"
     echo ""
     
@@ -145,14 +135,11 @@ else
     if grep -q "JWT_SECRET" .env; then
         echo "   - JWT_SECRET: [已配置]"
     fi
-    if grep -q "ADMIN_PASSWORD" .env; then
-        ADMIN_PWD=$(grep "ADMIN_PASSWORD" .env | head -1 | cut -d'=' -f2)
-        echo "   - 管理员密码: $ADMIN_PWD"
-    fi
     if grep -q "REGISTER_ENABLED" .env; then
         REG=$(grep "REGISTER_ENABLED" .env | head -1 | cut -d'=' -f2)
         echo "   - 用户注册: $([ "$REG" = "true" ] && echo "允许" || echo "禁止")"
     fi
+    echo "   - 管理员账号: [首次访问网页初始化页设置]"
     echo ""
     
     # 询问是否重新配置
@@ -211,9 +198,8 @@ case $mode in
         echo "   - 管理后台: http://localhost:8080/admin1688"
         echo "   - API: http://localhost:3000/v1"
         echo ""
-        echo "👤 默认管理员账号:"
-        echo "   - 用户名: admin"
-        echo "   - 密码: admin (请通过管理后台修改)"
+        echo "👤 管理员账号设置:"
+        echo "   - 首次访问管理后台界面 (http://localhost:8080/admin1688) 即可手动设置管理员账号与密码"
         echo ""
         echo "📊 服务状态:"
         docker compose ps
