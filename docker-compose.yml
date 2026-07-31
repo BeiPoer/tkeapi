@@ -48,7 +48,7 @@ services:
         USE_PREBUILT: ${USE_PREBUILT:-0}
         # 限制编译并行线程数（默认1，防止小内存 VPS 编译时 OOM 被 SIGKILL）
         CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-1}
-    pull_policy: missing
+    pull_policy: always
     container_name: ${PROJECT_NAME:-tokensbyte}-backend
     stop_grace_period: 120s
     environment:
@@ -98,7 +98,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    pull_policy: missing
+    pull_policy: always
     container_name: ${PROJECT_NAME:-tokensbyte}-frontend
     ports:
       - "${FRONTEND_PORT:-8080}:80"

@@ -189,7 +189,7 @@ case $mode in
         export PROJECT_NAME="${PROJECT_NAME}"
         echo "📥 正在检查并从 CNB 镜像仓库拉取最新镜像 (docker.cnb.cool)..."
         docker compose pull || echo "⚠️ 镜像拉取跳过/不需要更新，将直接启动容器..."
-        docker compose up -d
+        docker compose up -d --no-build
         echo ""
         echo "✅ 生产环境部署完成！"
         echo ""

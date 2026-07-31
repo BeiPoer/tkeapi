@@ -56,3 +56,5 @@ opensource/
 tokensbyte-server-bin
 tokensbyte-images*.tar.gz
 backend/git_log.txt
+backend/tokensbyte-server
+build_and_push_cnb.sh
