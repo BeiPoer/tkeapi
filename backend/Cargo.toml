@@ -82,6 +82,9 @@ md-5 = "0.10"
 # Volcengine TOS Object Storage
 ve-tos-rust-sdk = { version = "2.9", features = ["tokio-runtime"] }
 
+# OpenSSL (静态内置编译，解决 cross/zigbuild 交叉编译缺系统 libssl 库问题)
+openssl = { version = "0.10", features = ["vendored"] }
+
 # Template engine (portal static HTML generation)
 tera = "1"
 chrono-tz = "0.10.4"
