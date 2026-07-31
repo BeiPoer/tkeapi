@@ -39,13 +39,15 @@ services:
       retries: 5
 
   backend:
-    image: ${PROJECT_NAME:-tokensbyte}-backend:latest
+    image: ${BACKEND_IMAGE:-ghcr.io/aiqachat/tokensbyte-backend:dev}
     build:
       context: .
       dockerfile: backend/Dockerfile
       args:
         # 0=容器内编译（默认，跨平台安全）；1=使用根目录 tokensbyte-server-bin（需 Linux ELF 且架构匹配）
         USE_PREBUILT: ${USE_PREBUILT:-0}
+        # 限制编译并行线程数（默认1，防止小内存 VPS 编译时 OOM 被 SIGKILL）
+        CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-1}
     pull_policy: missing
     container_name: ${PROJECT_NAME:-tokensbyte}-backend
     stop_grace_period: 120s
@@ -94,7 +96,7 @@ services:
           cpus: '0.5'
 
   frontend:
-    image: ${PROJECT_NAME:-tokensbyte}-frontend:latest
+    image: ${FRONTEND_IMAGE:-ghcr.io/aiqachat/tokensbyte-frontend:dev}
     build:
       context: ./frontend
       dockerfile: Dockerfile

@@ -200,6 +200,8 @@ case $mode in
         echo "🚀 启动生产环境..."
         # 导出项目名环境变量
         export PROJECT_NAME="${PROJECT_NAME}"
+        echo "📥 正在检查并拉取最新镜像 (GHCR)..."
+        docker compose pull || echo "⚠️ 镜像拉取跳过/不需要更新，将直接启动容器..."
         docker compose up -d
         echo ""
         echo "✅ 生产环境部署完成！"
