@@ -1,14 +1,16 @@
-# TokensByte — LLM API 网关
+# TokensByte—大模型API开源中转 LLM API网关
 
 Rust + React 构建的高性能大模型 API 分发与管理平台：统一接入、计费、限流、审计。
 
 计费规则+转发规则+模型转发 可以任意添加不同的模型；目前支持各种模型，开源系统核心功能开源。
 
-支持模型
-
-Seedance2.0计费，各种模型计费，DeepSeek分时计费、GLM、K3
-
+支持模型-全部支持原生官方接口+OpenAi标准接口
+Seedance2.0/2，5计费，
+MiniMax M3、H3（视频模型）计费
+DeepSeek分时计费、GLM、K3
 Openai-GPT/Google-Gemini/Anthropic-Claude/XAI-Grok  全线支持
+
+各种模型计费，按次，按张，按Token，按时段
 
 核心功能
 
