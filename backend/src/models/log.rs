@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -53,9 +53,10 @@ pub struct RequestLog {
     #[sqlx(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub yid: Option<String>, // 读路径由 JOIN channel_configs.yid 填充，非 logs 列
+    /// 请求当时是否走 HA 组（写路径快照，非 JOIN 当前渠道）
     #[sqlx(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub channel_provider_type: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub is_ha: i32,
     #[sqlx(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_content: Option<String>,
@@ -158,8 +159,11 @@ pub struct LogQuery {
     pub channel_group_aid: Option<String>,
     pub token_id: Option<i64>,
     pub status: Option<String>,
+    /// 精确 HTTP 状态码；可与 status=success/fail 叠加
+    pub status_code: Option<i32>,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
+    pub user_group: Option<String>,
     pub uid: Option<String>,
     pub router_ep: Option<String>,
     pub action_type: Option<String>,

@@ -6,7 +6,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { Card, Form, Input, Button, InputNumber, message, Typography, Space, Switch, Radio, Tabs, Select, Tag, Alert, Table, Spin, Upload, Modal, DatePicker } from 'antd';
+import { Card, Form, Input, Button, InputNumber, message, Typography, Space, Switch, Radio, Tabs, Select, Tag, Alert, Table, Spin, Upload, Modal, DatePicker, Divider } from 'antd';
 import { CloudServerOutlined, ApiOutlined, DatabaseOutlined, UploadOutlined } from '@ant-design/icons';
 import * as Icons from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
@@ -247,6 +247,7 @@ const Settings: React.FC = () => {
       const defaultMenuItems = [
         { key: '/dashboard', label_zh: '系统概览', label_en: 'Dashboard', icon: 'DashboardOutlined', enabled: true, sort_order: 1, allowed_levels: 'all' },
         { key: '/playground', label_zh: '创作中心', label_en: 'Playground', icon: 'ExperimentOutlined', enabled: true, sort_order: 2, allowed_levels: 'all' },
+        { key: '/playground-2026', label_zh: '创作中心2026', label_en: 'Playground 2026', icon: 'ExperimentOutlined', enabled: true, sort_order: 2.5, allowed_levels: 'all' },
         { key: '/docs', label_zh: 'API教程', label_en: 'Relay API', icon: 'RocketOutlined', enabled: true, sort_order: 3, allowed_levels: 'all' },
         { key: '/tokens', label_zh: '令牌管理', label_en: 'Tokens', icon: 'KeyOutlined', enabled: true, sort_order: 4, allowed_levels: 'all' },
         { key: '/logs', label_zh: '日志记录', label_en: 'Logs', icon: 'HistoryOutlined', enabled: true, sort_order: 5, allowed_levels: 'all' },
@@ -255,7 +256,7 @@ const Settings: React.FC = () => {
         { key: '/assets-intl', label_zh: '资产管理', label_en: 'Assets Intl', icon: 'FolderOpenOutlined', enabled: true, sort_order: 8, allowed_levels: 'all' },
         { key: '/advanced-marketing', label_zh: '高级推广', label_en: 'Advanced Marketing', icon: 'TeamOutlined', enabled: true, sort_order: 10, allowed_levels: 'all' },
         { key: '/wallet', label_zh: '我的钱包', label_en: 'Wallet', icon: 'WalletOutlined', enabled: true, sort_order: 11, allowed_levels: 'all' },
-        { key: '/ark-video-monitor', label_zh: '视频监控', label_en: 'Ark Video Monitor', icon: 'VideoCameraOutlined', enabled: false, sort_order: 11.5, allowed_levels: 'all' },
+        { key: '/ark-video-monitor', label_zh: '视频监控', label_en: 'Ark Video Monitor', icon: 'VideoCameraOutlined', enabled: true, sort_order: 11.5, allowed_levels: 'all' },
         { key: '/profile', label_zh: '个人中心', label_en: 'Profile', icon: 'UserOutlined', enabled: true, sort_order: 12, allowed_levels: 'all' },
       ];
 
@@ -283,6 +284,7 @@ const Settings: React.FC = () => {
       const filteredItems = loadedItems.filter((item: any) => {
         if (item.key === '/moderation-query') return false;
         if (item.key === '/playground') return isPluginActive('playground');
+        if (item.key === '/playground-2026') return isPluginActive('playground_2026');
         if (item.key === '/assets') return isPluginActive('asset_manager');
         if (item.key === '/assets-intl') return isPluginActive('asset_manager_intl');
         if (item.key === '/advanced-marketing') return isPluginActive('team_marketing');
@@ -297,6 +299,8 @@ const Settings: React.FC = () => {
         ...site,
         default_timezone: site?.default_timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
         admin_path: site?.admin_path || 'admin1688',
+        ip_blacklist_enabled: site?.ip_blacklist_enabled === true,
+        ip_blacklist_text: (site?.ip_blacklist || []).join('\n'),
         login_style: site?.login_style || 'split',
         login_quote: site?.login_quote || '',
         show_timezone: site?.show_timezone !== false,
@@ -339,6 +343,11 @@ const Settings: React.FC = () => {
           show_timezone: values.show_timezone !== false,
           copyright: values.copyright || '',
           admin_path: values.admin_path || 'admin1688',
+          ip_blacklist_enabled: values.ip_blacklist_enabled === true,
+          ip_blacklist: (values.ip_blacklist_text || '')
+            .split('\n')
+            .map((s: string) => s.trim())
+            .filter(Boolean),
         };
         payload.login = {
           ...settings?.login,
@@ -648,6 +657,45 @@ const Settings: React.FC = () => {
         extra={<Text type="secondary">修改后，管理后台的入口将更改为新的路径，例如：/admin1688。默认值为 admin1688。</Text>}
       >
         <Input placeholder="admin1688" />
+      </Form.Item>
+
+      <Divider style={{ margin: '24px 0 16px' }}>注册 IP 黑名单拦截</Divider>
+
+      <Form.Item
+        label="开启注册 IP 黑名单"
+        name="ip_blacklist_enabled"
+        valuePropName="checked"
+        extra={<Text type="secondary">开启后，包含在黑名单内的 IP 将被禁止发送验证码及提交注册。</Text>}
+      >
+        <Switch />
+      </Form.Item>
+
+      <Form.Item
+        noStyle
+        shouldUpdate={(prevValues, currentValues) => prevValues.ip_blacklist_enabled !== currentValues.ip_blacklist_enabled}
+      >
+        {({ getFieldValue }) => {
+          const enabled = getFieldValue('ip_blacklist_enabled');
+          if (!enabled) return null;
+          return (
+            <Form.Item
+              label="黑名单 IP / CIDR 网段列表"
+              name="ip_blacklist_text"
+              extra={
+                <Text type="secondary">
+                  每行输入一个 IP 地址或 CIDR 网段。例如：<br />
+                  192.168.1.100<br />
+                  10.0.0.0/8
+                </Text>
+              }
+            >
+              <Input.TextArea
+                rows={5}
+                placeholder={'192.168.1.100\n10.0.0.0/8'}
+              />
+            </Form.Item>
+          );
+        }}
       </Form.Item>
     </div>
   );

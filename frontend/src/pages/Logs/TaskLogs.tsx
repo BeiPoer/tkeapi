@@ -49,7 +49,7 @@ interface TaskLog {
   billing_present?: boolean;
   channel_name: string | null;
   channel_group_aid: string | null;
-  channel_provider_type?: string | null;
+  is_ha?: number;
   user_nickname: string | null;
   task_id: string | null;
   action_type: string | null;
@@ -249,6 +249,7 @@ const TaskLogs: React.FC = () => {
   const [subTypeFilter, setSubTypeFilter] = useState<string | null>(null);
   const [isSettingsModalVisible, setIsSettingsModalVisible] = useState(false);
   const [tempDefaultType, setTempDefaultType] = useState<string>('视觉');
+  const [userLevels, setUserLevels] = useState<any[]>([]);
   const queryGuardRef = useRef(new QueryGuard());
   const skipNextEffectFetchRef = useRef(false);
   const rowIds = useMemo(() => data.map((l) => l.id), [data]);
@@ -265,6 +266,12 @@ const TaskLogs: React.FC = () => {
     const guard = queryGuardRef.current;
     return () => guard.dispose();
   }, []);
+
+  useEffect(() => {
+    if (isAdmin) {
+      request.get('/user_levels').then((res: any) => setUserLevels(res.data || [])).catch(console.error);
+    }
+  }, [isAdmin]);
 
   useEffect(() => {
     if (isSettingsModalVisible) {
@@ -319,6 +326,7 @@ const TaskLogs: React.FC = () => {
       if (v.model && v.model.trim()) params.model = v.model.trim();
       if (v.search_keyword && v.search_keyword.trim()) params.search_keyword = v.search_keyword.trim();
       if (v.user_id && v.user_id.trim()) params.user_id = v.user_id.trim();
+      if (v.user_group) params.user_group = v.user_group;
       Object.assign(params, toDateRangeParams(v.dateRange));
 
       const res = await (request.get('/task_logs', { params, signal }) as any);
@@ -382,6 +390,7 @@ const TaskLogs: React.FC = () => {
       if (v.model && v.model.trim()) params.model = v.model.trim();
       if (v.search_keyword && v.search_keyword.trim()) params.search_keyword = v.search_keyword.trim();
       if (v.user_id && v.user_id.trim()) params.user_id = v.user_id.trim();
+      if (v.user_group) params.user_group = v.user_group;
       Object.assign(params, toDateRangeParams(v.dateRange));
       const resp = await request.get('/task_logs/export', {
         params,
@@ -432,11 +441,13 @@ const TaskLogs: React.FC = () => {
     return (
       <div style={{ padding: '8px 0' }}>
         <Descriptions size="small" column={1} bordered
-          labelStyle={{ width: 120, color: labelColor, background: labelBg }}
-          contentStyle={{ background: contentBg, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace', fontSize: 12, maxHeight: 300, overflow: 'auto' }}
+          styles={{
+            label: { width: 120, color: labelColor, background: labelBg },
+            content: { background: contentBg, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace', fontSize: 12, maxHeight: 300, overflow: 'auto' }
+          }}
         >
           <Descriptions.Item label={t('task_logs.token_usage', 'Token 用量')}>
-            {t('logs.input', '输入')} {record.prompt_tokens} / {t('logs.output', '输出')} {record.completion_tokens}{(record.cached_tokens ?? 0) > 0 ? ` / ${t('logs.cache_input', '缓存(输入内)')} ${record.cached_tokens}` : ''}
+            {t('logs.input', '输入')} {record.prompt_tokens} / {t('logs.output', '输出')} {record.completion_tokens}{(record.cached_tokens ?? 0) > 0 ? ` / ${t('logs.cache_read', '缓存读取')} ${record.cached_tokens}` : ''}
           </Descriptions.Item>
           <Descriptions.Item label={t('task_logs.cost', '费用')}>
             {record.cost > 0 ? record.cost.toFixed(6) : '0'}
@@ -515,7 +526,7 @@ const TaskLogs: React.FC = () => {
         return (
           <Space size={4}>
             <Text type="secondary" style={{ fontSize: 12 }}>{r.channel_group_aid || '-'}</Text>
-            {r.channel_provider_type === 'high_availability_group' && <Tag color="blue" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>HA</Tag>}
+            {r.is_ha === 1 && <Tag color="blue" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>HA</Tag>}
           </Space>
         );
       },
@@ -665,29 +676,37 @@ const TaskLogs: React.FC = () => {
       <Form form={form} initialValues={{ dateRange: [dayjs().startOf('day'), dayjs().endOf('day')] }} onFinish={() => fetchLogs(1, pageSize)}>
         <Space wrap size={[8, 8]}>
           {isAdmin && (
-            <Form.Item name="user_id" noStyle>
-              <Input placeholder={t('task_logs.search_user_id', '搜索用户 UID/用户名')} prefix={<Search size={16} />} allowClear style={{ width: 180 }} />
-            </Form.Item>
+            <>
+              <Form.Item name="user_id" noStyle>
+                <Input placeholder={t('task_logs.search_user_id', '搜索用户 UID/用户名')} prefix={<Search size={16} />} allowClear style={{ width: 180, fontSize: 12, height: 32 }} />
+              </Form.Item>
+              <Form.Item name="user_group" noStyle>
+                <Select
+                  placeholder={t('logs.search_user_group', '用户等级')}
+                  allowClear
+                  showSearch
+                  optionFilterProp="label"
+                  style={{ width: 180, fontSize: 12, height: 32 }}
+                  popupMatchSelectWidth={false}
+                  options={userLevels.map((l: any) => ({ value: l.group_key, label: `${l.name} (${l.discount}x)` }))}
+                />
+              </Form.Item>
+            </>
           )}
           <Form.Item name="search_keyword" noStyle>
-            <Input placeholder={t('logs.search_keyword', '搜索日志 ID / 任务 ID')} prefix={<Search size={16} />} allowClear style={{ width: 240 }} />
+            <Input placeholder={t('logs.search_keyword', '搜索日志 ID / 任务 ID / 渠道 AID')} prefix={<Search size={16} />} allowClear style={{ width: 260, fontSize: 12, height: 32 }} />
           </Form.Item>
           <Form.Item name="model" noStyle>
-            <Input placeholder={t('task_logs.model_name', '模型名称')} prefix={<Search size={16} />} allowClear style={{ width: 180 }} />
+            <Input placeholder={t('logs.model_name', '模型名称')} prefix={<Search size={16} />} allowClear style={{ width: 180, fontSize: 12, height: 32 }} />
           </Form.Item>
           <Form.Item name="dateRange" noStyle>
-            <RangePicker />
+            <RangePicker className="font-size-12" style={{ fontSize: 12, height: 32 }} />
           </Form.Item>
-          <Button type="primary" htmlType="submit" icon={<Search size={16} />} loading={loading} disabled={loading} style={{ borderRadius: 6 }}>{t('task_logs.query', '查询')}</Button>
-          <Button disabled={loading} onClick={() => {
-            form.resetFields();
-            form.setFieldsValue({ dateRange: [dayjs().startOf('day'), dayjs().endOf('day')] });
-            fetchLogs(1, pageSize);
-          }} style={{ borderRadius: 6 }}>{t('task_logs.reset', '重置')}</Button>
-          <Button icon={<RefreshCw size={14} />} onClick={() => fetchLogs(page, pageSize)} loading={loading} disabled={loading} style={{ borderRadius: 6 }}>{t('common.refresh', '刷新')}</Button>
+          <Button type="primary" htmlType="submit" icon={<Search size={14} />} loading={loading} disabled={loading} style={{ height: 32, borderRadius: 6, fontSize: 12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{t('task_logs.query', '查询')}</Button>
+          <Button icon={<RefreshCw size={14} />} onClick={() => fetchLogs(page, pageSize)} loading={loading} disabled={loading} style={{ height: 32, borderRadius: 6, fontSize: 12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{t('common.refresh', '刷新')}</Button>
           {isAdmin && (
             <Tooltip title={t('logs.export_tooltip', '根据当前筛选条件导出 CSV（上限10万条）')}>
-              <Button icon={<Download size={14} />} loading={exporting} disabled={loading} onClick={handleExport} style={{ borderRadius: 6 }}>{t('task_logs.export', '导出')}</Button>
+              <Button icon={<Download size={14} />} loading={exporting} disabled={loading} onClick={handleExport} style={{ height: 32, borderRadius: 6, fontSize: 12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{t('task_logs.export', '导出')}</Button>
             </Tooltip>
           )}
         </Space>
@@ -769,7 +788,7 @@ const TaskLogs: React.FC = () => {
           <CardRow label={t('logs.channel_aid', '渠道AID')}>
             <Space size={4}>
               <Text type="secondary" style={{ fontSize: 12 }}>{record.channel_group_aid}</Text>
-              {record.channel_provider_type === 'high_availability_group' && <Tag color="blue" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>HA</Tag>}
+              {record.is_ha === 1 && <Tag color="blue" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>HA</Tag>}
             </Space>
           </CardRow>
         )}

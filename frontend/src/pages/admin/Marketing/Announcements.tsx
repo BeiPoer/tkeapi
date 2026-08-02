@@ -39,6 +39,7 @@ import {
 import ReactQuill from 'react-quill-new';
 import 'react-quill-new/dist/quill.snow.css';
 import request from '../../../utils/request';
+import { apiErrMsg, SKIP_ERR } from '../../../utils/apiErr';
 import type { Announcement } from '../../../types';
 
 const { Text, Title } = Typography;
@@ -82,10 +83,13 @@ const NotificationSettingsForm: React.FC = () => {
   const [testEmailLoading, setTestEmailLoading] = useState(false);
   const [testSmsLoading, setTestSmsLoading] = useState(false);
   const [bodyMode, setBodyMode] = useState<'edit' | 'preview'>('edit');
+  const [hasBalanceSmsTemplate, setHasBalanceSmsTemplate] = useState(false);
 
   const siteNotificationEnabled = Form.useWatch('site_notification_enabled', form);
+  const smsBalanceEnabled = Form.useWatch('sms_balance_notification', form);
   const emailSubject = Form.useWatch('low_balance_email_subject', form) || '';
   const emailHtml = Form.useWatch('low_balance_email_html', form) || '';
+  const smsTemplateMissing = !!smsBalanceEnabled && !hasBalanceSmsTemplate;
 
   const previewVars = useMemo(
     () => ({
@@ -112,6 +116,7 @@ const NotificationSettingsForm: React.FC = () => {
       const n = response.notification || {};
       const smtpName = response.smtp?.from_name || response.site?.name || 'TokensByte';
       setSiteName(smtpName);
+      setHasBalanceSmsTemplate(!!response.sms?.balance_template_id?.trim());
       form.setFieldsValue({
         site_notification_enabled: n.site_notification_enabled || false,
         sms_balance_notification: n.sms_balance_notification || false,
@@ -143,14 +148,20 @@ const NotificationSettingsForm: React.FC = () => {
   }, []);
 
   const handleSave = async () => {
+    if (submitting) return;
     setSubmitting(true);
     try {
       const values = await form.validateFields();
-      await request.post('/settings', { notification: values });
+      if (values.sms_balance_notification && !hasBalanceSmsTemplate) {
+        message.error('开启短信余额提醒前，请先在「消息通知 → 短信」配置余额提醒模板 ID');
+        return;
+      }
+      await request.post('/settings', { notification: values }, SKIP_ERR as any);
       message.success('保存配置成功');
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.errorFields) return;
       console.error('Failed to save settings:', error);
-      message.error('保存配置失败');
+      message.error(apiErrMsg(error, '保存配置失败'));
     } finally {
       setSubmitting(false);
     }
@@ -165,45 +176,64 @@ const NotificationSettingsForm: React.FC = () => {
   };
 
   const handleTestEmail = async () => {
-    if (!testEmail.trim()) {
+    if (testEmailLoading) return;
+    const to = testEmail.trim();
+    if (!to) {
       message.warning('请输入测试收件邮箱');
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+      message.warning('请输入有效的邮箱地址');
       return;
     }
     setTestEmailLoading(true);
     try {
       const values = form.getFieldsValue();
-      const res = await (request.post('/settings/notification/test', {
-        channel: 'email',
-        to: testEmail.trim(),
-        balance: previewBalance,
-        threshold: previewThreshold,
-        subject: values.low_balance_email_subject || DEFAULT_EMAIL_SUBJECT,
-        html: values.low_balance_email_html || DEFAULT_EMAIL_HTML,
-      }) as any);
+      const res = await (request.post(
+        '/settings/notification/test',
+        {
+          channel: 'email',
+          to,
+          balance: previewBalance,
+          threshold: previewThreshold,
+          subject: values.low_balance_email_subject || DEFAULT_EMAIL_SUBJECT,
+          html: values.low_balance_email_html || DEFAULT_EMAIL_HTML,
+        },
+        SKIP_ERR as any,
+      ) as any);
       res.success ? message.success(res.message) : message.error(res.message || '发送失败');
     } catch (e: any) {
-      message.error(e?.message || '测试邮件发送失败');
+      message.error(apiErrMsg(e, '测试邮件发送失败'));
     } finally {
       setTestEmailLoading(false);
     }
   };
 
   const handleTestSms = async () => {
-    if (!testMobile.trim()) {
+    if (testSmsLoading) return;
+    const mobile = testMobile.trim();
+    if (!mobile) {
       message.warning('请输入测试手机号');
+      return;
+    }
+    if (!/^\+?\d{6,15}$/.test(mobile)) {
+      message.warning('请输入有效的手机号（可含国家码，如 +86138…）');
+      return;
+    }
+    if (!hasBalanceSmsTemplate) {
+      message.warning('请先在「消息通知 → 短信」配置余额提醒模板 ID');
       return;
     }
     setTestSmsLoading(true);
     try {
-      const res = await (request.post('/settings/notification/test', {
-        channel: 'sms',
-        mobile: testMobile.trim(),
-        balance: previewBalance,
-        threshold: previewThreshold,
-      }) as any);
+      const res = await (request.post(
+        '/settings/notification/test',
+        { channel: 'sms', mobile },
+        SKIP_ERR as any,
+      ) as any);
       res.success ? message.success(res.message) : message.error(res.message || '发送失败');
     } catch (e: any) {
-      message.error(e?.message || '测试短信发送失败');
+      message.error(apiErrMsg(e, '测试短信发送失败'));
     } finally {
       setTestSmsLoading(false);
     }
@@ -264,9 +294,18 @@ const NotificationSettingsForm: React.FC = () => {
             name="sms_balance_notification"
             label="短信余额提示"
             valuePropName="checked"
+            extra="模板 ID 在「站点设置 → 消息通知 → 短信」配置"
           >
             <Switch />
           </Form.Item>
+          {smsTemplateMissing && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="尚未配置余额提醒模板 ID，请先到「消息通知 → 短信」填写后再开启并保存"
+            />
+          )}
           <Form.Item
             name="email_balance_notification"
             label="邮件余额提示"
@@ -325,24 +364,6 @@ const NotificationSettingsForm: React.FC = () => {
                 { label: '实时预览', value: 'preview', icon: <EyeOutlined /> },
               ]}
             />
-            {bodyMode === 'preview' && (
-              <>
-                <Text type="secondary" style={{ fontSize: 12 }}>预览余额</Text>
-                <Input
-                  value={previewBalance}
-                  onChange={(e) => setPreviewBalance(e.target.value)}
-                  style={{ width: 100 }}
-                  size="small"
-                />
-                <Text type="secondary" style={{ fontSize: 12 }}>预览阈值</Text>
-                <Input
-                  value={previewThreshold}
-                  onChange={(e) => setPreviewThreshold(e.target.value)}
-                  style={{ width: 100 }}
-                  size="small"
-                />
-              </>
-            )}
             <Button size="small" icon={<UndoOutlined />} onClick={handleResetTemplate}>
               恢复默认
             </Button>
@@ -382,8 +403,24 @@ const NotificationSettingsForm: React.FC = () => {
 
       <Title level={5}>测试发送</Title>
       <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
-        使用上方预览余额/阈值与当前编辑中的模版发送，无需先保存。短信正文由腾讯云「余额提醒模板」决定，此处仅传入余额与阈值变量。
+        测试余额/阈值仅用于邮件预览与试发；短信走「消息通知 → 短信」已配置的无变量模板，无需先保存。
       </Text>
+      <Space wrap style={{ marginBottom: 12 }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>测试余额（邮件）</Text>
+        <Input
+          value={previewBalance}
+          onChange={(e) => setPreviewBalance(e.target.value)}
+          style={{ width: 120 }}
+          size="small"
+        />
+        <Text type="secondary" style={{ fontSize: 12 }}>测试阈值（邮件）</Text>
+        <Input
+          value={previewThreshold}
+          onChange={(e) => setPreviewThreshold(e.target.value)}
+          style={{ width: 120 }}
+          size="small"
+        />
+      </Space>
       <Space direction="vertical" style={{ width: '100%', marginBottom: 24 }} size="middle">
         <Space wrap>
           <Input
@@ -393,6 +430,7 @@ const NotificationSettingsForm: React.FC = () => {
             style={{ width: 280 }}
           />
           <Button
+            htmlType="button"
             icon={<SendOutlined />}
             loading={testEmailLoading}
             onClick={handleTestEmail}
@@ -408,16 +446,29 @@ const NotificationSettingsForm: React.FC = () => {
             style={{ width: 280 }}
           />
           <Button
+            htmlType="button"
             icon={<SendOutlined />}
             loading={testSmsLoading}
             onClick={handleTestSms}
+            disabled={!hasBalanceSmsTemplate}
+            title={
+              hasBalanceSmsTemplate
+                ? undefined
+                : '请先在「消息通知 → 短信」配置余额提醒模板 ID'
+            }
           >
             发送测试短信
           </Button>
         </Space>
       </Space>
 
-      <Button type="primary" icon={<SaveOutlined />} onClick={handleSave} loading={submitting}>
+      <Button
+        type="primary"
+        htmlType="button"
+        icon={<SaveOutlined />}
+        onClick={handleSave}
+        loading={submitting}
+      >
         保存配置
       </Button>
     </Form>

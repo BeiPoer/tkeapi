@@ -14,7 +14,7 @@ const { Text } = Typography;
 const RULE_LABELS: Record<string, string> = {
   standard: '标准计费',
   multimodal: '多模态计费',
-  gpt_billing: 'GPT官方计费',
+  gpt_billing: 'GPT图片计费',
   tiered: '阶梯计费',
   doubao_chat: '豆包聊天阶梯',
   volcengine: '火山多模态(旧)',
@@ -27,6 +27,7 @@ const RULE_LABELS: Record<string, string> = {
   image_resolution: '按分辨率K',
   image_size_pixel: '按分辨率像素',
   video_resolution: '按分辨率阶梯',
+  minimax_h3: 'MiniMax H3',
   video_quality: '按画质帧率阶梯',
   kling_video: '可灵视频',
   vidu_video: 'Vidu 视频',
@@ -126,7 +127,7 @@ const RateDisplay: React.FC<RateDisplayProps> = ({ rule, currencySymbol, formatP
           <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
             {tiers.map((t, idx) => (
               <Text key={idx} type="secondary" style={s}>
-                {t.max_prompt_tokens ? `≤${t.max_prompt_tokens}k` : '无限制'} 输 | {t.max_completion_tokens ? `≤${t.max_completion_tokens}k` : '无限制'} 出 : P: {fp(t.prompt_rate)}/1M C: {fp(t.completion_rate)}/1M {t.cached_rate ? `Cache: ${fp(t.cached_rate)}/1M` : ''}
+                {t.max_prompt_tokens ? `≤${t.max_prompt_tokens}k` : '不限'}入 | {t.max_completion_tokens ? `≤${t.max_completion_tokens}k` : '不限'}出 : 入 {fp(t.prompt_rate)}/1M 出 {fp(t.completion_rate)}/1M{t.cached_rate ? ` 读 ${fp(t.cached_rate)}/1M` : ''}{t.cache_write_rate ? ` 写 ${fp(t.cache_write_rate)}/1M` : ''}
               </Text>
             ))}
           </div>
@@ -217,7 +218,7 @@ const RateDisplay: React.FC<RateDisplayProps> = ({ rule, currencySymbol, formatP
           }
         });
         if (lines.length === 0) {
-          return <Text type="secondary" style={s}>GPT官方计费(未启用计费项)</Text>;
+          return <Text type="secondary" style={s}>GPT图片计费(未启用计费项)</Text>;
         }
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
@@ -324,6 +325,24 @@ const RateDisplay: React.FC<RateDisplayProps> = ({ rule, currencySymbol, formatP
           </div>
         );
     }
+    if (rule.billing_rule === 'minimax_h3') {
+      const activeTiers = tiers.filter(t => t.enabled !== false);
+      const freeCount = ext.free_image_count ?? 5;
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+          <Text type="secondary" style={s}>
+            输入图超额: {fp(rule.prompt_rate)} / 张 (免费{freeCount}张)
+          </Text>
+          {activeTiers.length === 0
+            ? <Text type="secondary" style={s}>分辨率阶梯 (无有效配置)</Text>
+            : activeTiers.map((t, idx) => (
+              <Text key={idx} type="secondary" style={s}>
+                {t.resolution}: {fp(t.rate)} / s
+              </Text>
+            ))}
+        </div>
+      );
+    }
     if (rule.billing_rule === 'video_quality') {
         const activeTiers = tiers.filter(t => t.enabled !== false);
         if (activeTiers.length === 0) return <Text type="secondary" style={s}>按视频画质及帧率阶梯 (无有效配置)</Text>;
@@ -403,6 +422,7 @@ const RateDisplay: React.FC<RateDisplayProps> = ({ rule, currencySymbol, formatP
     fixed: 'default', per_image: 'lime', image_resolution: 'gold', image_size_pixel: 'gold',
     volc_seedream_pro: 'volcano',
     video_resolution: 'gold',
+    minimax_h3: 'magenta',
     kling_video: 'purple',
     vidu_video: 'cyan',
     vidu_image: 'green',

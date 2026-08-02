@@ -19,8 +19,21 @@ RUN echo 'map $http_x_forwarded_proto $forwarded_proto { \
     server { \
     listen 80; \
     client_max_body_size 512m; \
-    proxy_next_upstream error; \
-    # 门户路径代理到后端
+    proxy_next_upstream off; \
+    # /home/models、/models 由 React SPA 渲染（含查询参数刷新也回 index.html）
+    location ^~ /home/models { \
+    root /usr/share/nginx/html; \
+    try_files $uri /index.html; \
+    } \
+    location ^~ /models { \
+    root /usr/share/nginx/html; \
+    try_files $uri /index.html; \
+    } \
+    location /home-pro/docs { \
+    root /usr/share/nginx/html; \
+    try_files $uri /index.html; \
+    } \
+    # 其余门户路径代理到后端
     location /home { \
     proxy_pass http://backend:3000; \
     proxy_set_header Host $host; \

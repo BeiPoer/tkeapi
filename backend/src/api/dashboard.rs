@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -418,7 +418,7 @@ async fn calculate_dashboard_stats(
         q.fetch_all(&state.db.pool).await?
     };
 
-    // 与日志列表一致：仪表盘最近活动不带回大字段；非管理员再清 cascade 密钥
+    // 与日志列表一致：仪表盘最近活动不带回大字段；非管理员走同一套响应脱敏
     let mut recent_logs = recent_logs;
     for log in &mut recent_logs {
         log.request_content = None;
@@ -426,11 +426,7 @@ async fn calculate_dashboard_stats(
         log.upstream_req_content = None;
         log.post_response = None;
         if !is_admin {
-            crate::relay::cascade::cascade_scrub_plugin_tag_for_user(&mut log.plugin_tag);
-            log.channel_id = None;
-            log.channel_name = None;
-            log.sub_channel_name = None;
-            log.channel_group_aid = None;
+            crate::api::logs::redact_request_log_for_user(log);
         }
     }
 
@@ -453,14 +449,9 @@ async fn calculate_dashboard_stats(
 
     let top_10_models: Vec<(String, f64, i64, i64)> = top_models_all.into_iter().take(10).collect();
 
-    // 4.3 模型明细近几日：锚定筛选区间末日（不超过今天），向内取最多 3 个自然日
-    // 无筛选（全部）时退回日历近 3 天，与区间排行口径对齐
+    // 4.3 模型明细近几日：锚定筛选区间末日（≤ 今天）向前固定 3 个自然日（与排行区间解耦）
+    // 排行/进度条仍用上方筛选；明细标签始终给末日近 3 天对照。历史日一次归档查询，当日单独 realtime。
     let detail_days = crate::api::date_helper::model_detail_days(
-        if params.start_date.is_some() {
-            Some(start_naive)
-        } else {
-            None
-        },
         if params.end_date.is_some() {
             Some(end_naive)
         } else {
@@ -469,20 +460,52 @@ async fn calculate_dashboard_stats(
         today_date,
     );
 
-    let mut day_stats_list: Vec<(String, std::collections::HashMap<String, (i64, f64, i64)>)> =
-        Vec::with_capacity(detail_days.len());
-    for day in &detail_days {
-        let date_str = day.format("%Y-%m-%d").to_string();
-        let day_slices =
-            crate::api::date_helper::calculate_query_slices(Some(&date_str), Some(&date_str), tz);
-        let day_stats = crate::relay::usage_stats::query_model_stats_by_slices(
+    let mut stats_by_date: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, (i64, f64, i64)>,
+    > = std::collections::HashMap::new();
+
+    let hist_days: Vec<_> = detail_days
+        .iter()
+        .copied()
+        .filter(|d| *d < today_date)
+        .collect();
+    if let (Some(hist_start), Some(hist_end)) = (hist_days.first(), hist_days.last()) {
+        let hist_map = crate::relay::usage_stats::query_model_daily_stats_history(
             &state.db,
             user_filter,
-            &day_slices,
+            *hist_start,
+            *hist_end,
         )
         .await?;
-        day_stats_list.push((date_str, day_stats));
+        stats_by_date.extend(hist_map);
     }
+
+    if detail_days.iter().any(|d| *d == today_date) {
+        let today_str = today_date.format("%Y-%m-%d").to_string();
+        let today_slices = crate::api::date_helper::calculate_query_slices(
+            Some(&today_str),
+            Some(&today_str),
+            tz,
+        );
+        let today_stats = crate::relay::usage_stats::query_model_stats_by_slices(
+            &state.db,
+            user_filter,
+            &today_slices,
+        )
+        .await?;
+        stats_by_date.insert(today_str, today_stats);
+    }
+
+    let day_stats_list: Vec<(String, std::collections::HashMap<String, (i64, f64, i64)>)> =
+        detail_days
+            .iter()
+            .map(|day| {
+                let date_str = day.format("%Y-%m-%d").to_string();
+                let day_stats = stats_by_date.remove(&date_str).unwrap_or_default();
+                (date_str, day_stats)
+            })
+            .collect();
 
     let mut model_stats = Vec::new();
     for (m_name, m_cost, m_tokens, m_count) in top_10_models {

@@ -6,7 +6,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { Spin, Typography, ConfigProvider, theme } from 'antd';
 import { useTranslation } from 'react-i18next';
 import request from '../../utils/request';
@@ -15,10 +15,21 @@ import { sanitizeHtml } from '../../utils/sanitize';
 const LegalPage: React.FC = () => {
   const { type } = useParams<{ type: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { i18n } = useTranslation();
+  const requestedLanguage = searchParams.get('lang');
+  const legalLanguage = requestedLanguage === 'en' || requestedLanguage === 'zh'
+    ? requestedLanguage
+    : null;
   const [loading, setLoading] = useState(true);
   const [content, setContent] = useState('');
   const [title, setTitle] = useState('');
+
+  useEffect(() => {
+    if (legalLanguage && i18n.language !== legalLanguage) {
+      void i18n.changeLanguage(legalLanguage);
+    }
+  }, [legalLanguage, i18n]);
 
   useEffect(() => {
     if (type !== 'terms' && type !== 'privacy') {
@@ -30,7 +41,7 @@ const LegalPage: React.FC = () => {
       try {
         const response = await (request.get('/settings') as any);
         const agreement = response?.agreement;
-        const isEn = i18n.language && i18n.language.startsWith('en');
+        const isEn = legalLanguage ? legalLanguage === 'en' : Boolean(i18n.language?.startsWith('en'));
         
         if (!agreement) {
           setContent(isEn ? 'No content available' : '暂无内容');
@@ -83,7 +94,7 @@ const LegalPage: React.FC = () => {
     };
 
     fetchLegalContent();
-  }, [type, navigate, i18n.language]);
+  }, [type, navigate, i18n.language, legalLanguage]);
 
   if (loading) {
     return (

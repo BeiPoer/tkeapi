@@ -7,7 +7,9 @@
 
 import { create } from 'zustand';
 import type { AllSettings } from '../types';
+import i18n from '../i18n';
 import request from '../utils/request';
+import { getUserLanguagePreference } from '../utils/language';
 import { useThemeStore } from './theme';
 
 interface SettingsState {
@@ -54,6 +56,21 @@ const applyThemeSettings = (site?: AllSettings['site']) => {
   }
 };
 
+/** 用户手动切换过语言则沿用偏好；否则使用站点默认语言（不写入用户偏好） */
+const applyLanguageSettings = (site?: AllSettings['site']) => {
+  const userLang = getUserLanguagePreference();
+  if (userLang) {
+    if (i18n.language !== userLang) {
+      void i18n.changeLanguage(userLang);
+    }
+    return;
+  }
+  const defaultLang = site?.default_language;
+  if (defaultLang && i18n.language !== defaultLang) {
+    void i18n.changeLanguage(defaultLang);
+  }
+};
+
 const applySiteSettings = (site?: AllSettings['site']) => {
   if (!site) return;
   if (site.title) {
@@ -67,6 +84,7 @@ const applySiteSettings = (site?: AllSettings['site']) => {
   updateMeta('keywords', site.keywords);
   updateMeta('description', site.description);
   applyThemeSettings(site);
+  applyLanguageSettings(site);
 };
 
 // 页面加载时立即使用缓存的站点标题，避免闪烁

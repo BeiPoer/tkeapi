@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -39,6 +39,8 @@ pub struct ApiToken {
     pub last_used_at: Option<DbTs>,
     #[sqlx(default)]
     pub only_playground: i64,
+    #[sqlx(default)]
+    pub only_playground_2026: i64,
     #[sqlx(default)]
     pub high_availability: i32,
     #[sqlx(default)]
@@ -91,13 +93,6 @@ impl ApiToken {
             }
         }
         false
-    }
-
-    pub fn has_quota(&self) -> bool {
-        if self.quota_limit < 0.0 {
-            return true; // Unlimited
-        }
-        self.quota_used < self.quota_limit
     }
 
     pub fn effective_daily_used(&self, now_day: &str) -> f64 {
@@ -171,6 +166,7 @@ pub struct CreateTokenRequest {
     pub rpm_limit: Option<i32>,
     pub expires_at: Option<String>,
     pub only_playground: Option<i64>,
+    pub only_playground_2026: Option<i64>,
     pub high_availability: Option<i32>,
     pub daily_quota_limit: Option<f64>,
     pub weekly_quota_limit: Option<f64>,
@@ -188,6 +184,7 @@ pub struct UpdateTokenRequest {
     pub expires_at: Option<String>,
     pub is_active: Option<i64>,
     pub only_playground: Option<i64>,
+    pub only_playground_2026: Option<i64>,
     pub high_availability: Option<i32>,
     pub daily_quota_limit: Option<f64>,
     pub weekly_quota_limit: Option<f64>,

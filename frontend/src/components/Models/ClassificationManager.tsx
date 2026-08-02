@@ -18,6 +18,7 @@ interface ClassificationItem {
   id: number;
   name: string;
   name_en?: string;
+  sort_order: number;
   is_active: boolean;
   is_system?: number;
   logo?: string;

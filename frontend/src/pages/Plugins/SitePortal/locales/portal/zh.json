@@ -61,7 +61,7 @@
   "contact_phone": "电话",
   "contact_address": "地址",
   "contact_tip": "提示",
-  "contact_tip_desc": "请在管理后台「门户管理 → 栏目管理」中填写联系信息",
+  "contact_tip_desc": "请在管理后台「站点门户 → 门户管理」中配置联系信息",
   "contact_social": "社交媒体",
   "models_filter_tasks": "能力类型",
   "models_filter_providers": "服务商",

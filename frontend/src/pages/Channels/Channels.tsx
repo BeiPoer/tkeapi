@@ -9,7 +9,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import ModelSelector from '../../components/ModelSelector';
 import { Table, Button, Space, Tag, Modal, Form, Input, InputNumber, message, Popconfirm, Card, Typography, Select, Row, Col, Switch, Grid, Segmented, Tooltip, Divider, Alert, List, Progress, Drawer, Checkbox, Spin } from 'antd';
 import MobileCardList, { MobileCard, CardRow, CardActions } from '../../components/MobileCardList';
-import { PlusOutlined, EditOutlined, DeleteOutlined, SyncOutlined, ArrowLeftOutlined, ArrowRightOutlined, CloseOutlined, UnorderedListOutlined, AppstoreOutlined, PlayCircleOutlined, SearchOutlined, ApartmentOutlined, CloudServerOutlined, SettingOutlined, ThunderboltOutlined, ReloadOutlined, GlobalOutlined, ClearOutlined, StopOutlined, CheckCircleOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, DeleteOutlined, SyncOutlined, ArrowLeftOutlined, ArrowRightOutlined, CloseOutlined, UnorderedListOutlined, AppstoreOutlined, PlayCircleOutlined, SearchOutlined, ApartmentOutlined, CloudServerOutlined, SettingOutlined, ThunderboltOutlined, ReloadOutlined, GlobalOutlined, ClearOutlined, StopOutlined, ExperimentOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useLocation } from 'react-router-dom';
 import request from '../../utils/request';
@@ -19,7 +19,10 @@ import { useThemeStore } from '../../store/theme';
 import ChannelCategoryManager from '../../components/Channels/ChannelCategoryManager';
 import {
   parseQuotaLimitInput,
+  formatQuotaLimitDisplay,
   getEffectiveChannelPeriodUsed,
+  validateQuotaHierarchy,
+  isFiniteQuotaLimit,
 } from '../../utils/quotaPeriod';
 
 // ── 插件动态加载（各插件均可独立移除，删除对应目录后自动降级，不影响主功能） ──
@@ -72,6 +75,8 @@ const Channels: React.FC = () => {
   const [isExcludeMode, setIsExcludeMode] = useState(false);
   const [activeRightPanel, setActiveRightPanel] = useState<'models' | 'levels' | 'mapping' | 'presets'>('models');
   const [presetSearchText, setPresetSearchText] = useState('');
+  /** 选择上游渠道 / 高可用绑定物理上游：全部 | 激活 | 禁用 */
+  const [upstreamStatusFilter, setUpstreamStatusFilter] = useState<'all' | 1 | 0>('all');
   const [enableQuota, setEnableQuota] = useState(false);
   const [upstreamTab, setUpstreamTab] = useState<'preset' | 'volcengine_enhance'>('preset');
   const [volcengineEnhanceKeys, setVolcengineEnhanceKeys] = useState<any[]>([]);
@@ -361,6 +366,7 @@ const Channels: React.FC = () => {
     setChannelModelMids([]);
     setActiveRightPanel('models');
     setPresetSearchText('');
+    setUpstreamStatusFilter('all');
     setUpstreamTab('preset');
     setConfigObj({});
     setSelectedSubChannelAids([]);
@@ -416,6 +422,7 @@ const Channels: React.FC = () => {
     setIsExcludeMode(!!record.exclude_user_groups && record.exclude_user_groups.length > 0);
     setActiveRightPanel('models');
     setPresetSearchText('');
+    setUpstreamStatusFilter('all');
     if (record.preset_id) {
       setUpstreamTab('preset');
     } else if (record.provider_type === 'volcengine') {
@@ -644,6 +651,14 @@ const Channels: React.FC = () => {
       monthly_quota_limit: (!enableQuota || values.monthly_quota_limit === undefined || values.monthly_quota_limit === null) ? -1 : Number(values.monthly_quota_limit),
       preset_id,
     };
+    if (enableQuota) {
+      const hierarchyErr = validateQuotaHierarchy(data);
+      if (hierarchyErr) {
+        message.error(hierarchyErr);
+        setSubmitting(false);
+        return;
+      }
+    }
     delete data.level_select;
     data.models = reliableModels;
 
@@ -731,7 +746,7 @@ const Channels: React.FC = () => {
       ),
     },
     {
-      title: '请求优先级',
+      title: '优先级',
       dataIndex: 'priority',
       key: 'priority',
       sorter: (a: Channel, b: Channel) => (a.priority || 0) - (b.priority || 0),
@@ -772,7 +787,7 @@ const Channels: React.FC = () => {
     {
       title: '消耗 / 额度',
       key: 'quota',
-      width: 200,
+      width: 188,
       render: (_: any, record: Channel) => {
         const used = record.quota_used || 0;
         const limit = record.quota_limit ?? -1;
@@ -780,19 +795,16 @@ const Channels: React.FC = () => {
         const weeklyLimit = record.weekly_quota_limit ?? -1;
         const monthlyLimit = record.monthly_quota_limit ?? -1;
         const { dailyUsed, weeklyUsed, monthlyUsed } = getEffectiveChannelPeriodUsed(record, quotaTz);
-        const hasPeriodic = dailyLimit >= 0 || weeklyLimit >= 0 || monthlyLimit >= 0;
-        return (
-          <div style={{ fontSize: 12, lineHeight: 1.6 }}>
-            <div>总: {currencySymbol}{used.toFixed(6)} / {limit < 0 ? '∞' : `${currencySymbol}${Number(limit).toFixed(6)}`}</div>
-            {hasPeriodic && (
-              <>
-                {dailyLimit >= 0 && <div>日: {dailyUsed.toFixed(6)} / {dailyLimit}</div>}
-                {weeklyLimit >= 0 && <div>周: {weeklyUsed.toFixed(6)} / {weeklyLimit}</div>}
-                {monthlyLimit >= 0 && <div>月: {monthlyUsed.toFixed(6)} / {monthlyLimit}</div>}
-              </>
-            )}
-          </div>
-        );
+        return renderQuotaRings({
+          used,
+          limit,
+          dailyUsed,
+          dailyLimit,
+          weeklyUsed,
+          weeklyLimit,
+          monthlyUsed,
+          monthlyLimit,
+        });
       }
     },
     {
@@ -828,9 +840,13 @@ const Channels: React.FC = () => {
         }
         if (record.preset_id) {
           const preset = presets.find(p => p.id === record.preset_id);
+          const presetDisabled = preset && (preset.status ?? 1) !== 1;
           return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-              <Tag color="cyan" style={{ borderRadius: 4, margin: 0, fontSize: 11, width: 'fit-content' }}>预设渠道</Tag>
+              <Space size={4}>
+                <Tag color="cyan" style={{ borderRadius: 4, margin: 0, fontSize: 11, width: 'fit-content' }}>预设渠道</Tag>
+                {presetDisabled && <Tag color="error" style={{ borderRadius: 4, margin: 0, fontSize: 11 }}>上游已禁用</Tag>}
+              </Space>
               <Text strong style={{ fontSize: 13 }}>{preset ? preset.name : '未知预设'}</Text>
               <Text type="secondary" style={{ fontSize: 11 }}>
                 {preset?.yid ? `YID: ${preset.yid}` : `ID: ${record.preset_id}`}
@@ -879,13 +895,13 @@ const Channels: React.FC = () => {
       align: 'center' as const,
       render: (_: unknown, record: Channel) => (
         <Space size={0} style={{ opacity: 0.8, justifyContent: 'center', width: '100%' }}>
-          <Tooltip title={record.status === 1 ? '禁用' : '启用'}>
+          <Tooltip title={record.status === 1 ? '点击禁用' : '点击启用'}>
             <Button
               type="text"
               size="small"
               icon={record.status === 1
-                ? <StopOutlined style={{ color: '#ff4d4f' }} />
-                : <CheckCircleOutlined style={{ color: '#52c41a' }} />}
+                ? <PlayCircleOutlined style={{ color: '#52c41a' }} />
+                : <StopOutlined style={{ color: '#ff4d4f' }} />}
               onClick={() => handleToggleStatus(record)}
             />
           </Tooltip>
@@ -904,7 +920,7 @@ const Channels: React.FC = () => {
             <Button
               type="text"
               size="small"
-              icon={<PlayCircleOutlined />}
+              icon={<ExperimentOutlined />}
               onClick={() => handleTest(record)}
             />
           </Tooltip>
@@ -926,17 +942,18 @@ const Channels: React.FC = () => {
     },
   ];
 
-  /** 仪表盘卡片：仅展示已配置限额的圆环 */
+  /** 额度圆环：与上游渠道配置预设一致（总/月/周/日固定位、蓝阶、100% 红） */
   const quotaRingPercent = (used: number, limit: number) => {
     if (limit < 0) return 0;
     if (limit === 0) return used > 0 ? 100 : 0;
     return Math.min(100, Math.round((used / limit) * 100));
   };
 
-  const quotaRingStroke = (pct: number) => {
-    if (pct >= 90) return '#ff4d4f';
-    if (pct >= 70) return '#faad14';
-    return isLight ? '#1677ff' : '#69b1ff';
+  const quotaRingBlue: Record<string, string> = {
+    total: '#1d4ed8',
+    month: '#2563eb',
+    week: '#3b82f6',
+    day: '#60a5fa',
   };
 
   const renderQuotaRings = (opts: {
@@ -949,63 +966,87 @@ const Channels: React.FC = () => {
     monthlyUsed: number;
     monthlyLimit: number;
   }) => {
+    const fmt = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(6));
     const items = [
       { key: 'total', label: '总', used: opts.used, limit: opts.limit },
-      { key: 'day', label: '日', used: opts.dailyUsed, limit: opts.dailyLimit },
-      { key: 'week', label: '周', used: opts.weeklyUsed, limit: opts.weeklyLimit },
       { key: 'month', label: '月', used: opts.monthlyUsed, limit: opts.monthlyLimit },
-    ].filter((item) => item.limit >= 0);
+      { key: 'week', label: '周', used: opts.weeklyUsed, limit: opts.weeklyLimit },
+      { key: 'day', label: '日', used: opts.dailyUsed, limit: opts.dailyLimit },
+    ];
+    const hasAnyConfigured = items.some((item) => item.limit >= 0);
 
-    if (items.length === 0) return null;
-
-    const tip = (label: string, used: number, limit: number) =>
-      `${label}：${used.toFixed(6)} / ${Number(limit).toFixed(6)}`;
+    const slotStyle: React.CSSProperties = {
+      width: 40,
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: 2,
+      cursor: 'default',
+    };
+    const labelStyle: React.CSSProperties = {
+      fontSize: 10,
+      color: isLight ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.45)',
+      lineHeight: 1,
+    };
 
     return (
       <div
         className="channel-quota-rings"
         style={{
           display: 'grid',
-          gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))`,
-          gap: 2,
+          gridTemplateColumns: 'repeat(4, 40px)',
+          gap: 4,
           alignItems: 'center',
-          marginTop: 2,
+          justifyContent: 'start',
+          width: 172,
         }}
       >
-        {items.map((item) => {
-          const pct = quotaRingPercent(item.used, item.limit);
+        {items.map((item, index) => {
+          const configured = item.limit >= 0;
+          const showUnlimited = !hasAnyConfigured && index === 0;
+          const showRing = configured || showUnlimited;
+
+          if (!showRing) {
+            return (
+              <div key={item.key} style={{ ...slotStyle, visibility: 'hidden' }} aria-hidden>
+                <div style={{ width: 36, height: 36 }} />
+                <span style={labelStyle}>{item.label}</span>
+              </div>
+            );
+          }
+
+          const pct = configured ? quotaRingPercent(item.used, item.limit) : 0;
+          const tip = showUnlimited
+            ? `额度：${currencySymbol}${fmt(item.used)} / ∞（无限）`
+            : `${item.label}额度：${currencySymbol}${fmt(item.used)} / ${currencySymbol}${fmt(Number(item.limit))}（${pct}%）`;
+          const stroke = showUnlimited
+            ? (isLight ? '#a1a1aa' : 'rgba(255,255,255,0.28)')
+            : (pct >= 100 ? '#ef4444' : (quotaRingBlue[item.key] || '#3b82f6'));
+
           return (
-            <Tooltip key={item.key} title={tip(item.label, item.used, item.limit)}>
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, cursor: 'default' }}>
+            <Tooltip key={item.key} title={tip}>
+              <div style={slotStyle}>
                 <Progress
                   type="circle"
-                  percent={pct}
+                  percent={showUnlimited ? 100 : pct}
                   size={36}
                   strokeWidth={10}
-                  strokeColor={quotaRingStroke(pct)}
-                  trailColor={isLight ? '#eceef2' : 'rgba(255,255,255,0.1)'}
+                  strokeColor={stroke}
+                  trailColor={isLight ? '#e4e4e7' : 'rgba(255,255,255,0.12)'}
                   format={() => (
                     <span
                       style={{
-                        fontSize: 10,
+                        fontSize: showUnlimited ? 11 : 10,
                         fontWeight: 600,
                         color: isLight ? 'rgba(0,0,0,0.72)' : 'rgba(255,255,255,0.88)',
                         lineHeight: 1,
                       }}
                     >
-                      {pct}%
+                      {showUnlimited ? '∞' : `${pct}%`}
                     </span>
                   )}
                 />
-                <span
-                  style={{
-                    fontSize: 10,
-                    color: isLight ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.4)',
-                    lineHeight: 1,
-                  }}
-                >
-                  {item.label}
-                </span>
+                <span style={labelStyle}>{showUnlimited ? '无限' : item.label}</span>
               </div>
             </Tooltip>
           );
@@ -1074,7 +1115,7 @@ const Channels: React.FC = () => {
       {!isModalVisible ? (
         <div style={{ width: '100%' }}>
           <div style={{ display: 'flex', flexDirection: screens.xs ? 'column' : 'row', justifyContent: 'space-between', marginBottom: 24, gap: 12 }}>
-            <Title level={screens.xs ? 4 : 2} style={{ margin: 0 }}>{t('channels.title')}</Title>
+            <Title level={4} style={{ margin: 0, fontSize: screens.xs ? 18 : 20, fontWeight: 600 }}>{t('channels.title')}</Title>
             <Space wrap>
               <Segmented
                 options={[
@@ -1236,7 +1277,6 @@ const Channels: React.FC = () => {
                 const weeklyLimit = record.weekly_quota_limit ?? -1;
                 const monthlyLimit = record.monthly_quota_limit ?? -1;
                 const { dailyUsed, weeklyUsed, monthlyUsed } = getEffectiveChannelPeriodUsed(record, quotaTz);
-                const hasPeriodic = dailyLimit >= 0 || weeklyLimit >= 0 || monthlyLimit >= 0;
                 const groups = record.user_groups;
                 const excludeGroups = record.exclude_user_groups;
                 return (
@@ -1271,18 +1311,16 @@ const Channels: React.FC = () => {
                       )}
                     </CardRow>
                     <CardRow label="已用/额度">
-                      <div style={{ fontSize: 12, lineHeight: 1.6, textAlign: 'right' }}>
-                        <div>
-                          总: {currencySymbol}{used.toFixed(6)} / {limit < 0 ? '∞' : `${currencySymbol}${Number(limit).toFixed(6)}`}
-                        </div>
-                        {hasPeriodic && (
-                          <>
-                            {dailyLimit >= 0 && <div>日: {dailyUsed.toFixed(6)} / {Number(dailyLimit).toFixed(6)}</div>}
-                            {weeklyLimit >= 0 && <div>周: {weeklyUsed.toFixed(6)} / {Number(weeklyLimit).toFixed(6)}</div>}
-                            {monthlyLimit >= 0 && <div>月: {monthlyUsed.toFixed(6)} / {Number(monthlyLimit).toFixed(6)}</div>}
-                          </>
-                        )}
-                      </div>
+                      {renderQuotaRings({
+                        used,
+                        limit,
+                        dailyUsed,
+                        dailyLimit,
+                        weeklyUsed,
+                        weeklyLimit,
+                        monthlyUsed,
+                        monthlyLimit,
+                      })}
                     </CardRow>
                     <CardRow label="使用上游">
                       {record.provider_type === 'high_availability_group' ? (
@@ -1315,9 +1353,11 @@ const Channels: React.FC = () => {
                       ) : record.preset_id ? (
                         (() => {
                           const preset = presets.find(p => p.id === record.preset_id);
+                          const presetDisabled = preset && (preset.status ?? 1) !== 1;
                           return (
-                            <Space size={4}>
+                            <Space size={4} wrap>
                               <Tag color="cyan" style={{ borderRadius: 4, margin: 0, fontSize: 10 }}>预设</Tag>
+                              {presetDisabled && <Tag color="error" style={{ borderRadius: 4, margin: 0, fontSize: 10 }}>上游已禁用</Tag>}
                               <Text style={{ fontSize: 12 }}>
                                 {preset?.name || '未知预设'} ({preset?.yid ? `YID: ${preset.yid}` : `ID: ${record.preset_id}`})
                               </Text>
@@ -1338,7 +1378,7 @@ const Channels: React.FC = () => {
                         <Text type="secondary">-</Text>
                       )}
                     </CardRow>
-                    <CardRow label="请求优先级">
+                    <CardRow label="优先级">
                       <Text type="secondary">{record.priority || 0}</Text>
                     </CardRow>
 
@@ -1405,13 +1445,13 @@ const Channels: React.FC = () => {
                     })()}
 
                     <CardActions>
-                      <Tooltip title={record.status === 1 ? '禁用' : '启用'}>
+                      <Tooltip title={record.status === 1 ? '点击禁用' : '点击启用'}>
                         <Button
                           type="text"
                           size="small"
                           icon={record.status === 1
-                            ? <StopOutlined style={{ color: '#ff4d4f' }} />
-                            : <CheckCircleOutlined style={{ color: '#52c41a' }} />}
+                            ? <PlayCircleOutlined style={{ color: '#52c41a' }} />
+                            : <StopOutlined style={{ color: '#ff4d4f' }} />}
                           onClick={() => handleToggleStatus(record)}
                         />
                       </Tooltip>
@@ -1427,7 +1467,7 @@ const Channels: React.FC = () => {
                         </Tooltip>
                       )}
                       <Tooltip title="测试">
-                        <Button type="text" size="small" icon={<PlayCircleOutlined />} onClick={() => handleTest(record)} />
+                        <Button type="text" size="small" icon={<ExperimentOutlined />} onClick={() => handleTest(record)} />
                       </Tooltip>
                       <Tooltip title="清零额度">
                         <Popconfirm title="确定清零该渠道的总/日/周/月已用额度吗？" onConfirm={() => handleResetQuota(record.id)}>
@@ -1524,9 +1564,12 @@ const Channels: React.FC = () => {
                   );
                 } else if (record.preset_id) {
                   const preset = presets.find(p => p.id === record.preset_id);
+                  const presetDisabled = preset && (preset.status ?? 1) !== 1;
                   upstreamTag = (
-                    <Tooltip title={preset ? `预设: ${preset.name} (YID: ${preset.yid || '无'})` : '未知预设'}>
-                      <Tag color="cyan" style={{ margin: 0, padding: '0 5px', fontSize: 10, lineHeight: '18px', borderRadius: 4 }}>预设</Tag>
+                    <Tooltip title={preset ? `预设: ${preset.name} (YID: ${preset.yid || '无'})${presetDisabled ? ' · 已禁用' : ''}` : '未知预设'}>
+                      <Tag color={presetDisabled ? 'error' : 'cyan'} style={{ margin: 0, padding: '0 5px', fontSize: 10, lineHeight: '18px', borderRadius: 4 }}>
+                        {presetDisabled ? '上游已禁用' : '预设'}
+                      </Tag>
                     </Tooltip>
                   );
                 }
@@ -1739,7 +1782,7 @@ const Channels: React.FC = () => {
                               className="channel-dash-action-btn"
                               type="text"
                               size="small"
-                              icon={<PlayCircleOutlined style={{ fontSize: 12 }} />}
+                              icon={<ExperimentOutlined style={{ fontSize: 12 }} />}
                               onClick={() => handleTest(record)}
                             />
                           </Tooltip>
@@ -1787,7 +1830,14 @@ const Channels: React.FC = () => {
                 {/* 左侧基本配置栏 */}
                 <Col xs={24} md={10} xl={10}>
                   <div style={{ padding: 16, background: isLight ? '#f9fafb' : 'rgba(255,255,255,0.04)', borderRadius: 8, height: '100%', position: 'sticky', top: 24 }}>
-                    <Form.Item name="name" label={<Text strong>{t('channels.name')}</Text>} rules={[{ required: true }]}>
+                    <Form.Item name="name" label={
+                      <Space>
+                        <Text strong>{t('channels.name')}</Text>
+                        {editingChannel?.group_aid && (
+                          <Text type="secondary" style={{ fontSize: 12 }}>AID: {editingChannel.group_aid}</Text>
+                        )}
+                      </Space>
+                    } rules={[{ required: true }]}>
                       <Input placeholder="e.g. OpenAI Primary" />
                     </Form.Item>
 
@@ -1859,7 +1909,12 @@ const Channels: React.FC = () => {
                           displayName = preset ? preset.name : '未知预设';
                           displayDetail = preset?.yid ? `YID: ${preset.yid}` : `ID: ${currentPreset}`;
                           if (preset) {
-                            displayRate = <Tag color="orange" style={{ margin: 0, borderRadius: 4, fontSize: 10, padding: '0 4px', lineHeight: '18px', border: 'none' }}>倍率: {preset.rate ?? 1.0}x</Tag>;
+                            displayRate = (
+                              <Space size={4}>
+                                {(preset.status ?? 1) !== 1 && <Tag color="error" style={{ margin: 0, borderRadius: 4, fontSize: 10, padding: '0 4px', lineHeight: '18px', border: 'none' }}>已禁用</Tag>}
+                                <Tag color="orange" style={{ margin: 0, borderRadius: 4, fontSize: 10, padding: '0 4px', lineHeight: '18px', border: 'none' }}>倍率: {preset.rate ?? 1.0}x</Tag>
+                              </Space>
+                            );
                           }
                         } else if (providerType === 'volcengine') {
                           displayType = '画质增强';
@@ -1944,21 +1999,40 @@ const Channels: React.FC = () => {
                                             padding: '4px 8px', 
                                             background: isLight ? 'rgba(0,0,0,0.015)' : 'rgba(255,255,255,0.015)', 
                                             borderRadius: 4,
-                                            border: isLight ? '1px dashed rgba(0,0,0,0.06)' : '1px dashed rgba(255,255,255,0.06)'
+                                            border: isLight ? '1px dashed rgba(0,0,0,0.06)' : '1px dashed rgba(255,255,255,0.06)',
+                                            opacity: (p.status ?? 1) !== 1 ? 0.75 : 1,
                                           }}
                                         >
-                                          <div style={{ display: 'flex', alignItems: 'center', overflow: 'hidden', maxWidth: '50%' }}>
+                                          <div style={{ display: 'flex', alignItems: 'center', overflow: 'hidden', maxWidth: '45%' }}>
                                             <span style={{ fontSize: 11, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.name}>
                                               {p.name}
                                             </span>
                                             {p.yid && (
                                               <Typography.Text keyboard style={{ color: '#1677ff', fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '14px', marginLeft: 6, flexShrink: 0 }}>YID: {p.yid}</Typography.Text>
                                             )}
+                                            {(p.status ?? 1) !== 1 && (
+                                              <Tag color="error" style={{ margin: '0 0 0 6px', fontSize: 10, lineHeight: '14px', height: 16, padding: '0 4px', borderRadius: 2, flexShrink: 0 }}>已禁用</Tag>
+                                            )}
                                           </div>
-                                          <Space size={4} style={{ flexShrink: 0 }}>
+                                          <Space size={4} style={{ flexShrink: 0, alignItems: 'center' }}>
                                             <Tag color="orange" style={{ margin: 0, fontSize: 10, lineHeight: '14px', height: 16, padding: '0 4px', borderRadius: 2 }}>倍率: {p.rate ?? 1.0}x</Tag>
-                                            <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '14px', height: 16, padding: '0 4px', borderRadius: 2 }}>请求优先级: {(p as any).priority ?? 0}</Tag>
-                                            <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '14px', height: 16, padding: '0 4px', borderRadius: 2 }}>请求权重: {(p as any).weight ?? 1}</Tag>
+                                            <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '14px', height: 16, padding: '0 4px', borderRadius: 2 }}>优先级: {(p as any).priority ?? 0}</Tag>
+                                            <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '14px', height: 16, padding: '0 4px', borderRadius: 2 }}>权重: {(p as any).weight ?? 1}</Tag>
+                                            <Tooltip title="移除该上游">
+                                              <Button
+                                                type="text"
+                                                size="small"
+                                                danger
+                                                icon={<CloseOutlined style={{ fontSize: 10 }} />}
+                                                style={{ width: 20, height: 20, minWidth: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: 0 }}
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  const next = selectedSubChannelAids.filter((id: number) => id !== p.id);
+                                                  setSelectedSubChannelAids(next);
+                                                  setConfigObj(prev => ({ ...prev, sub_channels: next }));
+                                                }}
+                                              />
+                                            </Tooltip>
                                           </Space>
                                         </div>
                                       ))
@@ -2175,7 +2249,7 @@ const Channels: React.FC = () => {
                       <Text strong style={{ display: 'block', marginBottom: 12 }}>调度策略</Text>
                       <Row gutter={12}>
                         <Col span={12}>
-                          <Form.Item name="priority" label="请求优先级" initialValue={0}>
+                          <Form.Item name="priority" label="优先级" initialValue={0}>
                             <InputNumber style={{ width: '100%' }} />
                           </Form.Item>
                         </Col>
@@ -2212,48 +2286,133 @@ const Channels: React.FC = () => {
                           </Form.Item>
                         </Col>
                         {enableQuota && (
-                          <>
-                            <Col span={12}>
-                              <Form.Item name="quota_limit" label="总额度" initialValue={-1} extra="-1 表示无限额">
-                                <InputNumber 
-                                  min={-1} 
-                                  style={{ width: '100%' }} 
-                                  formatter={(val) => (val === -1 || String(val) === '-1') ? '无限额' : `${val}`}
-                                  parser={parseQuotaLimitInput}
-                                />
-                              </Form.Item>
-                            </Col>
-                            <Col span={12}>
-                              <Form.Item name="daily_quota_limit" label="日额度" initialValue={-1} extra="-1 表示不限制">
-                                <InputNumber
-                                  min={-1}
-                                  style={{ width: '100%' }}
-                                  formatter={(val) => (val === -1 || String(val) === '-1') ? '不限制' : `${val}`}
-                                  parser={parseQuotaLimitInput}
-                                />
-                              </Form.Item>
-                            </Col>
-                            <Col span={12}>
-                              <Form.Item name="weekly_quota_limit" label="周额度" initialValue={-1} extra="-1 表示不限制">
-                                <InputNumber
-                                  min={-1}
-                                  style={{ width: '100%' }}
-                                  formatter={(val) => (val === -1 || String(val) === '-1') ? '不限制' : `${val}`}
-                                  parser={parseQuotaLimitInput}
-                                />
-                              </Form.Item>
-                            </Col>
-                            <Col span={12}>
-                              <Form.Item name="monthly_quota_limit" label="月额度" initialValue={-1} extra="-1 表示不限制">
-                                <InputNumber
-                                  min={-1}
-                                  style={{ width: '100%' }}
-                                  formatter={(val) => (val === -1 || String(val) === '-1') ? '不限制' : `${val}`}
-                                  parser={parseQuotaLimitInput}
-                                />
-                              </Form.Item>
-                            </Col>
-                          </>
+                          <Col span={24}>
+                            <Form.Item
+                              noStyle
+                              shouldUpdate={(prev, curr) =>
+                                prev.quota_limit !== curr.quota_limit ||
+                                prev.daily_quota_limit !== curr.daily_quota_limit ||
+                                prev.weekly_quota_limit !== curr.weekly_quota_limit ||
+                                prev.monthly_quota_limit !== curr.monthly_quota_limit
+                              }
+                            >
+                              {() => {
+                                const quotaDeps = ['quota_limit', 'daily_quota_limit', 'weekly_quota_limit', 'monthly_quota_limit'] as const;
+                                const fieldValidator = (field: typeof quotaDeps[number]) => ({
+                                  validator: async (_: unknown, value: number | null) => {
+                                    if (value != null && Number(value) < -1) {
+                                      throw new Error('额度不能小于 -1');
+                                    }
+                                    const latest = {
+                                      ...form.getFieldsValue([...quotaDeps]),
+                                      [field]: value,
+                                    };
+                                    const total = latest.quota_limit;
+                                    const day = latest.daily_quota_limit;
+                                    const week = latest.weekly_quota_limit;
+                                    const month = latest.monthly_quota_limit;
+
+                                    const fail = (msg: string) => {
+                                      throw new Error(msg);
+                                    };
+
+                                    if (field === 'daily_quota_limit' && isFiniteQuotaLimit(day)) {
+                                      if (isFiniteQuotaLimit(week) && day > week) fail('日额度不能大于周额度');
+                                      if (isFiniteQuotaLimit(month) && day > month) fail('日额度不能大于月额度');
+                                      if (isFiniteQuotaLimit(total) && day > total) fail('日额度不能大于总额度');
+                                    }
+                                    if (field === 'weekly_quota_limit' && isFiniteQuotaLimit(week)) {
+                                      if (isFiniteQuotaLimit(month) && week > month) fail('周额度不能大于月额度');
+                                      if (isFiniteQuotaLimit(total) && week > total) fail('周额度不能大于总额度');
+                                      if (isFiniteQuotaLimit(day) && day > week) fail('周额度不能小于日额度');
+                                    }
+                                    if (field === 'monthly_quota_limit' && isFiniteQuotaLimit(month)) {
+                                      if (isFiniteQuotaLimit(total) && month > total) fail('月额度不能大于总额度');
+                                      if (isFiniteQuotaLimit(week) && week > month) fail('月额度不能小于周额度');
+                                      if (isFiniteQuotaLimit(day) && day > month) fail('月额度不能小于日额度');
+                                    }
+                                    if (field === 'quota_limit' && isFiniteQuotaLimit(total)) {
+                                      if (isFiniteQuotaLimit(month) && month > total) fail('总额度不能小于月额度');
+                                      if (isFiniteQuotaLimit(week) && week > total) fail('总额度不能小于周额度');
+                                      if (isFiniteQuotaLimit(day) && day > total) fail('总额度不能小于日额度');
+                                    }
+                                  },
+                                });
+                                return (
+                                  <Row gutter={12}>
+                                    <Col span={12}>
+                                      <Form.Item
+                                        name="quota_limit"
+                                        label="总额度"
+                                        initialValue={-1}
+                                        dependencies={quotaDeps as unknown as string[]}
+                                        validateTrigger={['onChange', 'onBlur']}
+                                        rules={[fieldValidator('quota_limit')]}
+                                      >
+                                        <InputNumber
+                                          min={-1}
+                                          style={{ width: '100%' }}
+                                          formatter={formatQuotaLimitDisplay}
+                                          parser={parseQuotaLimitInput}
+                                        />
+                                      </Form.Item>
+                                    </Col>
+                                    <Col span={12}>
+                                      <Form.Item
+                                        name="monthly_quota_limit"
+                                        label="月额度"
+                                        initialValue={-1}
+                                        dependencies={quotaDeps as unknown as string[]}
+                                        validateTrigger={['onChange', 'onBlur']}
+                                        rules={[fieldValidator('monthly_quota_limit')]}
+                                      >
+                                        <InputNumber
+                                          min={-1}
+                                          style={{ width: '100%' }}
+                                          formatter={formatQuotaLimitDisplay}
+                                          parser={parseQuotaLimitInput}
+                                        />
+                                      </Form.Item>
+                                    </Col>
+                                    <Col span={12}>
+                                      <Form.Item
+                                        name="weekly_quota_limit"
+                                        label="周额度"
+                                        initialValue={-1}
+                                        dependencies={quotaDeps as unknown as string[]}
+                                        validateTrigger={['onChange', 'onBlur']}
+                                        rules={[fieldValidator('weekly_quota_limit')]}
+                                      >
+                                        <InputNumber
+                                          min={-1}
+                                          style={{ width: '100%' }}
+                                          formatter={formatQuotaLimitDisplay}
+                                          parser={parseQuotaLimitInput}
+                                        />
+                                      </Form.Item>
+                                    </Col>
+                                    <Col span={12}>
+                                      <Form.Item
+                                        name="daily_quota_limit"
+                                        label="日额度"
+                                        initialValue={-1}
+                                        dependencies={quotaDeps as unknown as string[]}
+                                        validateTrigger={['onChange', 'onBlur']}
+                                        rules={[fieldValidator('daily_quota_limit')]}
+                                      >
+                                        <InputNumber
+                                          min={-1}
+                                          style={{ width: '100%' }}
+                                          formatter={formatQuotaLimitDisplay}
+                                          parser={parseQuotaLimitInput}
+                                        />
+                                      </Form.Item>
+                                    </Col>
+                                  </Row>
+                                );
+                              }}
+                            </Form.Item>
+                          </Col>
                         )}
                       </Row>
                       <Form.Item name="rate" initialValue={1.0} style={{ display: 'none' }}><InputNumber /></Form.Item>
@@ -2410,42 +2569,93 @@ const Channels: React.FC = () => {
                           const currentPreset = form.getFieldValue('preset_id');
 
                           if (providerType === 'high_availability_group') {
-                            const subCandidates = presets.filter(p => 
-                              p.id !== -99 && 
-                              (
-                                p.name?.toLowerCase().includes(presetSearchText.toLowerCase()) || 
-                                p.provider_type?.toLowerCase().includes(presetSearchText.toLowerCase()) ||
-                                String(p.id).includes(presetSearchText)
-                              )
+                            const matchPresetSearch = (p: any) =>
+                              p.name?.toLowerCase().includes(presetSearchText.toLowerCase()) ||
+                              p.provider_type?.toLowerCase().includes(presetSearchText.toLowerCase()) ||
+                              String(p.id).includes(presetSearchText) ||
+                              (p.yid && String(p.yid).includes(presetSearchText));
+                            const searchedPresets = presets.filter(p => p.id !== -99 && matchPresetSearch(p));
+                            const statusCounts = {
+                              all: searchedPresets.length,
+                              active: searchedPresets.filter(p => (p.status ?? 1) === 1).length,
+                              disabled: searchedPresets.filter(p => (p.status ?? 1) !== 1).length,
+                            };
+                            const subCandidates = searchedPresets.filter(p =>
+                              upstreamStatusFilter === 'all' || (p.status ?? 1) === upstreamStatusFilter
                             );
 
                             return (
                               <>
-                                {/* 搜索框 */}
-                                <div style={{ marginBottom: 10 }}>
+                                {/* 搜索 + 状态筛选 */}
+                                <div style={{ marginBottom: 10, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                                   <Input
                                     placeholder="输入关键字搜索上游渠道配置名称、类型或 YID/ID..."
                                     allowClear
                                     prefix={<SearchOutlined style={{ color: 'var(--text-secondary)' }} />}
                                     value={presetSearchText}
                                     onChange={(e) => setPresetSearchText(e.target.value)}
+                                    style={{ flex: 1, minWidth: 200 }}
+                                  />
+                                  <Segmented
+                                    size="small"
+                                    options={[
+                                      { label: `全部 (${statusCounts.all})`, value: 'all' },
+                                      { label: `激活 (${statusCounts.active})`, value: '1' },
+                                      { label: `禁用 (${statusCounts.disabled})`, value: '0' },
+                                    ]}
+                                    value={upstreamStatusFilter === 'all' ? 'all' : String(upstreamStatusFilter)}
+                                    onChange={(val) => setUpstreamStatusFilter(val === 'all' ? 'all' : parseInt(val as string, 10) as 0 | 1)}
                                   />
                                 </div>
 
-                                <div style={{ marginBottom: 10 }}>
+                                <div style={{ marginBottom: 8 }}>
                                   <Alert
                                     message="高可用上游多选绑定"
-                                    description={`您可以选择最多 ${haMaxRetries} 个上游配置绑定到该虚拟组。系统优先使用「请求优先级priority」最高的一组渠道；若最高优先级渠道有多个，则按它们各自的「请求权重weight」比例随机分流。选满 ${haMaxRetries} 个后，其余配置将被置灰。`}
+                                    description={`您可以选择最多 ${haMaxRetries} 个上游配置绑定到该虚拟组（禁用渠道也可选，绑定后运行时不可用）。系统优先使用「优先级priority」最高的一组渠道；若最高优先级渠道有多个，则按它们各自的「权重weight」比例随机分流。选满 ${haMaxRetries} 个后，其余配置将被置灰。`}
                                     type="info"
                                     showIcon
-                                    style={{ borderRadius: 6 }}
+                                    style={{ borderRadius: 6, padding: '6px 10px' }}
+                                    styles={{
+                                      icon: { marginInlineEnd: 8, fontSize: 14, marginTop: 1 },
+                                      title: { marginBottom: 2, fontSize: 13, lineHeight: 1.3 },
+                                      description: { fontSize: 12, lineHeight: 1.45 },
+                                    }}
                                   />
                                 </div>
 
-                                <div style={{ marginBottom: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <div style={{ marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                                   <Text strong>
                                     绑定物理上游 ({selectedSubChannelAids.length} / {haMaxRetries})
                                   </Text>
+                                  <Button
+                                    size="small"
+                                    disabled={subCandidates.length === 0}
+                                    onClick={() => {
+                                      const eligibleIds = subCandidates.map(c => c.id);
+                                      if (eligibleIds.length === 0) {
+                                        message.warning('当前列表没有可绑定的上游配置');
+                                        return;
+                                      }
+                                      const next = eligibleIds.slice(0, haMaxRetries);
+                                      setSelectedSubChannelAids(next);
+                                      setConfigObj(prev => ({ ...prev, sub_channels: next }));
+                                      if (eligibleIds.length > haMaxRetries) {
+                                        message.info(`已按上限选中 ${haMaxRetries} 个上游配置`);
+                                      }
+                                    }}
+                                  >
+                                    全选
+                                  </Button>
+                                  <Button
+                                    size="small"
+                                    disabled={selectedSubChannelAids.length === 0}
+                                    onClick={() => {
+                                      setSelectedSubChannelAids([]);
+                                      setConfigObj(prev => ({ ...prev, sub_channels: [] }));
+                                    }}
+                                  >
+                                    取消选择
+                                  </Button>
                                   {selectedSubChannelAids.length === 0 && (
                                     <span style={{ color: '#ff4d4f', fontSize: 12, fontWeight: 500 }}>
                                       请至少绑定一个上游配置
@@ -2471,7 +2681,8 @@ const Channels: React.FC = () => {
                                         const aid = c.id;
                                         const isChecked = selectedSubChannelAids.includes(aid);
                                         const isFull = selectedSubChannelAids.length >= haMaxRetries;
-                                        const isDisabled = isFull && !isChecked;
+                                        const isConfigDisabled = (c.status ?? 1) !== 1;
+                                        const isSlotFull = isFull && !isChecked;
 
                                         return (
                                           <div 
@@ -2484,13 +2695,13 @@ const Channels: React.FC = () => {
                                               borderRadius: 6,
                                               background: isChecked ? (isLight ? 'rgba(22,119,255,0.08)' : 'rgba(22,119,255,0.15)') : 'transparent',
                                               border: isChecked ? '1px solid #91caff' : (isLight ? '1px solid #e5e4e7' : '1px solid rgba(255,255,255,0.08)'),
-                                              opacity: isDisabled ? 0.5 : 1,
+                                              opacity: isSlotFull ? 0.5 : (isConfigDisabled ? 0.75 : 1),
                                               transition: 'all 0.15s'
                                             }}
                                           >
                                             <Checkbox
                                               checked={isChecked}
-                                              disabled={isDisabled}
+                                              disabled={isSlotFull}
                                               onChange={(e) => {
                                                 let next = [...selectedSubChannelAids];
                                                 if (e.target.checked) {
@@ -2508,11 +2719,14 @@ const Channels: React.FC = () => {
                                                 {c.provider_type ? `(${c.provider_type})` : ''}
                                               </span>
                                               <Typography.Text keyboard style={{ color: '#1677ff', fontSize: 11, marginLeft: 8 }}>YID: {c.yid || '-'}</Typography.Text>
+                                              {isConfigDisabled && (
+                                                <Tag color="error" style={{ margin: '0 0 0 8px', fontSize: 11 }}>已禁用</Tag>
+                                              )}
                                             </Checkbox>
                                             <Space size={4}>
                                                <Tag color="orange" style={{ margin: 0, fontSize: 11, borderRadius: 4 }}>倍率: {c.rate ?? 1.0}x</Tag>
-                                               <Tag color="blue" style={{ margin: 0, fontSize: 11, borderRadius: 4 }}>请求优先级: {(c as any).priority ?? 0}</Tag>
-                                               <Tag color="cyan" style={{ margin: 0, fontSize: 11, borderRadius: 4 }}>请求权重: {(c as any).weight ?? 1}</Tag>
+                                               <Tag color="blue" style={{ margin: 0, fontSize: 11, borderRadius: 4 }}>优先级: {(c as any).priority ?? 0}</Tag>
+                                               <Tag color="cyan" style={{ margin: 0, fontSize: 11, borderRadius: 4 }}>权重: {(c as any).weight ?? 1}</Tag>
                                             </Space>
                                           </div>
                                         );
@@ -2525,13 +2739,22 @@ const Channels: React.FC = () => {
                           }
 
                           let items: any[] = [];
+                          let statusCounts = { all: 0, active: 0, disabled: 0 };
                           if (upstreamTab === 'preset') {
-                            items = presets.filter(p => p.id !== -99 && p.provider_type !== 'high_availability_group' && (
+                            const searched = presets.filter(p => p.id !== -99 && p.provider_type !== 'high_availability_group' && (
                               p.name?.toLowerCase().includes(presetSearchText.toLowerCase()) || 
                               p.provider_type?.toLowerCase().includes(presetSearchText.toLowerCase()) || 
                               String(p.id).includes(presetSearchText) ||
                               (p.yid && String(p.yid).includes(presetSearchText))
                             ));
+                            statusCounts = {
+                              all: searched.length,
+                              active: searched.filter(p => (p.status ?? 1) === 1).length,
+                              disabled: searched.filter(p => (p.status ?? 1) !== 1).length,
+                            };
+                            items = searched.filter(p =>
+                              upstreamStatusFilter === 'all' || (p.status ?? 1) === upstreamStatusFilter
+                            );
                           } else if (upstreamTab === 'volcengine_enhance') {
                             items = volcengineEnhanceKeys.filter(p =>
                               p.name?.toLowerCase().includes(presetSearchText.toLowerCase()) ||
@@ -2543,15 +2766,28 @@ const Channels: React.FC = () => {
                             <>
 
 
-                              {/* 2. 搜索框 */}
-                              <div style={{ marginBottom: 10 }}>
+                              {/* 2. 搜索框 + 状态筛选 */}
+                              <div style={{ marginBottom: 10, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                                 <Input
                                   placeholder="输入关键字搜索名称或 ID..."
                                   allowClear
                                   prefix={<SearchOutlined style={{ color: 'var(--text-secondary)' }} />}
                                   value={presetSearchText}
                                   onChange={(e) => setPresetSearchText(e.target.value)}
+                                  style={{ flex: 1, minWidth: 200 }}
                                 />
+                                {upstreamTab === 'preset' && (
+                                  <Segmented
+                                    size="small"
+                                    options={[
+                                      { label: `全部 (${statusCounts.all})`, value: 'all' },
+                                      { label: `激活 (${statusCounts.active})`, value: '1' },
+                                      { label: `禁用 (${statusCounts.disabled})`, value: '0' },
+                                    ]}
+                                    value={upstreamStatusFilter === 'all' ? 'all' : String(upstreamStatusFilter)}
+                                    onChange={(val) => setUpstreamStatusFilter(val === 'all' ? 'all' : parseInt(val as string, 10) as 0 | 1)}
+                                  />
+                                )}
                               </div>
 
                               {items.length === 0 ? (
@@ -2571,16 +2807,18 @@ const Channels: React.FC = () => {
                                       let cardTitle = item.name;
                                       let cardSubtitle = '';
                                       let extraTag = null;
+                                      const isConfigDisabled = upstreamTab === 'preset' && (item.status ?? 1) !== 1;
 
                                       if (upstreamTab === 'preset') {
                                         isSelected = currentPreset === item.id;
                                         cardSubtitle = item.yid ? `YID: ${item.yid}` : 'YID: -';
                                         extraTag = (
                                           <Space size={4}>
+                                             {isConfigDisabled && <Tag color="error" style={{ margin: 0, fontSize: 11, borderRadius: 4 }}>已禁用</Tag>}
                                              <Tag color="default" style={{ margin: 0, fontSize: 11, borderRadius: 4 }}>{item.provider_type}</Tag>
                                              <Tag color="orange" style={{ margin: 0, fontSize: 11, borderRadius: 4 }}>倍率: {item.rate ?? 1.0}x</Tag>
-                                             <Tag color="blue" style={{ margin: 0, fontSize: 11, borderRadius: 4 }}>请求优先级: {(item as any).priority ?? 0}</Tag>
-                                             <Tag color="cyan" style={{ margin: 0, fontSize: 11, borderRadius: 4 }}>请求权重: {(item as any).weight ?? 1}</Tag>
+                                             <Tag color="blue" style={{ margin: 0, fontSize: 11, borderRadius: 4 }}>优先级: {(item as any).priority ?? 0}</Tag>
+                                             <Tag color="cyan" style={{ margin: 0, fontSize: 11, borderRadius: 4 }}>权重: {(item as any).weight ?? 1}</Tag>
                                           </Space>
                                         );
                                       } else if (upstreamTab === 'volcengine_enhance') {
@@ -2624,6 +2862,7 @@ const Channels: React.FC = () => {
                                               border: isSelected ? '1px solid #91caff' : (isLight ? '1px solid #e5e4e7' : '1px solid rgba(255,255,255,0.08)'),
                                               background: isSelected ? (isLight ? 'rgba(22,119,255,0.08)' : 'rgba(22,119,255,0.15)') : 'transparent',
                                               cursor: 'pointer',
+                                              opacity: isConfigDisabled ? 0.75 : 1,
                                               display: 'flex',
                                               justifyContent: 'space-between',
                                               alignItems: 'center',

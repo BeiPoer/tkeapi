@@ -8,18 +8,22 @@
 import React, { useEffect, useState } from 'react';
 import {
   Table, Tag, Card, Typography, Space, Button, Modal, Form, Input, InputNumber,
-  Popconfirm, Switch, App, Radio, DatePicker,
+  Popconfirm, Switch, App, Radio, DatePicker, Drawer, Tooltip
 } from 'antd';
 import {
   SyncOutlined,
   PlusOutlined,
   DeleteOutlined,
   CopyOutlined,
+  EyeOutlined,
+  CloseCircleOutlined,
+  StopOutlined,
+  CheckCircleOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import request from '../../utils/request';
 import useSettingsStore from '../../store/settings';
-import type { Redemption } from '../../types';
+import type { Redemption, RedemptionGroup } from '../../types';
 import dayjs from 'dayjs';
 import { isRedemptionExpired } from '../../utils/quotaPeriod';
 
@@ -38,8 +42,23 @@ const Redemptions: React.FC = () => {
   const { settings, updateStoreSettings, fetchSettings } = useSettingsStore();
   const currencySymbol = settings?.currency?.currency_symbol || '$';
   const quotaTz = settings?.site?.default_timezone || 'Asia/Shanghai';
-  const [redemptions, setRedemptions] = useState<Redemption[]>([]);
+  
+  // Group states
+  const [groups, setGroups] = useState<RedemptionGroup[]>([]);
   const [loading, setLoading] = useState(true);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [total, setTotal] = useState(0);
+
+  // Drawer states
+  const [drawerVisible, setDrawerVisible] = useState(false);
+  const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
+  const [drawerCodes, setDrawerCodes] = useState<Redemption[]>([]);
+  const [drawerLoading, setDrawerLoading] = useState(false);
+  const [drawerCurrentPage, setDrawerCurrentPage] = useState(1);
+  const [drawerPageSize, setDrawerPageSize] = useState(10);
+  const [drawerTotal, setDrawerTotal] = useState(0);
+
   const [toggleLoading, setToggleLoading] = useState(false);
   const [enabled, setEnabled] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -48,16 +67,43 @@ const Redemptions: React.FC = () => {
   const permanent = Form.useWatch('permanent', form);
   const allowMultiple = Form.useWatch('allow_multiple', form);
 
-  const fetchRedemptions = async () => {
+  const fetchGroups = async (page = currentPage, size = pageSize) => {
     setLoading(true);
     try {
-      const resp = await (request.get('/redemptions') as unknown as Promise<{ data: Redemption[] }>);
-      setRedemptions(resp.data);
+      const resp = await (request.get(`/redemptions/groups?page=${page}&page_size=${size}`) as unknown as Promise<{ data: RedemptionGroup[], total: number }>);
+      setGroups(resp.data);
+      setTotal(resp.total);
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
     }
+  };
+
+  const fetchDrawerCodes = async (name: string, page = drawerCurrentPage, size = drawerPageSize) => {
+    setDrawerLoading(true);
+    try {
+      const resp = await (request.get(`/redemptions?name=${encodeURIComponent(name)}&page=${page}&page_size=${size}`) as unknown as Promise<{ data: Redemption[], total: number }>);
+      setDrawerCodes(resp.data);
+      setDrawerTotal(resp.total);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setDrawerLoading(false);
+    }
+  };
+
+  const openDrawer = (name: string) => {
+    setSelectedGroup(name);
+    setDrawerVisible(true);
+    setDrawerCurrentPage(1);
+    fetchDrawerCodes(name, 1, drawerPageSize);
+  };
+
+  const closeDrawer = () => {
+    setDrawerVisible(false);
+    setSelectedGroup(null);
+    setDrawerCodes([]);
   };
 
   const loadFeatureFlag = async () => {
@@ -145,7 +191,8 @@ const Redemptions: React.FC = () => {
         msgApi.success(t('common.success'));
         setIsModalOpen(false);
         form.resetFields();
-        fetchRedemptions();
+        setCurrentPage(1);
+        fetchGroups(1, pageSize);
 
         modal.success({
           title: t('redemptions.codes_generated'),
@@ -225,28 +272,54 @@ const Redemptions: React.FC = () => {
     }
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDeleteGroup = async (name: string) => {
     try {
-      await request.delete(`/redemptions/${id}`);
+      await request.delete(`/redemptions/groups?name=${encodeURIComponent(name)}`);
       msgApi.success(t('common.success'));
-      fetchRedemptions();
+      fetchGroups(currentPage, pageSize);
     } catch (e) {
       console.error(e);
     }
   };
 
+  const handleDeleteSingle = async (id: number) => {
+    try {
+      await request.delete(`/redemptions/${id}`);
+      msgApi.success(t('common.success'));
+      if (selectedGroup) {
+        fetchDrawerCodes(selectedGroup, drawerCurrentPage, drawerPageSize);
+        fetchGroups(currentPage, pageSize); // Update group stats quietly
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleUpdateStatus = async (id: number, status: number) => {
+    try {
+      await request.put(`/redemptions/${id}/status`, { status });
+      msgApi.success(t('common.success'));
+      if (selectedGroup) {
+        fetchDrawerCodes(selectedGroup, drawerCurrentPage, drawerPageSize);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+
   useEffect(() => {
-    fetchRedemptions();
+    fetchGroups(1, pageSize);
     loadFeatureFlag();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const formatExpiry = (record: Redemption) => {
-    if (!record.expires_at) {
+  const formatExpiryGroup = (expires_at?: string | null) => {
+    if (!expires_at) {
       return <Tag color="blue">{isZh ? '长期有效' : 'Permanent'}</Tag>;
     }
-    const expired = isRedemptionExpired(record.expires_at, quotaTz);
-    const dateLabel = String(record.expires_at).trim().slice(0, 10);
+    const expired = isRedemptionExpired(expires_at, quotaTz);
+    const dateLabel = String(expires_at).trim().slice(0, 10);
     return (
       <Tag color={expired ? 'error' : 'processing'}>
         {dateLabel}
@@ -255,66 +328,53 @@ const Redemptions: React.FC = () => {
     );
   };
 
-  const formatUses = (record: Redemption) => {
-    const used = record.used_count ?? (record.is_used ? 1 : 0);
-    const max = record.max_uses ?? 1;
-    if (max <= 0) {
-      return `${used} / ${isZh ? '不限' : '∞'}`;
-    }
-    return `${used} / ${max}`;
-  };
-
-  const formatPerUser = (record: Redemption) => {
-    const limit = record.per_user_limit ?? 1;
-    if (limit <= 0) return isZh ? '不限' : 'Unlimited';
-    return isZh ? `${limit} 次/人` : `${limit}/user`;
-  };
-
-  const columns = [
+  const groupColumns = [
     {
-      title: t('redemptions.name'),
+      title: isZh ? '活动名称' : 'Activity Name',
       dataIndex: 'name',
       key: 'name',
+      render: (name: string) => <Text strong>{name}</Text>,
     },
     {
-      title: t('redemptions.code'),
-      dataIndex: 'code',
-      key: 'code',
-      render: (code: string) => <Text code>{code}</Text>,
+      title: isZh ? '生成数量' : 'Total Codes',
+      dataIndex: 'total_count',
+      key: 'total_count',
+      render: (count: number) => <Tag color="geekblue">{count}</Tag>,
     },
     {
-      title: t('redemptions.quota'),
-      dataIndex: 'quota',
-      key: 'quota',
-      render: (q: number) => <Text strong>{currencySymbol}{q.toFixed(6)}</Text>,
+      title: isZh ? '总面额' : 'Total Quota',
+      dataIndex: 'total_quota',
+      key: 'total_quota',
+      render: (q: number) => <Text strong>{currencySymbol}{Number(q).toFixed(6)}</Text>,
+    },
+    {
+      title: isZh ? '已兑换(次)' : 'Total Redeemed',
+      dataIndex: 'total_used_count',
+      key: 'total_used_count',
+    },
+    {
+      title: isZh ? '兑换规则' : 'Rule',
+      key: 'rule',
+      render: (_: unknown, record: RedemptionGroup) => {
+        const max = record.max_uses ?? 1;
+        const limit = record.per_user_limit ?? 1;
+        if (max === 1 && limit === 1) {
+          return <Tag color="default">{isZh ? '单次有效' : 'Single Use'}</Tag>;
+        }
+        const maxText = max === -1 ? (isZh ? '无限' : 'Unlimited') : max;
+        const limitText = limit === -1 ? (isZh ? '无限' : 'Unlimited') : limit;
+        return (
+          <div style={{ fontSize: '12px', color: 'var(--ant-color-text-secondary)', lineHeight: '1.5' }}>
+            <div>{isZh ? '总可兑换:' : 'Max:'} <Text strong>{maxText}</Text></div>
+            <div>{isZh ? '单人可兑:' : 'Per user:'} <Text strong>{limitText}</Text></div>
+          </div>
+        );
+      },
     },
     {
       title: isZh ? '有效期' : 'Validity',
       key: 'expires_at',
-      render: (_: unknown, record: Redemption) => formatExpiry(record),
-    },
-    {
-      title: isZh ? '已用/单码次数' : 'Used / Per Code',
-      key: 'uses',
-      render: (_: unknown, record: Redemption) => formatUses(record),
-    },
-    {
-      title: isZh ? '单码单用户' : 'Per Code / User',
-      key: 'per_user',
-      render: (_: unknown, record: Redemption) => formatPerUser(record),
-    },
-    {
-      title: t('redemptions.status'),
-      key: 'status',
-      render: (_: unknown, record: Redemption) => {
-        const expired = isRedemptionExpired(record.expires_at, quotaTz);
-        const max = record.max_uses ?? 1;
-        const used = record.used_count ?? (record.is_used ? 1 : 0);
-        const exhausted = (max > 0 && used >= max) || (!!record.is_used && max === 1);
-        if (expired) return <Tag color="error">{isZh ? '已过期' : 'Expired'}</Tag>;
-        if (exhausted) return <Tag color="error">{isZh ? '已用完' : 'Exhausted'}</Tag>;
-        return <Tag color="success">{isZh ? '可用' : 'Available'}</Tag>;
-      },
+      render: (_: unknown, record: RedemptionGroup) => formatExpiryGroup(record.expires_at),
     },
     {
       title: t('redemptions.created_at'),
@@ -325,9 +385,16 @@ const Redemptions: React.FC = () => {
     {
       title: t('common.actions'),
       key: 'actions',
-      render: (_: unknown, record: Redemption) => (
+      render: (_: unknown, record: RedemptionGroup) => (
         <Space>
-          <Popconfirm title={t('common.confirm_delete')} onConfirm={() => handleDelete(record.id)}>
+          <Tooltip title={isZh ? '查看明细' : 'View Details'}>
+            <Button 
+              icon={<EyeOutlined />} 
+              size="small" 
+              onClick={() => openDrawer(record.name)} 
+            />
+          </Tooltip>
+          <Popconfirm title={isZh ? `确定要删除活动 [${record.name}] 下的所有兑换码吗？` : `Delete all codes under [${record.name}]?`} onConfirm={() => handleDeleteGroup(record.name)}>
             <Button icon={<DeleteOutlined />} danger size="small" />
           </Popconfirm>
         </Space>
@@ -335,12 +402,134 @@ const Redemptions: React.FC = () => {
     },
   ];
 
+  const drawerColumns = [
+    {
+      title: t('redemptions.code'),
+      dataIndex: 'code',
+      key: 'code',
+      render: (code: string) => (
+        <Space>
+          <Text code>{code}</Text>
+          <Button type="text" icon={<CopyOutlined />} size="small" onClick={() => copyToClipboard(code)} />
+        </Space>
+      ),
+    },
+    {
+      title: t('redemptions.quota'),
+      dataIndex: 'quota',
+      key: 'quota',
+      render: (q: number) => <Text>{currencySymbol}{Number(q).toFixed(2)}</Text>,
+    },
+    {
+      title: isZh ? '兑换人' : 'Used By',
+      key: 'used_by',
+      render: (_: unknown, record: Redemption) => {
+        if (record.used_count && record.used_count > 1) {
+          return <Text type="secondary">{isZh ? `已兑 ${record.used_count} 次` : `Redeemed ${record.used_count} times`}</Text>;
+        }
+        return record.used_by ? <Text>{record.used_by}</Text> : <Text type="secondary">-</Text>;
+      },
+    },
+    {
+      title: isZh ? '兑换时间' : 'Used At',
+      dataIndex: 'used_at',
+      key: 'used_at',
+      render: (t?: string | null) => t ? dayjs(t).format('YYYY-MM-DD HH:mm') : <Text type="secondary">-</Text>,
+    },
+    {
+      title: isZh ? '状态' : 'Status',
+      key: 'status',
+      render: (_: unknown, record: Redemption) => {
+        if (record.status === -1) return <Tag color="default">{isZh ? '已作废' : 'Voided'}</Tag>;
+        if (record.status === 0) return <Tag color="warning">{isZh ? '已禁用' : 'Disabled'}</Tag>;
+        const expired = isRedemptionExpired(record.expires_at, quotaTz);
+        const max = record.max_uses ?? 1;
+        const used = record.used_count ?? (record.is_used ? 1 : 0);
+        const exhausted = (max > 0 && used >= max) || (!!record.is_used && max === 1);
+        if (expired) return <Tag color="error">{isZh ? '已过期' : 'Expired'}</Tag>;
+        if (exhausted) return <Tag color="error">{isZh ? '已用完' : 'Exhausted'}</Tag>;
+        return <Tag color="success">{isZh ? '正常' : 'Active'}</Tag>;
+      },
+    },
+    {
+      title: t('common.actions'),
+      key: 'actions',
+      render: (_: unknown, record: Redemption) => (
+        <Space>
+          {record.status !== -1 && (
+            <Popconfirm title={isZh ? '确定要作废该兑换码吗？作废后不可恢复使用' : 'Are you sure you want to void this code?'} onConfirm={() => handleUpdateStatus(record.id, -1)}>
+              <Tooltip title={isZh ? '作废' : 'Void'}>
+                <Button icon={<CloseCircleOutlined />} danger size="small" />
+              </Tooltip>
+            </Popconfirm>
+          )}
+          {record.status !== -1 && (
+            <Tooltip title={record.status === 0 ? (isZh ? '启用' : 'Enable') : (isZh ? '禁用' : 'Disable')}>
+              <Button 
+                icon={record.status === 0 ? <CheckCircleOutlined /> : <StopOutlined />} 
+                size="small" 
+                onClick={() => handleUpdateStatus(record.id, record.status === 0 ? 1 : 0)}
+              />
+            </Tooltip>
+          )}
+          <Popconfirm title={t('common.confirm_delete')} onConfirm={() => handleDeleteSingle(record.id)}>
+            <Tooltip title={isZh ? '删除' : 'Delete'}>
+              <Button icon={<DeleteOutlined />} danger size="small" />
+            </Tooltip>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ];
+
+  if (selectedGroup) {
+    return (
+      <Card variant="borderless">
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 24, gap: 16 }}>
+          <Button onClick={closeDrawer} style={{ marginRight: 8 }}>
+            {isZh ? '返回' : 'Back'}
+          </Button>
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            <Title level={3} style={{ margin: 0 }}>
+              {isZh ? '兑换码明细' : 'Redemption Code Details'}
+            </Title>
+            <Text type="secondary" style={{ marginTop: 4 }}>
+              {isZh ? `活动名称: ${selectedGroup}` : `Activity Name: ${selectedGroup}`}
+            </Text>
+          </div>
+          <div style={{ flex: 1 }} />
+          <Button icon={<SyncOutlined />} onClick={() => fetchDrawerCodes(selectedGroup, drawerCurrentPage, drawerPageSize)}>
+            {t('common.refresh')}
+          </Button>
+        </div>
+        
+        <Table
+          dataSource={drawerCodes}
+          columns={drawerColumns}
+          rowKey="id"
+          loading={drawerLoading}
+          pagination={{
+            current: drawerCurrentPage,
+            pageSize: drawerPageSize,
+            total: drawerTotal,
+            showSizeChanger: true,
+            onChange: (page, size) => {
+              setDrawerCurrentPage(page);
+              setDrawerPageSize(size);
+              fetchDrawerCodes(selectedGroup, page, size);
+            },
+          }}
+        />
+      </Card>
+    );
+  }
+
   return (
     <Card variant="borderless">
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
         <Title level={2} style={{ margin: 0 }}>{t('redemptions.title')}</Title>
         <Space>
-          <Button icon={<SyncOutlined />} onClick={fetchRedemptions}>{t('common.refresh')}</Button>
+          <Button icon={<SyncOutlined />} onClick={() => fetchGroups(currentPage, pageSize)}>{t('common.refresh')}</Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsModalOpen(true)}>
             {t('redemptions.add')}
           </Button>
@@ -380,11 +569,22 @@ const Redemptions: React.FC = () => {
       </div>
 
       <Table
-        dataSource={redemptions}
-        columns={columns}
-        rowKey="id"
+        dataSource={groups}
+        columns={groupColumns}
+        rowKey="name"
         loading={loading}
         scroll={{ x: 'max-content' }}
+        pagination={{
+          current: currentPage,
+          pageSize: pageSize,
+          total: total,
+          showSizeChanger: true,
+          onChange: (page, size) => {
+            setCurrentPage(page);
+            setPageSize(size);
+            fetchGroups(page, size);
+          },
+        }}
       />
 
       <Modal

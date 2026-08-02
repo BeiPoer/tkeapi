@@ -36,7 +36,6 @@
     "search_placeholder": "Search...",
     "privacy_policy": "Privacy Policy",
     "terms_of_service": "Terms of Service",
-    "pinned": "Pinned",
     "admin_suffix": " Admin"
   },
   "header": {
@@ -94,7 +93,9 @@
     "model_marketplace": "Model Plaza",
     "admin_list": "Admin List",
     "finance_gifts": "Gift Details",
-    "announcements": "Announcements"
+    "announcements": "Announcements",
+    "login": "Log in",
+    "playground_2026": "Playground 2026"
   },
   "dashboard": {
     "title": "System Overview",
@@ -143,8 +144,8 @@
     "live_tpm": "TPM",
     "live_task": "Task",
     "live_qps_tip": "Requests in the last 1 second",
-    "live_rpm_tip": "Requests in the last 60 seconds",
-    "live_tpm_tip": "Tokens in the last 60 seconds",
+    "live_rpm_tip": "Requests in the last 1 minute",
+    "live_tpm_tip": "Tokens in the last 1 minute",
     "live_task_tip": "In-flight concurrent requests"
   },
   "login": {
@@ -238,9 +239,8 @@
     "models_filter_on": "Specific Models",
     "models_enabled_desc": "Only allow the specific models listed below",
     "models_disabled_desc": "All models are available, no changes needed",
-    "models_hint_1": "📌 Enter one model ID per line, for example:",
-    "models_hint_2": "The model name must match exactly the Model ID configured in the system (case-insensitive).",
-    "models_placeholder": "Enter allowed models, one per line\nExample:\ngpt-4o\nclaude-sonnet-4-20250514\ndeepseek-chat",
+    "models_hint_1": "Select available site models from the list, or type a model ID and press Enter to add.",
+    "models_placeholder": "Select or enter allowed model IDs",
     "verify_identity": "🔐 Verify Identity",
     "confirm_view": "Confirm & View",
     "verify_identity_desc": "To protect your token security, viewing the full key requires verifying your login password.",
@@ -255,7 +255,7 @@
     "latency": "Latency",
     "status": "Status",
     "error": "Error",
-    "search_model": "Search model...",
+    "search_model": "Model Name",
     "in": "Input",
     "out": "Output",
     "channel_aid": "Channel AID",
@@ -268,7 +268,6 @@
     "output": "Output",
     "cache_creation": "Cache Creation",
     "cache_read": "Cache Read",
-    "cache_input": "Cache (in Input)",
     "refunded": "Refunded",
     "pre_deduct": "Pre-deduct",
     "actual_deduct": "Actual Deduct",
@@ -318,6 +317,7 @@
     "total_records": "Total {{total}} records",
     "export_success": "Export successful",
     "export_fail": "Export failed",
+    "search_keyword": "Search Log ID / Task ID / Channel AID",
     "search_log_id": "Search Log ID",
     "search_task_id": "Search Task ID",
     "type_vision": "Vision",
@@ -333,7 +333,22 @@
     "search_user_id": "Search User UID/Username",
     "search_kid": "Search KID",
     "start_date": "Start Date",
-    "end_date": "End Date"
+    "end_date": "End Date",
+    "search_status_code": "Status code",
+    "status_code_0": "0 Processing",
+    "status_code_400": "400 Bad Request",
+    "status_code_401": "401 Unauthorized",
+    "status_code_402": "402 Payment Required",
+    "status_code_403": "403 Forbidden",
+    "status_code_404": "404 Not Found",
+    "status_code_408": "408 Timeout",
+    "status_code_409": "409 Conflict",
+    "status_code_422": "422 Unprocessable",
+    "status_code_429": "429 Rate Limited",
+    "status_code_500": "500 Server Error",
+    "status_code_502": "502 Bad Gateway",
+    "status_code_503": "503 Unavailable",
+    "status_code_504": "504 Gateway Timeout"
   },
   "redemptions": {
     "title": "Redemption Code Management",
@@ -348,7 +363,7 @@
     "created_at": "Created At"
   },
   "models": {
-    "title": "Model Management",
+    "title": "Model List Management",
     "add_model": "Add Model",
     "edit_model": "Edit Model",
     "model_name": "Name",

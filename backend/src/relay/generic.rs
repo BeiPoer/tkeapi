@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -109,10 +109,11 @@ pub async fn generic_relay(
             Some(r) => r,
             None => {
                 if forward::model_has_forward_rules(&state, model).await {
-                    return Err(AppError::BadRequest(format!(
+                    ha.on_access_err(AppError::BadRequest(format!(
                         "模型 '{}' 不支持当前接口，请检查模型对应的转发规则",
                         model
                     )));
+                    break;
                 }
                 forward::infer_forward_from_base_url(
                     &channel.base_url,
@@ -152,7 +153,7 @@ pub async fn generic_relay(
         );
 
         tracing::info!(
-            "[Generic] model={}, category={}, target_type={}, url={}",
+            "[Generic] 模型={} 类别={} 目标类型={} URL={}",
             model,
             category,
             resolved.target_type,
@@ -190,8 +191,7 @@ pub async fn generic_relay(
         let channel_c = channel.clone();
         let model_c = model.clone();
         let request_content_str_c = request_content_str.clone();
-        let ctx_role_c = ctx.role.clone();
-        let ctx_model_discounts_c = ctx.model_discounts.clone();
+        let ctx_c = ctx.clone();
         let url_c = url.clone();
 
         tokio::spawn(async move {
@@ -200,111 +200,84 @@ pub async fn generic_relay(
             let channel = channel_c;
             let model = model_c;
             let request_content_str = request_content_str_c;
-            let ctx_role = ctx_role_c;
-            let ctx_model_discounts = ctx_model_discounts_c;
             let url = url_c;
             let result: Result<Response, AppError> = async {
-                // 执行预扣费（管理员跳过）
-                let pre_deduct_gift = proxy::pre_deduct_or_intercept(
-                    &state,
-                    &token,
-                    &channel,
-                    &model,
-                    pre_deduction,
-                    &ep,
-                    start_time,
-                    0,
-                    &request_content_str,
-                    &upstream_body.to_string(),
-                    None,
-                    pending_log_id,
-                    db_model.as_ref(),
-                    &ctx_role,
-                    Some(resolved_cat.as_str()),
-                )
-                .await?;
-
-                // 构建并发送上游请求（统一鉴权 + 设置请求体）
+                // 构建并发送上游请求（统一鉴权 + 设置请求体）；预扣在业务成功后再执行（对齐 chat）
                 let builder = state
                     .http_client
                     .post(&url)
                     .header("Content-Type", "application/json");
-                let builder = forward::apply_request_auth(
-                    builder,
-                    &resolved,
-                    &channel.api_key,
-                    &mut upstream_body,
-                    &channel.base_url,
+                let builder = crate::services::http_client::with_upstream_timeout(
+                    forward::apply_request_auth(
+                        builder,
+                        &resolved,
+                        &channel.api_key,
+                        &mut upstream_body,
+                        &channel.base_url,
+                    ),
                 );
                 let resp = match builder.send().await {
                     Ok(resp) => resp,
                     Err(e) => {
                         let err_msg = e.to_string();
                         let latency_ms = start_time.elapsed().as_millis() as u32;
-                        proxy::record_and_bill_inner(proxy::BillRecord {
-                            state: &state,
-                            token: &token,
-                            channel: &channel,
-                            model: &model,
-                            prompt_tokens: 0,
-                            completion_tokens: 0,
-                            cached_tokens: 0,
-                            cost: 0.0,
-                            pre_deducted: pre_deduction,
-                            pre_deduct_gift: pre_deduct_gift,
-                            status_code: 502,
-                            endpoint: &ep,
-                            error_msg: Some(&err_msg),
-                            latency_ms: latency_ms,
-                            is_stream: 0,
-                            request_content: Some(request_content_str.clone()),
-                            response_content: Some(err_msg.clone()),
-                            upstream_req_content: Some(upstream_body.to_string()),
-                            billing_detail: None,
-                            hint_category: Some(category),
-                            pending_log_id: pending_log_id,
-                            billing_model_hint: None,
-                            plugin_tag: None,
-                            db_model: db_model.as_ref(),
-                        })
-                        .await;
-                        return Err(proxy::upstream_fail(502, &err_msg));
+                        return Err(proxy::record_zero_cost_upstream_fail(
+                            proxy::ZeroCostUpstreamFail {
+                                state: &state,
+                                token: &token,
+                                channel: &channel,
+                                model: &model,
+                                prefer_http_status: Some(502),
+                                endpoint: &ep,
+                                latency_ms,
+                                is_stream: 0,
+                                request_content: request_content_str.clone(),
+                                response_body: err_msg.clone(),
+                                response_content: Some(err_msg),
+                                upstream_req_content: Some(upstream_body.to_string()),
+                                billing_detail: None,
+                                hint_category: Some(category),
+                                pending_log_id,
+                                billing_model_hint: None,
+                                db_model: db_model.as_ref(),
+                                client_msg: None,
+                                pre_deducted: 0.0,
+                                pre_deduct_gift: 0.0,
+                            },
+                        )
+                        .await);
                     }
                 };
 
                 let status = resp.status().as_u16();
                 if !resp.status().is_success() {
                     let err = resp.text().await.unwrap_or_default();
-                    let display_err = proxy::upstream_error_text(status, &err);
                     let latency_ms = start_time.elapsed().as_millis() as u32;
-                    proxy::record_and_bill_inner(proxy::BillRecord {
-                        state: &state,
-                        token: &token,
-                        channel: &channel,
-                        model: &model,
-                        prompt_tokens: 0,
-                        completion_tokens: 0,
-                        cached_tokens: 0,
-                        cost: 0.0,
-                        pre_deducted: pre_deduction,
-                        pre_deduct_gift: pre_deduct_gift,
-                        status_code: status,
-                        endpoint: &ep,
-                        error_msg: Some(&display_err),
-                        latency_ms: latency_ms,
-                        is_stream: 0,
-                        request_content: Some(request_content_str.clone()),
-                        response_content: Some(err),
-                        upstream_req_content: Some(upstream_body.to_string()),
-                        billing_detail: None,
-                        hint_category: Some(resolved_cat.as_str()),
-                        pending_log_id: pending_log_id,
-                        billing_model_hint: None,
-                        plugin_tag: None,
-                        db_model: db_model.as_ref(),
-                    })
-                    .await;
-                    return Err(proxy::upstream_fail(status, &display_err));
+                    return Err(proxy::record_zero_cost_upstream_fail(
+                        proxy::ZeroCostUpstreamFail {
+                            state: &state,
+                            token: &token,
+                            channel: &channel,
+                            model: &model,
+                            prefer_http_status: Some(status),
+                            endpoint: &ep,
+                            latency_ms,
+                            is_stream: 0,
+                            request_content: request_content_str.clone(),
+                            response_body: err.clone(),
+                            response_content: Some(err),
+                            upstream_req_content: Some(upstream_body.to_string()),
+                            billing_detail: None,
+                            hint_category: Some(resolved_cat.as_str()),
+                            pending_log_id,
+                            billing_model_hint: None,
+                            db_model: db_model.as_ref(),
+                            client_msg: None,
+                            pre_deducted: 0.0,
+                            pre_deduct_gift: 0.0,
+                        },
+                    )
+                    .await);
                 }
 
                 // 读取响应体文本
@@ -320,37 +293,50 @@ pub async fn generic_relay(
                 resp_text = converted;
                 if let Some(err_response) = post_err {
                     let latency_ms = start_time.elapsed().as_millis() as u32;
-                    let err_text = proxy::extract_error_message(&resp_text);
-                    let err_status = proxy::infer_error_status_code_from_str(&resp_text);
-                    proxy::record_and_bill_inner(proxy::BillRecord {
-                        state: &state,
-                        token: &token,
-                        channel: &channel,
-                        model: &model,
-                        prompt_tokens: 0,
-                        completion_tokens: 0,
-                        cached_tokens: 0,
-                        cost: 0.0,
-                        pre_deducted: pre_deduction,
-                        pre_deduct_gift: pre_deduct_gift,
-                        status_code: err_status,
-                        endpoint: &ep,
-                        error_msg: Some(&err_text),
-                        latency_ms: latency_ms,
-                        is_stream: 0,
-                        request_content: Some(request_content_str.clone()),
-                        response_content: Some(resp_text.clone()),
-                        upstream_req_content: Some(upstream_body.to_string()),
-                        billing_detail: None,
-                        hint_category: Some(resolved_cat.as_str()),
-                        pending_log_id: pending_log_id,
-                        billing_model_hint: None,
-                        plugin_tag: None,
-                        db_model: db_model.as_ref(),
-                    })
-                    .await;
-                    return Err(proxy::upstream_fail(err_status, &err_response));
+                    return Err(proxy::record_zero_cost_upstream_fail(
+                        proxy::ZeroCostUpstreamFail {
+                            state: &state,
+                            token: &token,
+                            channel: &channel,
+                            model: &model,
+                            prefer_http_status: None,
+                            endpoint: &ep,
+                            latency_ms,
+                            is_stream: 0,
+                            request_content: request_content_str.clone(),
+                            response_body: resp_text.clone(),
+                            response_content: Some(resp_text.clone()),
+                            upstream_req_content: Some(upstream_body.to_string()),
+                            billing_detail: None,
+                            hint_category: Some(resolved_cat.as_str()),
+                            pending_log_id,
+                            billing_model_hint: None,
+                            db_model: db_model.as_ref(),
+                            client_msg: Some(&err_response),
+                            pre_deducted: 0.0,
+                            pre_deduct_gift: 0.0,
+                        },
+                    )
+                    .await);
                 }
+
+                let pre_deduct_gift = proxy::pre_deduct_or_intercept(
+                    &state,
+                    &token,
+                    &channel,
+                    &model,
+                    pre_deduction,
+                    &ep,
+                    start_time,
+                    0,
+                    &request_content_str,
+                    &upstream_body.to_string(),
+                    None,
+                    pending_log_id,
+                    db_model.as_ref(),
+                    Some(resolved_cat.as_str()),
+                )
+                .await?;
 
                 // 提取 usage tokens
                 let mut usage = usage_extractor::parse_usage(&resp_text);
@@ -372,8 +358,7 @@ pub async fn generic_relay(
                     db_model.as_ref(),
                     db_rule.as_mut(),
                     &channel,
-                    ctx.discount,
-                    &ctx_model_discounts,
+                    &ctx_c,
                     &usage,
                     &features,
                     mapping_source,

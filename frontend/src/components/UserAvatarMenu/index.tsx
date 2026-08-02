@@ -205,7 +205,7 @@ const UserAvatarMenu: React.FC<UserAvatarMenuProps> = ({ isUserEnd = true, agree
         placement="bottomRight"
         overlayClassName="custom-premium-popover"
         forceRender
-        destroyTooltipOnHide={false}
+        destroyOnHidden={false}
         /* 毛玻璃样式由 index.css .custom-premium-popover 统一处理（根节点 blur，兼容 Edge/Chromium） */
         styles={{
           container: {

@@ -30,5 +30,11 @@
   "no_access_desc": "Cấp độ tài khoản của bạn không có quyền xem chợ mô hình. Vui lòng liên hệ quản trị viên hoặc nâng cấp tài khoản.",
   "back_dashboard": "Quay lại",
   "back_list": "Quay lại danh sách",
-  "pricing_count": "{{count}} bảng giá"
+  "pricing_count": "{{count}} bảng giá",
+  "unavailable": "Không khả dụng",
+  "default_pricing": "Giá mặc định",
+  "other_category": "Khác",
+  "unknown_provider": "Nhà cung cấp",
+  "upstream": "Thượng nguồn",
+  "default_group": "Nhóm mặc định"
 }

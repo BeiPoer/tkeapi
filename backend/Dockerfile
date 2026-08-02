@@ -1,76 +1,69 @@
 # syntax=docker/dockerfile:1
-#
-# 后端镜像 Dockerfile（优化版：依赖分层缓存 + 白名单源码拷贝 + 必备语言包）
-#
+# USE_PREBUILT=0 容器内编译；=1 用根目录 Linux ELF。JOBS/CACHE 由 compose/脚本注入。
 
 ARG USE_PREBUILT=0
+ARG ENABLE_CARGO_CACHE=1
 ARG CARGO_BUILD_JOBS=1
 
-# ── 1. 源码编译阶段 ──
-FROM rust:slim-bookworm AS builder
-ARG CARGO_BUILD_JOBS
-ARG USE_PREBUILT
-
-ENV CARGO_INCREMENTAL=0 \
-    RUSTFLAGS="-C linker=clang -C link-arg=-fuse-ld=mold"
-
+FROM rust:slim-bookworm AS build-deps
+ARG CARGO_BUILD_JOBS=1
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    CARGO_INCREMENTAL=0 \
+    RUSTC_WRAPPER="" \
+    RUSTFLAGS="-C link-arg=-Wl,--no-keep-memory"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev make g++ perl ca-certificates clang \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /usr/src/app
+COPY backend ./backend
+# site_portal.rs / site_portal_pro.rs include_str! 编译期绑定的前端资源（缺一即构建失败）
+COPY frontend/src/pages/Plugins/SitePortal/locales/portal \
+     ./frontend/src/pages/Plugins/SitePortal/locales/portal
+COPY frontend/src/pages/Plugins/SitePortal/whats-token-homepage.html \
+     ./frontend/src/pages/Plugins/SitePortal/whats-token-homepage.html
+COPY frontend/src/pages/Plugins/SitePortalPro/locales/portal \
+     ./frontend/src/pages/Plugins/SitePortalPro/locales/portal
+COPY frontend/src/pages/Plugins/SitePortalPro/whats-token-homepage.html \
+     ./frontend/src/pages/Plugins/SitePortalPro/whats-token-homepage.html
 WORKDIR /usr/src/app/backend
 
-# 精简安装构建必需的编译与链接工具
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config \
-    libssl-dev \
-    make \
-    g++ \
-    perl \
-    clang \
-    mold \
-    && rm -rf /var/lib/apt/lists/*
+# 无 cache：交叉架构（QEMU）更稳，避免 mount + qemu segfault
+FROM build-deps AS build-plain
+ARG CARGO_BUILD_JOBS=1
+RUN cargo build --release -j "${CARGO_BUILD_JOBS:-1}" \
+    && cp -f target/release/tokensbyte-server /tokensbyte-server
 
-# A. 仅拷贝 Cargo 依赖清单，预构建第三方依赖（稳固的 Docker 依赖缓存层）
-COPY backend/Cargo.toml backend/Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs
+# 有 cache：同架构重复构建更快
+FROM build-deps AS build-cached
+ARG CARGO_BUILD_JOBS=1
+ARG TARGETARCH
+RUN --mount=type=cache,id=tb-cargo-reg-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=tb-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=tb-cargo-tgt-${TARGETARCH},target=/usr/src/app/backend/target,sharing=locked \
+    cargo build --release -j "${CARGO_BUILD_JOBS:-1}" \
+    && cp -f target/release/tokensbyte-server /tokensbyte-server
 
-# 预编译所有 Cargo 第三方依赖库
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/usr/src/app/backend/target \
-    if [ "$USE_PREBUILT" = "0" ]; then \
-        cargo build --release ${CARGO_BUILD_JOBS:+-j $CARGO_BUILD_JOBS} || true ; \
-    fi
+FROM build-plain AS src-0
+FROM build-cached AS src-1
+FROM src-${ENABLE_CARGO_CACHE} AS build-from-source
 
-# B. 精准白名单拷贝：仅拷贝编译必需的代码文件与编译期绑定的 Portal 语言包
-COPY backend/src ./src
-COPY backend/build.rs ./
-COPY backend/git_log.txt* ./
-COPY frontend/src/pages/Plugins/SitePortal/locales/portal /usr/src/app/frontend/src/pages/Plugins/SitePortal/locales/portal
+FROM debian:bookworm-slim AS build-from-prebuilt
+# 架构校验由导出脚本完成；此处只 COPY，避免 apt 拖慢 Mac 预编译打包
+COPY tokensbyte-server-bin /tokensbyte-server
+RUN chmod +x /tokensbyte-server
 
-# 编译最终的可执行文件
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/usr/src/app/backend/target \
-    if [ "$USE_PREBUILT" = "1" ] && [ -f "/usr/src/app/tokensbyte-server-bin" ]; then \
-        cp /usr/src/app/tokensbyte-server-bin /tokensbyte-server ; \
-    else \
-        cargo build --release ${CARGO_BUILD_JOBS:+-j $CARGO_BUILD_JOBS} && \
-        cp target/release/tokensbyte-server /tokensbyte-server ; \
-    fi
+FROM build-from-source AS binary-0
+FROM build-from-prebuilt AS binary-1
+ARG USE_PREBUILT=0
+FROM binary-${USE_PREBUILT} AS binary
 
-# ── 2. 运行阶段 ──
 FROM debian:bookworm-slim
-
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libssl3 \
-    libsqlite3-0 \
-    ca-certificates \
-    postgresql-client \
-    wget \
+    libssl3 libsqlite3-0 ca-certificates postgresql-client wget \
     && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
-COPY --from=builder /tokensbyte-server /app/tokensbyte-server
+COPY --from=binary /tokensbyte-server /app/tokensbyte-server
 RUN mkdir -p /app/data
-
 EXPOSE 3000
 STOPSIGNAL SIGTERM
 CMD ["/app/tokensbyte-server"]

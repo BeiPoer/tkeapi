@@ -6,13 +6,16 @@
  */
 
 import React, { useEffect, useState, useMemo, useRef } from 'react';
-import { Table, Button, Space, Tag, Modal, Form, Input, InputNumber, message, Popconfirm, Card, Typography, Select, Row, Col, Switch, Grid, Radio, Empty, Pagination, Tooltip } from 'antd';
+import { Table, Button, Space, Tag, Modal, Form, Input, InputNumber, message, Popconfirm, Card, Typography, Select, Row, Col, Switch, Grid, Radio, Empty, Pagination, Tooltip, Checkbox } from 'antd';
 import MobileCardList, { MobileCard, CardRow, CardActions } from '../../components/MobileCardList';
-import { PlusOutlined, EditOutlined, DeleteOutlined, SyncOutlined, SearchOutlined, RightOutlined, DownOutlined, ArrowLeftOutlined, ArrowRightOutlined, CloseOutlined, FilterOutlined, FolderOutlined, UnorderedListOutlined, SettingOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, DeleteOutlined, SearchOutlined, RightOutlined, ArrowLeftOutlined, ArrowRightOutlined, CloseOutlined, FilterOutlined, FolderOutlined, UnorderedListOutlined, SettingOutlined, CheckSquareOutlined, CheckCircleOutlined, StopOutlined, FileTextOutlined, FileOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import request from '../../utils/request';
+import { QueryGuard, isRequestAborted } from '../../utils/queryGuard';
+import { modelMatchesKeyword } from '../../utils/modelKeywordMatch';
+import { buildClassificationParams } from '../../utils/classificationParams';
 import useSettingsStore from '../../store/settings';
-import { type ModelModel, type ClassificationsResponse, type ModelProvider, type ModelType, type ClassificationCount } from '../../types';
+import { type ModelModel } from '../../types';
 import ClassificationFilter from '../../components/Models/ClassificationFilter';
 import ClassificationManager from '../../components/Models/ClassificationManager';
 import IconPicker from '../../components/IconPicker';
@@ -146,7 +149,7 @@ const getGmid = (originalId: string): string => {
 };
 
 // ===== 分组展示组件 =====
-const GroupedModelTable: React.FC<{ group: { key: string; model_id: string; children: ModelModel[]; count: number }; columns: any[]; showHeader: boolean; getProviderName: (id?: number) => string | null; allBillingRules: any[]; currencySymbol: string; t: any; isLight: boolean; forceCollapsed?: boolean; onRefresh?: () => void; setModels?: React.Dispatch<React.SetStateAction<ModelModel[]>> }> = ({ group, columns, showHeader, getProviderName, allBillingRules, currencySymbol, t, isLight, forceCollapsed, onRefresh, setModels }) => {
+const GroupedModelTable: React.FC<{ group: { key: string; model_id: string; children: ModelModel[]; count: number }; columns: any[]; showHeader: boolean; getProviderName: (id?: number) => string | null; allBillingRules: any[]; currencySymbol: string; t: any; isLight: boolean; forceCollapsed?: boolean; onRefresh?: () => void; setModels?: React.Dispatch<React.SetStateAction<ModelModel[]>>; isBatchEditMode?: boolean; selectedRowKeys?: React.Key[]; setSelectedRowKeys?: React.Dispatch<React.SetStateAction<React.Key[]>> }> = ({ group, columns, showHeader, getProviderName, allBillingRules, currencySymbol, t, isLight, forceCollapsed, onRefresh, setModels, isBatchEditMode, selectedRowKeys = [], setSelectedRowKeys }) => {
   const { settings } = useSettingsStore();
   const adminPath = settings?.site?.admin_path || 'admin1688';
   const [expanded, setExpanded] = useState(true);
@@ -460,6 +463,18 @@ const GroupedModelTable: React.FC<{ group: { key: string; model_id: string; chil
             showHeader={false}
             tableLayout="fixed"
             style={{ marginBottom: 0 }}
+            rowSelection={isBatchEditMode ? {
+              selectedRowKeys,
+              onChange: (newKeys: React.Key[]) => {
+                if (setSelectedRowKeys) {
+                  setSelectedRowKeys(prev => {
+                    const currentGroupIds = new Set(group.children.map(c => c.id));
+                    const otherGroupKeys = prev.filter(k => !currentGroupIds.has(k as number));
+                    return [...otherGroupKeys, ...newKeys];
+                  });
+                }
+              }
+            } : undefined}
           />
         </div>
       )}
@@ -561,7 +576,6 @@ const Models: React.FC = () => {
   const screens = useBreakpoint();
 
   // Classification State
-  const [classStats, setClassStats] = useState<ClassificationsResponse>({ providers: [], types: [] });
   const [allProviders, setAllProviders] = useState<any[]>([]);
   const [allApiProviders, setAllApiProviders] = useState<any[]>([]);
   const [allTypes, setAllTypes] = useState<any[]>([]);
@@ -585,41 +599,38 @@ const Models: React.FC = () => {
   const [sortType, setSortType] = useState<string>('time_desc');
   const [tableBillingTypeFilter, setTableBillingTypeFilter] = useState<string>('all');
   const [tableStatusFilter, setTableStatusFilter] = useState<string>('all');
+  const modelsQueryGuard = useRef(new QueryGuard());
+  const statsQueryGuard = useRef(new QueryGuard());
 
+  // 列表只按分类拉 /models；关键词本地筛
   const fetchModels = async () => {
+    const signal = modelsQueryGuard.current.begin();
     setLoading(true);
     try {
-      const params: any = {
-        provider_id: selectedProvider,
-        api_provider_id: selectedApiProvider,
-        type_id: selectedType,
-      };
-      const keyword = searchKeyword.trim();
-      const isGmid = keyword.length === 6 && keyword.startsWith('5') && /^\d+$/.test(keyword);
-      
-      if (keyword && !isGmid) {
-        params.search = keyword;
-      }
-      const resp = await (request.get('/models', { params }) as unknown as Promise<{ data: ModelModel[] }>);
-      setModels(resp.data);
+      const params = buildClassificationParams(selectedProvider, selectedApiProvider, selectedType);
+      const resp = await (request.get('/models', { params, signal }) as unknown as Promise<{ data: ModelModel[] }>);
+      if (!modelsQueryGuard.current.isCurrent(signal)) return;
+      setModels(Array.isArray(resp?.data) ? resp.data : []);
     } catch (e) {
+      if (isRequestAborted(e)) return;
       console.error(e);
     } finally {
-      setLoading(false);
+      if (modelsQueryGuard.current.isCurrent(signal)) setLoading(false);
     }
   };
 
-  const fetchClassificationsStats = async (searchTerm = '') => {
+  // 分类角标交叉计数
+  const fetchClassificationsStats = async () => {
+    const signal = statsQueryGuard.current.begin();
     try {
-      let url = `/classifications/stats?search=${encodeURIComponent(searchTerm)}`;
-      if (selectedProvider) url += `&provider_id=${selectedProvider}`;
-      if (selectedApiProvider) url += `&api_provider_id=${selectedApiProvider}`;
-      if (selectedType) url += `&type_id=${selectedType}`;
-      const resp = await (request.get(url) as any);
+      const params = buildClassificationParams(selectedProvider, selectedApiProvider, selectedType);
+      const resp = await (request.get('/classifications/stats', { params, signal }) as any);
+      if (!statsQueryGuard.current.isCurrent(signal)) return;
       setProvidersStats(resp.providers || []);
       setApiProvidersStats(resp.api_providers || []);
       setTypesStats(resp.types || []);
     } catch (e) {
+      if (isRequestAborted(e)) return;
       console.error(e);
     }
   };
@@ -646,12 +657,18 @@ const Models: React.FC = () => {
   useEffect(() => {
     fetchModels();
     fetchClassificationsStats();
+  }, [selectedProvider, selectedApiProvider, selectedType]);
+
+  useEffect(() => {
     setCurrentPage(1);
   }, [selectedProvider, selectedApiProvider, selectedType, searchKeyword]);
 
   useEffect(() => {
-    fetchClassificationsStats();
     fetchAllClassifications();
+    return () => {
+      modelsQueryGuard.current.dispose();
+      statsQueryGuard.current.dispose();
+    };
   }, []);
 
 
@@ -770,6 +787,70 @@ const Models: React.FC = () => {
       console.error(e);
       message.error(t('common.error') || '保存备注失败');
       fetchModels(); // 失败时强制同步最新数据回滚
+    }
+  };
+
+  // ===== 批量选择与编辑状态 Handler =====
+  const [isBatchEditMode, setIsBatchEditMode] = useState<boolean>(false);
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [batchLoading, setBatchLoading] = useState<boolean>(false);
+
+  const handleBatchChangeStatus = async (active: number) => {
+    if (selectedRowKeys.length === 0) return;
+    setBatchLoading(true);
+    try {
+      await Promise.all(
+        selectedRowKeys.map(id => request.put(`/models/${id}`, { is_active: active }))
+      );
+      message.success(`已成功${active === 1 ? '启用' : '禁用'} ${selectedRowKeys.length} 个模型`);
+      setModels(prev => prev.map(m => selectedRowKeys.includes(m.id) ? { ...m, is_active: active } : m));
+      fetchClassificationsStats();
+    } catch (e) {
+      console.error(e);
+      message.error('批量更新模型状态失败');
+      fetchModels();
+    } finally {
+      setBatchLoading(false);
+    }
+  };
+
+  const handleBatchChangeLogContent = async (enable: number) => {
+    if (selectedRowKeys.length === 0) return;
+    setBatchLoading(true);
+    try {
+      await Promise.all(
+        selectedRowKeys.map(id => request.put(`/models/${id}`, { enable_log_content: enable }))
+      );
+      message.success(`已成功${enable === 1 ? '开启' : '关闭'} ${selectedRowKeys.length} 个模型的日志记录`);
+      setModels(prev => prev.map(m => selectedRowKeys.includes(m.id) ? { ...m, enable_log_content: enable } : m));
+    } catch (e) {
+      console.error(e);
+      message.error('批量更新日志记录失败');
+      fetchModels();
+    } finally {
+      setBatchLoading(false);
+    }
+  };
+
+  const handleBatchDelete = async () => {
+    if (selectedRowKeys.length === 0) return;
+    setBatchLoading(true);
+    try {
+      await Promise.all(
+        selectedRowKeys.map(id => request.delete(`/models/${id}`))
+      );
+      message.success(`已成功删除 ${selectedRowKeys.length} 个模型`);
+      const deletedSet = new Set(selectedRowKeys);
+      setModels(prev => prev.filter(m => !deletedSet.has(m.id)));
+      setSelectedRowKeys([]);
+      fetchClassificationsStats();
+      fetchAllClassifications();
+    } catch (e) {
+      console.error(e);
+      message.error('批量删除模型失败');
+      fetchModels();
+    } finally {
+      setBatchLoading(false);
     }
   };
 
@@ -1207,10 +1288,14 @@ const Models: React.FC = () => {
   const sortedModels = useMemo(() => {
     let list = [...models];
 
-    // 如果搜索关键词是 6 位以 5 开头的数字（GMID），在前端进行过滤
     const keyword = searchKeyword.trim();
-    if (keyword.length === 6 && keyword.startsWith('5') && /^\d+$/.test(keyword)) {
-      list = list.filter(m => getGmid(m.original_id || '') === keyword);
+    if (keyword) {
+      const isGmid = keyword.length === 6 && keyword.startsWith('5') && /^\d+$/.test(keyword);
+      if (isGmid) {
+        list = list.filter(m => getGmid(m.original_id || '') === keyword);
+      } else {
+        list = list.filter(m => modelMatchesKeyword(m, keyword));
+      }
     }
 
     if (tableBillingTypeFilter !== 'all') {
@@ -1239,7 +1324,7 @@ const Models: React.FC = () => {
       return 0;
     });
     return list;
-  }, [models, sortType, tableBillingTypeFilter, tableStatusFilter, allBillingRules]);
+  }, [models, searchKeyword, sortType, tableBillingTypeFilter, tableStatusFilter, allBillingRules]);
 
   // ===== 获取所有真实模型组 =====
   const allModelGroups = useMemo(() => {
@@ -1320,6 +1405,16 @@ const Models: React.FC = () => {
     }
     return result;
   }, [pagedModels, showGroupsOnly, allModelGroups, currentPage, pageSize]);
+
+  // ===== 当前页模型 ID 集合（全选时仅全选当前页） =====
+  const currentPageModelIds = useMemo(() => {
+    if (showGroupsOnly) {
+      const startIndex = (currentPage - 1) * pageSize;
+      const pagedGroups = allModelGroups.slice(startIndex, startIndex + pageSize);
+      return pagedGroups.flatMap(g => g.children.map(m => m.id));
+    }
+    return pagedModels.map(m => m.id);
+  }, [showGroupsOnly, currentPage, pageSize, allModelGroups, pagedModels]);
 
   useEffect(() => {
     setCurrentPage(1);
@@ -1425,11 +1520,11 @@ const Models: React.FC = () => {
       {!isModalVisible ? (
         <>
         <div style={{ display: 'flex', flexDirection: screens.xs ? 'column' : 'row', justifyContent: 'space-between', marginBottom: 12, gap: 12 }}>
-          <Title level={screens.xs ? 4 : 2} style={{ margin: 0 }}>{t('models.title')}</Title>
-          <Space wrap>
+          <Title level={4} style={{ margin: 0, fontSize: screens.xs ? 18 : 20, fontWeight: 600 }}>{t('models.title')}</Title>
+          <Space wrap size={6}>
             <Input
               prefix={<SearchOutlined />}
-              placeholder="搜索模型名 / Model ID / MID"
+              placeholder="搜索模型名 / Model ID / MID / 备注"
               allowClear
               value={searchKeyword}
               onChange={e => setSearchKeyword(e.target.value)}
@@ -1452,6 +1547,17 @@ const Models: React.FC = () => {
             >
               {showGroupsOnly ? "显示全部模型" : "显示模型组"}
             </Button>
+            <Button
+              icon={<CheckSquareOutlined />}
+              type={isBatchEditMode ? 'primary' : 'default'}
+              danger={isBatchEditMode}
+              onClick={() => {
+                setIsBatchEditMode(!isBatchEditMode);
+                if (isBatchEditMode) setSelectedRowKeys([]);
+              }}
+            >
+              {isBatchEditMode ? "退出选择" : "选择编辑"}
+            </Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>{t('models.add_model')}</Button>
           </Space>
         </div>
@@ -1470,6 +1576,103 @@ const Models: React.FC = () => {
         onManageApiProviders={() => setIsApiProviderManagerVisible(true)}
         onManageTypes={() => setIsTypeManagerVisible(true)}
       />
+
+      {isBatchEditMode && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: 8,
+          padding: '8px 14px',
+          marginBottom: 12,
+          borderRadius: 8,
+          backgroundColor: isLight ? '#e6f4ff' : '#111b26',
+          border: isLight ? '1px solid #91caff' : '1px solid #154173',
+          transition: 'all 0.3s ease'
+        }}>
+          <Space wrap size={10} style={{ alignItems: 'center' }}>
+            <Button
+              size="small"
+              onClick={() => {
+                setSelectedRowKeys(prev => Array.from(new Set([...prev, ...currentPageModelIds])));
+              }}
+            >
+              全选
+            </Button>
+            <Button
+              size="small"
+              disabled={selectedRowKeys.length === 0}
+              onClick={() => setSelectedRowKeys([])}
+            >
+              取消选择
+            </Button>
+            <Text strong style={{ fontSize: 13, color: isLight ? '#0958d9' : '#1677ff', marginLeft: 4 }}>
+              已选择 <span style={{ fontSize: 15, fontWeight: 700 }}>{selectedRowKeys.length}</span> 项
+            </Text>
+          </Space>
+
+          <Space wrap size={8}>
+            <Button
+              size="small"
+              type="primary"
+              icon={<CheckCircleOutlined />}
+              disabled={selectedRowKeys.length === 0}
+              loading={batchLoading}
+              onClick={() => handleBatchChangeStatus(1)}
+            >
+              模型激活
+            </Button>
+            <Button
+              size="small"
+              icon={<StopOutlined />}
+              disabled={selectedRowKeys.length === 0}
+              loading={batchLoading}
+              onClick={() => handleBatchChangeStatus(0)}
+            >
+              模型禁用
+            </Button>
+            <Button
+              size="small"
+              icon={<FileTextOutlined />}
+              disabled={selectedRowKeys.length === 0}
+              loading={batchLoading}
+              onClick={() => handleBatchChangeLogContent(1)}
+            >
+              上下文开启
+            </Button>
+            <Button
+              size="small"
+              icon={<FileOutlined />}
+              disabled={selectedRowKeys.length === 0}
+              loading={batchLoading}
+              onClick={() => handleBatchChangeLogContent(0)}
+            >
+              上下文关闭
+            </Button>
+            <Popconfirm
+              title="确定要批量删除选中的模型吗？"
+              description={`将一次性删除选中的 ${selectedRowKeys.length} 个模型，此操作不可撤销。`}
+              onConfirm={handleBatchDelete}
+              okText="确认删除"
+              cancelText="取消"
+              okButtonProps={{ danger: true, loading: batchLoading }}
+              disabled={selectedRowKeys.length === 0}
+            >
+              <Button
+                size="small"
+                danger
+                type="primary"
+                icon={<DeleteOutlined />}
+                disabled={selectedRowKeys.length === 0}
+                loading={batchLoading}
+              >
+                批量删除
+              </Button>
+            </Popconfirm>
+          </Space>
+        </div>
+      )}
 
       {screens.xs ? (
         <MobileCardList
@@ -1496,6 +1699,18 @@ const Models: React.FC = () => {
               <MobileCard
                 title={
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {isBatchEditMode && (
+                      <Checkbox
+                        checked={selectedRowKeys.includes(record.id)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedRowKeys(prev => [...prev, record.id]);
+                          } else {
+                            setSelectedRowKeys(prev => prev.filter(k => k !== record.id));
+                          }
+                        }}
+                      />
+                    )}
                     {record.logo && (
                       <SmartSvgIcon src={`/assets/icons/lobe/${record.logo}.svg`} alt="" style={{ width: 24, height: 24, objectFit: 'contain', borderRadius: 4 }} onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
                     )}
@@ -1679,6 +1894,16 @@ const Models: React.FC = () => {
                             showHeader={false}
                             tableLayout="fixed"
                             style={{ marginBottom: 0 }}
+                            rowSelection={isBatchEditMode ? {
+                              selectedRowKeys,
+                              onChange: (newKeys: React.Key[]) => {
+                                const currentSinglesIds = new Set(item.children.map((c: any) => c.id));
+                                setSelectedRowKeys(prev => {
+                                  const otherKeys = prev.filter(k => !currentSinglesIds.has(k as number));
+                                  return [...otherKeys, ...newKeys];
+                                });
+                              }
+                            } : undefined}
                           />
                         </div>
                       );
@@ -1697,6 +1922,9 @@ const Models: React.FC = () => {
                         isLight={isLight}
                         forceCollapsed={showGroupsOnly}
                         onRefresh={fetchModels}
+                        isBatchEditMode={isBatchEditMode}
+                        selectedRowKeys={selectedRowKeys}
+                        setSelectedRowKeys={setSelectedRowKeys}
                       />
                     );
                   })}
@@ -2223,9 +2451,9 @@ const Models: React.FC = () => {
                                   buttonStyle="solid"
                                 >
                                   <Radio.Button value="all">全部</Radio.Button>
-                                  <Radio.Button value="tokens">按Token计费</Radio.Button>
+                                  <Radio.Button value="tokens">Token计费</Radio.Button>
                                   <Radio.Button value="requests">按次计费</Radio.Button>
-                                  <Radio.Button value="duration">按时长计费</Radio.Button>
+                                  <Radio.Button value="duration">时长计费</Radio.Button>
                                 </Radio.Group>
                               </div>
                               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>

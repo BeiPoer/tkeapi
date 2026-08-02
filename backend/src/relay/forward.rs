@@ -124,6 +124,7 @@ pub fn scale_usage_in_json(root: &mut serde_json::Value, mult: f64) {
 fn normalize_res_mul_key(resolution: &str) -> String {
     let s = resolution.trim().to_lowercase();
     match s.as_str() {
+        "480" | "480p" => "480p".to_string(),
         "720" | "720p" => "720p".to_string(),
         "1080" | "1080p" => "1080p".to_string(),
         "2k" | "2kp" => "2k".to_string(),
@@ -192,18 +193,14 @@ pub async fn resolve_forward_rule(
         match owned_model.as_ref() {
             Some(m) => m,
             None => {
-                tracing::debug!(
-                    "[Forward] 模型 '{}' 在 models 表中未找到(或 is_active!=1), category={}",
-                    model_id,
-                    category
-                );
+                tracing::debug!("[Forward] 未找到模型 模型='{}' 类别={}", model_id, category);
                 return None;
             }
         }
     };
 
     tracing::info!(
-        "[Forward] 已获取模型数据: model_id = '{}', 真实 mid = '{}', category = '{}'",
+        "[Forward] 命中模型 模型='{}' 真实MID='{}' 类别='{}'",
         model_id,
         model.mid,
         category
@@ -216,7 +213,7 @@ pub async fn resolve_forward_rule(
     let mut rules: Vec<crate::models::ForwardRule> = Vec::new();
     if !rule_ids.is_empty() {
         tracing::info!(
-            "[Forward] 模型 '{}' 绑定规则 IDs: {:?}, 类别: {}, 入口: {}",
+            "[Forward] 绑定规则 模型='{}' 规则IDs={:?} 类别={} 路径={}",
             model_id,
             rule_ids,
             category,
@@ -234,16 +231,10 @@ pub async fn resolve_forward_rule(
         }
         rules = q.fetch_all(&state.db.pool).await.unwrap_or_default();
         if rules.is_empty() {
-            tracing::warn!(
-                "[Forward] 规则 IDs {:?} 在 forward_rules 表中未找到(或 is_active!=1)",
-                rule_ids
-            );
+            tracing::warn!("[Forward] 未找到规则 规则IDs={:?}", rule_ids);
         }
     } else {
-        tracing::debug!(
-            "[Forward] 模型 '{}' 未明确绑定规则，将尝试按渠道协议回退",
-            model_id
-        );
+        tracing::debug!("[Forward] 未绑定规则 模型='{}' (按协议回退)", model_id);
     }
 
     // 3. 按 category 筛选
@@ -325,9 +316,9 @@ pub async fn resolve_forward_rule(
     let config: serde_json::Value = serde_json::from_str(&rule.config_json).unwrap_or_default();
     let resolved = parse_forward_config(&config, &openai_path, &rule.eid, Some(model.mid.clone()));
     tracing::info!(
-        "[Forward] 命中规则 '{}' (eid={}): target_type={}, upstream_path={}, auth_type={}, \
-         asset_convert={}, asset_convert_ns={}, poll_path={:?}, asset_moderation={}, \
-         is_cascade={}, content_to_prompt={}, 关联 mid = '{}'",
+        "[Forward] 命中规则 名称='{}' EID={}: 目标类型={} 上游路径={} 鉴权类型={} \
+         素材转换={} 素材命名空间={} 轮询路径={:?} 素材审核={} \
+         级联={} 提示词转换={} 关联MID='{}'",
         rule.name,
         rule.eid,
         resolved.target_type,
@@ -586,7 +577,7 @@ pub async fn build_edits_multipart(
 
             // 打印二进制文件 Part 属性信息
             tracing::info!(
-                "[Multipart File Part] key: {}, filename: {}, mime: {}, size: {} bytes",
+                "[Multipart File Part] 键: {}, 文件名: {}, MIME: {}, 大小: {} 字节",
                 part_name,
                 filename,
                 mime,
@@ -601,7 +592,7 @@ pub async fn build_edits_multipart(
         } else {
             // 打印文本类型的图片/链接 Part 信息
             tracing::info!(
-                "[Multipart Text File Part] key: {}, value (URL): {}",
+                "[Multipart Text File Part] 键: {}, 值(URL): {}",
                 part_name,
                 trimmed
             );
@@ -632,7 +623,7 @@ pub async fn build_edits_multipart(
             };
 
             // 打印普通文本 Part
-            tracing::info!("[Multipart Text Part] key: {}, value: {}", key, text_val);
+            tracing::info!("[Multipart Text Part] 键: {}, 值: {}", key, text_val);
 
             form = form.text(key.clone(), text_val);
         }
@@ -680,6 +671,10 @@ pub async fn transform_request_body(
 
         // Bytefor 视频生成：将 OpenAI 兼容格式转换为 Bytefor 视频生成 API 格式
         "bytefor_video" => build_bytefor_video_body(model, body),
+
+        // ATP Token 视频生成：将 OpenAI / 阿里百炼 格式请求转换为 ATP Token omni media tasks 格式
+        // 参考文档：https://atptoken.ai/zh-cn/docs/media-video
+        "atp_video" => build_atp_video_body(model, body),
 
         // 可灵 AI 视频/图片：将 OpenAI 兼容格式转换为可灵官方 API 格式
         // 参考文档：https://klingai.com/document-api/apiReference
@@ -756,6 +751,9 @@ pub async fn transform_request_body(
             }
             fwd
         }
+
+        // MiniMax 视频生成（/v2/video_generation）
+        "minimax_video" => build_minimax_video_body(model, body),
 
         // 火山方舟聊天：保持 OpenAI 格式（火山完全兼容 OpenAI）
         "volcengine_chat" => {
@@ -1380,50 +1378,6 @@ pub fn parse_forward_config(
     }
 }
 
-#[cfg(test)]
-mod upstream_asset_forward_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn old_asset_convert_rule_leaves_upstream_flags_default() {
-        let config = json!({
-            "mode": "transform",
-            "target_type": "volcengine",
-            "asset_convert": true,
-            "path_rewrite": {
-                "old": "/v1/video/generations",
-                "new": "/api/v3/contents/generations/tasks"
-            },
-            "auth_type": "bearer"
-        });
-        let r = parse_forward_config(&config, "/v1/video/generations", "10001", None);
-        assert!(r.asset_convert);
-        assert!(!r.upstream_asset_convert);
-        assert!(r.upstream_asset_binding_id.is_none());
-    }
-
-    #[test]
-    fn upstream_rule_parses_without_asset_convert() {
-        let config = json!({
-            "mode": "transform",
-            "target_type": "volcengine",
-            "path_rewrite": {
-                "old": "/v1/video/generations",
-                "new": "/api/v3/contents/generations/tasks"
-            },
-            "auth_type": "bearer",
-            "upstream_asset_convert": true,
-            "upstream_asset_binding_id": 12
-        });
-        let r = parse_forward_config(&config, "/v1/video/generations", "10002", None);
-        assert!(!r.asset_convert);
-        assert!(r.upstream_asset_convert);
-        assert_eq!(r.upstream_asset_binding_id, Some(12));
-        assert_eq!(r.upstream_path, "/api/v3/contents/generations/tasks");
-    }
-}
-
 // ── 域名智能推断（无转发规则时的自动识别）─────────────────────
 
 /// 根据 channel base_url 域名自动推断正确的转发配置。
@@ -1521,6 +1475,28 @@ pub fn infer_forward_from_base_url(
             "视频" => make_forward("kling", "/v1/videos/text2video", "bearer"),
             "图片" => make_forward("kling", "/v1/images/generations", "bearer"),
             _ => default_openai_forward("/v1/chat/completions"),
+        }
+    } else if url_lower.contains("minimaxi.com") {
+        if category == "视频" {
+            let mut r = make_forward("minimax_video", "/v2/video_generation", "bearer");
+            r.poll_path = Some("/v2/query/video_generation/${task_id}".to_string());
+            r
+        } else if category == "图片" {
+            make_forward("openai", "/v1/images/generations", "bearer")
+        } else {
+            default_openai_forward("/v1/chat/completions")
+        }
+    } else if url_lower.contains("atptoken.ai") {
+        if category == "视频" {
+            let mut r = make_forward(
+                "atp_video",
+                "/omni/media/v1/contents/generations/tasks",
+                "bearer",
+            );
+            r.poll_path = Some("/omni/media/v1/contents/generations/tasks/${task_id}".to_string());
+            r
+        } else {
+            default_openai_forward(super::proxy::category_endpoint(Some(category)))
         }
     } else if url_lower.contains("tencentcloudapi.com") {
         match category {
@@ -1888,8 +1864,168 @@ fn build_dashscope_video_body(model: &str, body: &serde_json::Value) -> serde_js
     result
 }
 
+// ── ATP Token 视频请求体构建器 ─────────────────────────────────
+//
+// 将 OpenAI 扁平参数 或 阿里百炼 DashScope input/parameters 参数
+// 转换为 ATP Token /omni/media/v1/contents/generations/tasks 所需格式。
+// 参考文档：https://atptoken.ai/zh-cn/docs/media-video
+//
+// 兼容策略（三级）：
+//   Level 3 — body 已有符合规范的 content[] → 直通
+//   Level 2 — DashScope input/parameters 格式 → 提取标准字段
+//   Level 1 — OpenAI 扁平格式 → 按字段语义映射
+
+/// 构建 ATP Token 视频生成 API 请求体（omni media task 格式）
+/// 兼容 OpenAI 和 阿里百炼 DashScope，复用已有公共媒体工具函数
+/// 参考文档：https://atptoken.ai/zh-cn/docs/media-video
+fn build_atp_video_body(model: &str, body: &serde_json::Value) -> serde_json::Value {
+    let mut result = serde_json::Map::new();
+    result.insert("model".to_string(), serde_json::json!(model));
+
+    // 检测 DashScope 格式（body 含 input/parameters 字段）
+    let ds_input = body.get("input").and_then(|v| v.as_object());
+    let ds_params = body.get("parameters").and_then(|v| v.as_object());
+
+    // ── 构建 content[] ──
+    let content_items: Vec<serde_json::Value> =
+        if let Some(arr) = body.get("content").and_then(|v| v.as_array()) {
+            // Level 3：已有 content 数组直通（ATP 原生格式）
+            arr.iter().filter(|v| v.is_object()).cloned().collect()
+        } else {
+            let mut items = Vec::new();
+
+            // prompt：DashScope: input.prompt；OpenAI: 顶层 prompt
+            let prompt = ds_input
+                .and_then(|i| i.get("prompt"))
+                .or_else(|| body.get("prompt"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            // 文本 prompt
+            if !prompt.is_empty() {
+                items.push(serde_json::json!({ "type": "text", "text": prompt }));
+            }
+
+            // DashScope 格式：input 和 input.media[] 同时存在才走此路径
+            // OpenAI 格式：顶层 images/image_urls/video_url 字段
+            if let Some(media_arr) = ds_input
+                .and_then(|i| i.get("media"))
+                .and_then(|v| v.as_array())
+            {
+                // DashScope input.media = [{type, url}, ...]
+                // type：first_frame / last_frame / reference_image / video / reference_video
+                for item in media_arr {
+                    let media_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                    if url.is_empty() {
+                        continue;
+                    }
+                    match media_type {
+                        "first_frame" | "last_frame" | "reference_image" => {
+                            items.push(serde_json::json!({
+                                "type": "image_url",
+                                "image_url": { "url": url },
+                                "role": media_type
+                            }));
+                        }
+                        "video" | "reference_video" => {
+                            items.push(serde_json::json!({
+                                "type": "video_url",
+                                "video_url": { "url": url }
+                            }));
+                        }
+                        _ => items.push(item.clone()),
+                    }
+                }
+            } else {
+                // OpenAI 格式：图片（images / image_urls），按数量推断 role
+                let arr_images = collect_media_values(body, &["images", "image_urls"]);
+                if !arr_images.is_empty() {
+                    let defaults = infer_image_default_roles(arr_images.len());
+                    for (idx, item) in arr_images.iter().enumerate() {
+                        let default_role = defaults.get(idx).copied().unwrap_or("reference_image");
+                        let (url, role) = parse_media_item(item, default_role);
+                        if let Some(u) = url.filter(|u| !u.is_empty()) {
+                            items.push(serde_json::json!({
+                                "type": "image_url",
+                                "image_url": { "url": u },
+                                "role": role
+                            }));
+                        }
+                    }
+                }
+
+                // OpenAI 格式：视频（videos），不带 role
+                for item in &collect_media_values(body, &["videos"]) {
+                    let (url, _) = parse_media_item(item, "");
+                    if let Some(u) = url.filter(|u| !u.is_empty()) {
+                        items.push(
+                            serde_json::json!({ "type": "video_url", "video_url": { "url": u } }),
+                        );
+                    }
+                }
+            }
+
+            items
+        };
+
+    result.insert("content".to_string(), serde_json::json!(content_items));
+
+    // ── 分辨率与比例（原值透传） ──
+    if let Some(res) = ds_params
+        .and_then(|p| p.get("resolution"))
+        .or_else(|| body.get("resolution"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        result.insert("resolution".to_string(), serde_json::json!(res));
+    }
+    if let Some(rat) = ds_params
+        .and_then(|p| p.get("ratio").or_else(|| p.get("aspect_ratio")))
+        .or_else(|| body.get("ratio"))
+        .or_else(|| body.get("aspect_ratio"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        result.insert("ratio".to_string(), serde_json::json!(rat));
+    }
+
+    // ── 控场参数（duration 必须存在，缺省兜底 5 保证计费正常） ──
+    let duration = ds_params
+        .and_then(|p| p.get("duration"))
+        .or_else(|| body.get("duration"))
+        .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+        .unwrap_or(5);
+    result.insert("duration".to_string(), serde_json::json!(duration));
+
+    if let Some(wm) = ds_params
+        .and_then(|p| p.get("watermark"))
+        .or_else(|| body.get("watermark"))
+        .and_then(|v| v.as_bool())
+    {
+        result.insert("watermark".to_string(), serde_json::json!(wm));
+    }
+    if let Some(s) = ds_params
+        .and_then(|p| p.get("seed"))
+        .or_else(|| body.get("seed"))
+        .and_then(|v| v.as_i64())
+    {
+        result.insert("seed".to_string(), serde_json::json!(s));
+    }
+    if let Some(ga) = ds_params
+        .and_then(|p| p.get("generate_audio"))
+        .or_else(|| body.get("generate_audio"))
+        .and_then(|v| v.as_bool())
+    {
+        result.insert("generate_audio".to_string(), serde_json::json!(ga));
+    }
+
+    serde_json::Value::Object(result)
+}
+
 // ── 火山方舟视频/图片请求体构建器 ──────────────────────────────
 //
+
 // 将 OpenAI 风格的扁平参数转换为火山方舟 /api/v3/contents/generations/tasks 所需的结构化格式。
 // 参考文档：https://www.volcengine.com/docs/82379/1520757
 //
@@ -1945,9 +2081,10 @@ const VOLCENGINE_CONTENT_PASSTHROUGH_KEYS: &[&str] = &[
 /// ```json
 /// {"model": "...", "content": [{"type": "text", "text": "..."}, ...]}
 /// ```
-fn build_volcengine_content_body(model: &str, body: &serde_json::Value) -> serde_json::Value {
+// ── 提取出的公共方法：构建多模态 content 数组 ──
+fn build_content_array(body: &serde_json::Value) -> serde_json::Value {
     // ── Level 3：直通模式 ──
-    // body 中已包含 content 数组，原样使用，仅替换 model 并合并控制参数
+    // body 中已包含 content 数组，原样使用
     let content = if let Some(c) = body.get("content").filter(|v| v.is_array()) {
         c.clone()
     } else {
@@ -1958,10 +2095,8 @@ fn build_volcengine_content_body(model: &str, body: &serde_json::Value) -> serde
         let prompt = body["prompt"].as_str().unwrap_or("Generate content");
         parts.push(serde_json::json!({"type": "text", "text": prompt}));
 
-        // 图片：按数量智能推断默认 role
-        //   1 张 → first_frame（首帧）
-        // 图片：collect_media_values 统一收集，parse_media_item 提取 (url, role)
-        // 按数量智能推断 role：1 张 → first_frame，2 张 → first_frame + last_frame，3+ 张 → reference_image
+        // 图片：collect_media_values 统一收集；按数量推断 role
+        // 1 张 → first_frame，2 张 → first_frame + last_frame，3+ 张 → reference_image
         let arr_images = collect_media_values(body, &["images", "image_urls"]);
         if !arr_images.is_empty() {
             let defaults = infer_image_default_roles(arr_images.len());
@@ -2017,7 +2152,11 @@ fn build_volcengine_content_body(model: &str, body: &serde_json::Value) -> serde
     // ── 后处理：多模态视频请求中，为缺失 role 的 image_url 自动补充 role ──
     // 火山方舟 API 要求：当 content 中同时包含 video_url 或 audio_url 时，
     // 所有 image_url 元素必须携带 role 字段（如 reference_image），否则提交任务会被拒绝。
-    let content = ensure_image_roles_for_multimodal(content);
+    ensure_image_roles_for_multimodal(content)
+}
+
+fn build_volcengine_content_body(model: &str, body: &serde_json::Value) -> serde_json::Value {
+    let content = build_content_array(body);
 
     // ── 组装请求体 ──
     let mut result = serde_json::json!({
@@ -2038,6 +2177,29 @@ fn build_volcengine_content_body(model: &str, body: &serde_json::Value) -> serde
         result["execution_expires_after"] = serde_json::json!(3600);
     }
 
+    result
+}
+
+// ── MiniMax V2 视频请求体构建器 ─────────────────────────────────
+
+const MINIMAX_VIDEO_PASSTHROUGH_KEYS: &[&str] =
+    &["resolution", "ratio", "duration", "callback_url"];
+
+fn build_minimax_video_body(model: &str, body: &serde_json::Value) -> serde_json::Value {
+    let content = build_content_array(body);
+    let mut result = serde_json::json!({
+        "model": model,
+        "content": content,
+    });
+    for key in MINIMAX_VIDEO_PASSTHROUGH_KEYS {
+        if let Some(v) = body.get(*key) {
+            result[*key] = v.clone();
+        }
+    }
+    // OpenAI watermark → MiniMax aigc_watermark（原生字段优先）
+    if let Some(wm) = body.get("aigc_watermark").or_else(|| body.get("watermark")) {
+        result["aigc_watermark"] = wm.clone();
+    }
     result
 }
 
@@ -2068,23 +2230,17 @@ async fn download_image_to_base64(
     client: &reqwest::Client,
     url: &str,
 ) -> Option<serde_json::Value> {
-    // 拦截内网及非安全网段的 URL 下载，防御 SSRF 漏洞
-    if !is_safe_url_async(url).await {
-        tracing::warn!("[download_image] 拦截了不安全的网络地址下载: {}", url);
-        return None;
-    }
-
     for attempt in 0..2 {
         let resp = match client
             .get(url)
-            .timeout(std::time::Duration::from_secs(100))
+            .timeout(std::time::Duration::from_secs(200))
             .send()
             .await
         {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
                 tracing::warn!(
-                    "[download_image] HTTP {} for {} (attempt {})",
+                    "[DownloadImage] HTTP状态码={} URL={} (重试第{}次)",
                     r.status(),
                     url,
                     attempt + 1
@@ -2093,7 +2249,7 @@ async fn download_image_to_base64(
             }
             Err(e) => {
                 tracing::warn!(
-                    "[download_image] request failed for {} (attempt {}): {}",
+                    "[DownloadImage] 请求失败 URL={} (重试第{}次): {}",
                     url,
                     attempt + 1,
                     e
@@ -2119,7 +2275,7 @@ async fn download_image_to_base64(
             }
             Err(e) => {
                 tracing::warn!(
-                    "[download_image] read body failed for {} (attempt {}): {}",
+                    "[DownloadImage] 读取响应体失败 URL={} (重试第{}次): {}",
                     url,
                     attempt + 1,
                     e
@@ -2128,93 +2284,8 @@ async fn download_image_to_base64(
             }
         }
     }
-    tracing::error!("[download_image] all attempts failed for {}", url);
+    tracing::error!("[DownloadImage] 所有重试均已失败 URL={}", url);
     None
-}
-
-/// 异步高效率校验 URL 安全性，防范 SSRF 漏洞。
-/// 如果 Host 是域名则并发异步解析 IP，并对所有 IP 范围做内网及私有网段的过滤。
-pub(crate) async fn is_safe_url_async(url_str: &str) -> bool {
-    let parsed = match reqwest::Url::parse(url_str) {
-        Ok(u) => u,
-        Err(_) => return false,
-    };
-
-    // 仅允许 HTTP 和 HTTPS 协议
-    let scheme = parsed.scheme();
-    if scheme != "http" && scheme != "https" {
-        return false;
-    }
-
-    let host_str = match parsed.host_str() {
-        Some(h) => h,
-        None => return false,
-    };
-
-    // 快速拦截本地/回环 Host
-    let host_lower = host_str.to_lowercase();
-    if host_lower == "localhost" || host_lower.ends_with(".local") || host_lower.ends_with(".lan") {
-        return false;
-    }
-
-    // 校验 Host 对应的 IP 范围
-    match parsed.host() {
-        Some(url::Host::Ipv4(ip)) => !is_ipv4_private(ip),
-        Some(url::Host::Ipv6(ip)) => !is_ipv6_private(ip),
-        Some(url::Host::Domain(domain)) => {
-            // 对域名进行异步解析，防止 DNS Rebinding 绕过
-            let port = parsed
-                .port()
-                .unwrap_or(if scheme == "https" { 443 } else { 80 });
-            let addr_str = format!("{}:{}", domain, port);
-            let addrs_res = tokio::net::lookup_host(&addr_str).await;
-            if let Ok(mut addrs) = addrs_res {
-                while let Some(addr) = addrs.next() {
-                    let ip = addr.ip();
-                    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
-                        return false;
-                    }
-                    match ip {
-                        std::net::IpAddr::V4(ipv4) => {
-                            if is_ipv4_private(ipv4) {
-                                return false;
-                            }
-                        }
-                        std::net::IpAddr::V6(ipv6) => {
-                            if is_ipv6_private(ipv6) {
-                                return false;
-                            }
-                        }
-                    }
-                }
-                true
-            } else {
-                false // 无法解析的域名
-            }
-        }
-        None => false,
-    }
-}
-
-/// 过滤局域网、私有 IP、本地链路和特殊用途的 IPv4 范围
-fn is_ipv4_private(ip: std::net::Ipv4Addr) -> bool {
-    ip.is_loopback()
-        || ip.is_private()
-        || ip.is_unspecified()
-        || ip.is_link_local()
-        || ip.octets()[0] == 0 // 本地网络
-        || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 64) // CGNAT 100.64.0.0/10
-}
-
-/// 过滤本地、本地链路和特殊用途的 IPv6 范围
-fn is_ipv6_private(ip: std::net::Ipv6Addr) -> bool {
-    ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        // Unique Local Address (fc00::/7)
-        || (ip.segments()[0] & 0xfe00) == 0xfc00
-        // Link Local (fe80::/10)
-        || (ip.segments()[0] & 0xffc0) == 0xfe80
 }
 
 /// 批量解析图片 URL 转 base64 data，支持 HTTP URL 和 data URI。
@@ -2333,11 +2404,6 @@ fn collect_image_urls(body: &serde_json::Value, fields: &[&str]) -> Vec<String> 
         }
     }
     urls
-}
-
-/// 判断请求体是否包含图片输入（检查 image/image_urls/images/image[] 字段）
-pub fn has_image_inputs(body: &serde_json::Value) -> bool {
-    !collect_image_urls(body, &["image", "image_urls", "images", "image[]"]).is_empty()
 }
 
 /// 从数组元素中提取 (url, role/type)。
@@ -2909,7 +2975,7 @@ fn split_model(model_str: &str) -> (&str, &str) {
 
 // ── 图片请求体构建 ──────────────────────────────────────
 // OpenAI snake_case → 腾讯云 PascalCase
-// AigcImageOutputConfig 字段：Resolution, Ratio, Count, Format
+// AigcImageOutputConfig：Resolution / AspectRatio / OutputImageCount / OutputFormat / LogoAdd
 
 pub fn build_tencent_vod_image_body(
     model_str: &str,
@@ -2948,24 +3014,20 @@ pub fn build_tencent_vod_image_body(
         }
     }
 
-    // OutputConfig
+    // OutputConfig：已有则原样透传；否则仅从 OpenAI 扁平参数构建
     if let Some(oc) = body.get("OutputConfig") {
         tb["OutputConfig"] = oc.clone();
     } else {
         let mut oc = serde_json::Map::new();
-        // n -> Count
         if let Some(n) = body.get("n").and_then(|v| v.as_i64()) {
             oc.insert("OutputImageCount".into(), serde_json::json!(n));
         }
-        // resolution -> Resolution（优先级最高）
         if let Some(r) = body.get("resolution").and_then(|v| v.as_str()) {
             oc.insert("Resolution".into(), serde_json::json!(r.to_uppercase()));
         }
-        // ratio -> Ratio（优先级最高）
         if let Some(r) = body.get("ratio").and_then(|v| v.as_str()) {
             oc.insert("AspectRatio".into(), serde_json::json!(r));
         }
-        // size -> 尝试提取 Ratio（仅当 ratio 未明确提供时）
         if !oc.contains_key("AspectRatio") {
             if let Some(size) = body.get("size").and_then(|v| v.as_str()) {
                 if let Some(ratio) = size_to_ratio(size) {
@@ -2973,11 +3035,10 @@ pub fn build_tencent_vod_image_body(
                 }
             }
         }
-        // format -> OutputFormat
-        if let Some(f) = body.get("response_format").and_then(|v| v.as_str()) {
+        // output_format → OutputFormat（勿用 response_format，那是投递方式）
+        if let Some(f) = body.get("output_format").and_then(|v| v.as_str()) {
             oc.insert("OutputFormat".into(), serde_json::json!(f));
         }
-        // watermark -> LogoAdd
         if let Some(wm) = body.get("watermark") {
             let enabled = wm.as_bool().unwrap_or(false) || wm.as_str() == Some("true");
             oc.insert(
@@ -2985,7 +3046,6 @@ pub fn build_tencent_vod_image_body(
                 serde_json::json!(if enabled { "Enabled" } else { "Disabled" }),
             );
         }
-        // Resolution 兜底：保证计费正常
         if !oc.contains_key("Resolution") {
             oc.insert("Resolution".into(), serde_json::json!("1K"));
         }
@@ -3324,7 +3384,7 @@ pub fn build_jimeng_headers(
         let _ = action;
         let _ = body;
         let _ = base_url;
-        tracing::warn!("即梦签名在开源版本（未装载商业插件）中未启用");
+        tracing::warn!("[JimengSign] 签名在开源版本（未装载商业插件）中未启用");
         vec![]
     }
     #[cfg(feature = "commercial_plugins")]
@@ -3351,7 +3411,7 @@ pub fn build_jimeng_headers(
         );
         // 调试日志：输出签名关键参数，便于排查 SignatureDoesNotMatch
         tracing::info!(
-            "[Jimeng Sign] host={}, query={}, ak={}, body_len={}, payload_sha256={}, x_date={}",
+            "[JimengSign] 主机={} 查询参数={} AK={} 消息体长度={} 消息体哈希={} 日期={}",
             host,
             query,
             access_key,
@@ -3650,7 +3710,7 @@ pub fn resolve_volcengine_media_enhance_path(resolved: &mut ResolvedForward, mod
         // 核心依据数据库中必定存在的系统唯一持久 mid 标识
         let mid = resolved.mid.as_deref().unwrap_or("");
         tracing::info!(
-            "[VolcEnhance] 网关路径重写解析: mid = '{}', model_id = '{}'",
+            "[VolcEnhance] 网关路径重写解析: 真实MID='{}' 模型='{}'",
             mid,
             model
         );

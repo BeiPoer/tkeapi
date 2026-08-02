@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -147,25 +147,6 @@ impl BillingRule {
 
         1.0
     }
-
-    pub fn apply_time_multiplier(&mut self, default_tz: &str) -> f64 {
-        if self.is_multiplier_applied {
-            return self.applied_multiplier;
-        }
-        let multiplier = self.get_current_multiplier(default_tz);
-        self.applied_multiplier = multiplier;
-        self.is_multiplier_applied = true;
-        if (multiplier - 1.0).abs() > 0.00001 {
-            self.prompt_rate *= multiplier;
-            self.completion_rate *= multiplier;
-            self.cached_rate *= multiplier;
-            self.claude_cache_creation_rate *= multiplier;
-            self.claude_cache_read_rate *= multiplier;
-            self.fixed_rate *= multiplier;
-            self.duration_rate *= multiplier;
-        }
-        multiplier
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -227,6 +208,9 @@ pub struct PricingTier {
     /// 缓存命中(非音频)费率(/1M)，#[serde(default)] 兼容旧数据
     #[serde(default)]
     pub cached_rate: f64,
+    /// 缓存写入费率(/1M)，GPT-5.6+ 等；未填则写入量并入未缓存输入按 prompt_rate
+    #[serde(default)]
+    pub cache_write_rate: f64,
     /// 输入(音频)费率(/1M)，豆包聊天分离计价
     #[serde(default)]
     pub audio_prompt_rate: f64,
@@ -354,20 +338,6 @@ pub struct ClassificationsResponse {
     pub providers: Vec<ClassificationCount>,
     pub api_providers: Vec<ClassificationCount>,
     pub types: Vec<ClassificationCount>,
-}
-
-impl Model {
-    pub fn get_group_ratios(&self) -> std::collections::HashMap<String, f64> {
-        serde_json::from_str(&self.group_ratios).unwrap_or_default()
-    }
-
-    pub fn get_multiplier_for_group(&self, group: &str) -> f64 {
-        let ratios = self.get_group_ratios();
-        *ratios
-            .get(group)
-            .or_else(|| ratios.get("default"))
-            .unwrap_or(&1.0)
-    }
 }
 
 #[derive(Debug, Deserialize)]

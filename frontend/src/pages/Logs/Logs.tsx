@@ -7,16 +7,16 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Table, Tag, Card, Typography, Space, Input, Button, Avatar, Row, Col, Descriptions, theme, Grid, Tooltip, DatePicker, message, Radio, Modal, Form, Spin } from 'antd';
-import MobileCardList, { MobileCard, CardRow, CardActions } from '../../components/MobileCardList';
-import { RefreshCw, Search, Download, Image as ImageIcon, MessageSquare, Video, Wrench, LayoutGrid, Copy, Cuboid, ListOrdered, Mic, MoreHorizontal, User } from 'lucide-react';
+import { Table, Tag, Card, Typography, Space, Input, Button, Row, Col, Descriptions, theme, Grid, Tooltip, DatePicker, message, Modal, Spin, Select } from 'antd';
+import MobileCardList, { MobileCard, CardRow } from '../../components/MobileCardList';
+import { RefreshCw, Search, Download, Image as ImageIcon, MessageSquare, Wrench, LayoutGrid, Copy, Cuboid, ListOrdered, Mic, MoreHorizontal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import request from '../../utils/request';
 import { QueryGuard, isRequestAborted } from '../../utils/queryGuard';
 import useSettingsStore from '../../store/settings';
 import useAuthStore from '../../store/auth';
 import { useThemeStore } from '../../store/theme';
-import type { RequestLog, ModelModel } from '../../types';
+import type { RequestLog } from '../../types';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import { formatApiDateTime } from '../../utils/timedisplay';
@@ -28,6 +28,60 @@ const { RangePicker } = DatePicker;
 
 const { Text } = Typography;
 const { useBreakpoint } = Grid;
+
+/** 筛选栏常用状态码（含上游常见 422） */
+const STATUS_CODE_FILTER_VALUES = [
+  '0', '400', '401', '402', '403', '404', '408', '409', '422', '429', '500', '502', '503', '504',
+] as const;
+
+/** 筛选栏错误码 → 请求参数；仅非负整数，否则不传 */
+function parseStatusCodeFilter(raw?: string): number | undefined {
+  const s = raw?.trim() ?? '';
+  return /^\d+$/.test(s) ? Number(s) : undefined;
+}
+
+type LogListFilters = {
+  modelFilter?: string;
+  searchKeyword?: string;
+  userFilter?: string;
+  channelFilter?: string;
+  statusFilter?: string;
+  statusCodeFilter?: string;
+  dateRange?: [any, any] | null;
+  actionTypeFilter?: string;
+  routerEp?: string;
+  userGroupFilter?: string;
+};
+
+/** 列表/导出共用查询条件（不含 page/per_page） */
+function buildLogListParams(f: LogListFilters): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  const model = f.modelFilter?.trim();
+  if (model) params.model = model;
+  if (f.routerEp) params.router_ep = f.routerEp;
+  const keyword = f.searchKeyword?.trim();
+  if (keyword) params.search_keyword = keyword;
+  const uid = f.userFilter?.trim();
+  if (uid) params.user_id = uid;
+  if (f.userGroupFilter) params.user_group = f.userGroupFilter;
+  if (f.channelFilter) params.channel_group_aid = f.channelFilter;
+  if (f.statusFilter) params.status = f.statusFilter;
+  const statusCode = parseStatusCodeFilter(f.statusCodeFilter);
+  if (statusCode !== undefined) params.status_code = statusCode;
+  Object.assign(params, toDateRangeParams(f.dateRange));
+  if (f.actionTypeFilter && f.actionTypeFilter !== '全部') {
+    params.action_type = f.actionTypeFilter;
+  }
+  return params;
+}
+
+/** overrides 显式传入 undefined 时覆盖当前值（勿用 ?? / !== undefined） */
+function pickFilter<T>(overrides: object | undefined, key: string, current: T): T {
+  if (overrides != null && Object.prototype.hasOwnProperty.call(overrides, key)) {
+    return (overrides as Record<string, unknown>)[key] as T;
+  }
+  return current;
+}
 
 
 const CopyButton: React.FC<{ text: string, color?: string }> = ({ text, color }) => {
@@ -107,6 +161,33 @@ function billingUsageMetrics(record: RequestLog) {
   return { cacheCreation, cacheRead, webSearch, isClaude: cacheCreation > 0 || cacheRead > 0 };
 }
 
+/** 从 logs.plugin_tag 读取展示用元信息（client_ct / 插件 title） */
+function parsePluginTagMeta(pluginTag?: string | null): { title?: string; clientCt?: string } {
+  if (!pluginTag) return {};
+  try {
+    const tag = JSON.parse(pluginTag);
+    return {
+      title: typeof tag?.title === 'string' ? tag.title : undefined,
+      clientCt: typeof tag?.client_ct === 'string' && tag.client_ct ? tag.client_ct : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function prettyJson(raw?: string | null): string | null | undefined {
+  if (!raw) return raw;
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
+}
+
+function clientCtColor(ct: string) {
+  return ct.includes('multipart') ? 'orange' : 'blue';
+}
+
 const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
   const { t } = useTranslation();
   const { token: themeToken } = theme.useToken();
@@ -114,19 +195,25 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
   const { themeMode } = useThemeStore();
   const _isLight = themeMode === 'light';
   const currencySymbol = settings?.currency?.currency_symbol || '$';
+  const statusCodeOptions = STATUS_CODE_FILTER_VALUES.map((value) => ({
+    value,
+    label: t(`logs.status_code_${value}`),
+  }));
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [modelFilter, setModelFilter] = useState('');
-  const [kidFilter, setKidFilter] = useState('');
   const [searchKeyword, setSearchKeyword] = useState('');
   const [searchParams] = useSearchParams();
   const [userFilter, setUserFilter] = useState<string | undefined>(searchParams.get('user_id') || undefined);
   const [channelFilter, setChannelFilter] = useState<string | undefined>(undefined);
   const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined);
+  const [statusCodeFilter, setStatusCodeFilter] = useState<string | undefined>(undefined);
+  const [userGroupFilter, setUserGroupFilter] = useState<string | undefined>(undefined);
   const [channelsList, setChannelsList] = useState<any[]>([]);
+  const [userLevels, setUserLevels] = useState<any[]>([]);
   const [allowDetails, setAllowDetails] = useState(true);
   const [dateRange, setDateRange] = useState<[any, any] | null>(() => [dayjs().startOf('day'), dayjs().endOf('day')]);
   const [exporting, setExporting] = useState(false);
@@ -161,23 +248,24 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
   useEffect(() => {
     if (user?.role !== 'admin') return;
     request.get('/channels').then((res: any) => setChannelsList(res.data || [])).catch(console.error);
+    request.get('/user_levels').then((res: any) => setUserLevels(res.data || [])).catch(console.error);
   }, [user]);
 
-  const buildParams = useCallback(() => {
-    const params: any = {};
-    if (modelFilter && modelFilter.trim()) params.model = modelFilter.trim();
-    if (routerEp) params.router_ep = routerEp;
-    if (searchKeyword && searchKeyword.trim()) params.search_keyword = searchKeyword.trim();
-    if (userFilter && userFilter.trim()) params.user_id = userFilter.trim();
-    if (channelFilter) params.channel_group_aid = channelFilter;
-    if (statusFilter) params.status = statusFilter;
-    if (kidFilter && kidFilter.trim()) params.token_kid = kidFilter.trim();
-    Object.assign(params, toDateRangeParams(dateRange));
-    if (actionTypeFilter && actionTypeFilter !== '全部') {
-      params.action_type = actionTypeFilter;
-    }
-    return params;
-  }, [modelFilter, searchKeyword, userFilter, channelFilter, statusFilter, dateRange, routerEp, actionTypeFilter, kidFilter]);
+  const buildParams = useCallback(
+    () => buildLogListParams({
+      modelFilter,
+      searchKeyword,
+      userFilter,
+      channelFilter,
+      statusFilter,
+      statusCodeFilter,
+      dateRange,
+      actionTypeFilter,
+      routerEp,
+      userGroupFilter,
+    }),
+    [modelFilter, searchKeyword, userFilter, channelFilter, statusFilter, statusCodeFilter, dateRange, actionTypeFilter, routerEp, userGroupFilter],
+  );
 
   const fetchLogs = useCallback(async (overrides?: {
     page?: number;
@@ -187,35 +275,31 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
     userFilter?: string | undefined;
     channelFilter?: string | undefined;
     statusFilter?: string | undefined;
-    kidFilter?: string;
+    statusCodeFilter?: string | undefined;
     dateRange?: [any, any] | null;
     actionTypeFilter?: string;
+    userGroupFilter?: string | undefined;
   }) => {
     const signal = queryGuardRef.current.begin();
     setLoading(true);
     try {
-      const params: any = {
+      const o = overrides as object | undefined;
+      const params: Record<string, unknown> = {
         page: overrides?.page ?? page,
         per_page: overrides?.pageSize ?? pageSize,
+        ...buildLogListParams({
+          modelFilter: pickFilter(o, 'modelFilter', modelFilter),
+          searchKeyword: pickFilter(o, 'searchKeyword', searchKeyword),
+          userFilter: pickFilter(o, 'userFilter', userFilter),
+          channelFilter: pickFilter(o, 'channelFilter', channelFilter),
+          statusFilter: pickFilter(o, 'statusFilter', statusFilter),
+          statusCodeFilter: pickFilter(o, 'statusCodeFilter', statusCodeFilter),
+          dateRange: pickFilter(o, 'dateRange', dateRange),
+          actionTypeFilter: pickFilter(o, 'actionTypeFilter', actionTypeFilter),
+          userGroupFilter: pickFilter(o, 'userGroupFilter', userGroupFilter),
+          routerEp,
+        }),
       };
-      const model = overrides?.modelFilter !== undefined ? overrides.modelFilter : modelFilter;
-      const keyword = overrides?.searchKeyword !== undefined ? overrides.searchKeyword : searchKeyword;
-      const uid = overrides?.userFilter !== undefined ? overrides.userFilter : userFilter;
-      const channel = overrides?.channelFilter !== undefined ? overrides.channelFilter : channelFilter;
-      const status = overrides?.statusFilter !== undefined ? overrides.statusFilter : statusFilter;
-      const kid = overrides?.kidFilter !== undefined ? overrides.kidFilter : kidFilter;
-      const range = overrides?.dateRange !== undefined ? overrides.dateRange : dateRange;
-      const actionType = overrides?.actionTypeFilter !== undefined ? overrides.actionTypeFilter : actionTypeFilter;
-
-      if (model && model.trim()) params.model = model.trim();
-      if (routerEp) params.router_ep = routerEp;
-      if (keyword && keyword.trim()) params.search_keyword = keyword.trim();
-      if (uid && uid.trim()) params.user_id = uid.trim();
-      if (channel) params.channel_group_aid = channel;
-      if (status) params.status = status;
-      if (kid && kid.trim()) params.token_kid = kid.trim();
-      Object.assign(params, toDateRangeParams(range));
-      if (actionType && actionType !== '全部') params.action_type = actionType;
 
       const resp = await (request.get('/logs', { params, signal }) as unknown as Promise<{ data: RequestLog[]; total: number; allow_details?: boolean }>);
       if (!queryGuardRef.current.isCurrent(signal)) return;
@@ -238,31 +322,9 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
         setLoading(false);
       }
     }
-  }, [page, pageSize, modelFilter, searchKeyword, userFilter, channelFilter, statusFilter, kidFilter, dateRange, routerEp, actionTypeFilter, resetDetailCache]);
+  }, [page, pageSize, modelFilter, searchKeyword, userFilter, channelFilter, statusFilter, statusCodeFilter, dateRange, routerEp, actionTypeFilter, userGroupFilter, resetDetailCache]);
 
 
-  const handleReset = () => {
-    const today: [any, any] = [dayjs().startOf('day'), dayjs().endOf('day')];
-    setModelFilter('');
-    setSearchKeyword('');
-    setUserFilter(undefined);
-    setChannelFilter(undefined);
-    setStatusFilter(undefined);
-    setKidFilter('');
-    setDateRange(today);
-    if (page !== 1) skipNextEffectFetchRef.current = true;
-    setPage(1);
-    fetchLogs({
-      page: 1,
-      modelFilter: '',
-      searchKeyword: '',
-      userFilter: undefined,
-      channelFilter: undefined,
-      statusFilter: undefined,
-      kidFilter: '',
-      dateRange: today,
-    });
-  };
 
   const handleExport = async () => {
     setExporting(true);
@@ -312,7 +374,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
     }
     fetchLogs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, actionTypeFilter, channelFilter, statusFilter]);
+  }, [page, pageSize, actionTypeFilter, channelFilter, statusFilter, userGroupFilter]);
 
   const columns = ([
     {
@@ -359,7 +421,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
         <Space size={4} direction="vertical" style={{ alignItems: 'flex-start' }}>
           <Space size={4}>
             <Text type="secondary" style={{ fontSize: 12 }}>{text || '-'}</Text>
-            {record.channel_provider_type === 'high_availability_group' && <Tag color="blue" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>HA</Tag>}
+            {record.is_ha === 1 && <Tag color="blue" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>HA</Tag>}
           </Space>
           {record.yid && (
             <Tag color="cyan" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>
@@ -420,10 +482,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
       width: 180,
       ellipsis: true,
       render: (text: string, record: RequestLog) => {
-        let pluginLabel: string | null = null;
-        if (record.plugin_tag) {
-          try { pluginLabel = JSON.parse(record.plugin_tag)?.title; } catch {}
-        }
+        const { title: pluginLabel } = parsePluginTagMeta(record.plugin_tag);
         return (
           <Space direction="vertical" size={0}>
             <Space size={4}>
@@ -471,7 +530,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
                 {cacheRead > 0 && <Text type="secondary" style={{ fontSize: 11, color: '#52c41a' }}>{t('logs.cache_read', '缓存读取')}: {cacheRead}</Text>}
               </>
             ) : (
-              (record.cached_tokens ?? 0) > 0 && <Text type="secondary" style={{ fontSize: 11, color: '#52c41a' }}>{t('logs.cache_input', '缓存(输入内)')}: {record.cached_tokens}</Text>
+              (record.cached_tokens ?? 0) > 0 && <Text type="secondary" style={{ fontSize: 11, color: '#52c41a' }}>{t('logs.cache_read', '缓存读取')}: {record.cached_tokens}</Text>
             )}
             {webSearch > 0 && <Text type="secondary" style={{ fontSize: 11, color: '#1677ff' }}>联网搜索: {webSearch}次</Text>}
           </Space>
@@ -500,24 +559,14 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
   const expandedRowRender = (record: RequestLog) => {
     const merged = { ...record, ...detailCache[record.id] };
     const loadingDetail = !!detailLoadingIds[record.id] && !detailCache[record.id];
-    let reqJson = merged.request_content;
-    let respJson = merged.response_content;
-    let postRespJson = merged.post_response;
-    let upstreamReqJson = merged.upstream_req_content;
-    try {
-      if (reqJson) reqJson = JSON.stringify(JSON.parse(reqJson), null, 2);
-    } catch (e) { /* keep raw */ }
-    try {
-      if (respJson) respJson = JSON.stringify(JSON.parse(respJson), null, 2);
-    } catch (e) { /* keep raw */ }
-    try {
-      if (postRespJson) postRespJson = JSON.stringify(JSON.parse(postRespJson), null, 2);
-    } catch (e) { /* keep raw */ }
-    try {
-      if (upstreamReqJson) upstreamReqJson = JSON.stringify(JSON.parse(upstreamReqJson), null, 2);
-    } catch (e) { /* keep raw */ }
+    const reqJson = prettyJson(merged.request_content);
+    const respJson = prettyJson(merged.response_content);
+    const postRespJson = prettyJson(merged.post_response);
+    // 上游出参仅超管展示；用户端 API 已不返回该字段
+    const upstreamReqJson = user?.role === 'admin' ? prettyJson(merged.upstream_req_content) : null;
 
     const costFormula = t('logs.cost_formula_dynamic', '由绑定的计费模板动态结算');
+    const { clientCt } = parsePluginTagMeta(record.plugin_tag);
 
     // 使用 antd theme token 来适配深色/浅色主题
     const panelBg = themeToken.colorBgElevated;
@@ -530,10 +579,15 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
         maxWidth: screens.xs ? 'calc(100vw - 64px)' : 'calc(100vw - 320px)',
         overflowX: 'auto', boxSizing: 'border-box'
       }}>
-        <Descriptions size="small" column={1} labelStyle={{ width: '100px', color: themeToken.colorTextSecondary }} contentStyle={{ wordBreak: 'break-all', whiteSpace: 'pre-wrap' }}>
+        <Descriptions size="small" column={1} styles={{ label: { width: '100px', color: themeToken.colorTextSecondary }, content: { wordBreak: 'break-all', whiteSpace: 'pre-wrap' } }}>
           <Descriptions.Item label={t('logs.system_endpoint', '系统请求路径')}>
             {record.endpoint.startsWith('http') ? record.endpoint : `${window.location.origin}${record.endpoint.startsWith('/') ? '' : '/'}${record.endpoint}`}
           </Descriptions.Item>
+          {clientCt && (
+            <Descriptions.Item label={t('logs.client_ct', '请求提交类型')}>
+              <Tag color={clientCtColor(clientCt)}>{clientCt}</Tag>
+            </Descriptions.Item>
+          )}
           {record.upstream_url && (
             <Descriptions.Item label={t('logs.upstream_url', '真实上游地址')}>
               {record.upstream_url}
@@ -543,7 +597,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
             <Descriptions.Item label={t('logs.channel_aid', '渠道标识')}>
               <Space size={4}>
                 <span>{record.channel_group_aid || '-'}</span>
-                {record.channel_provider_type === 'high_availability_group' && <Tag color="blue" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>HA</Tag>}
+                {record.is_ha === 1 && <Tag color="blue" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>HA</Tag>}
               </Space>
             </Descriptions.Item>
           )}
@@ -578,18 +632,15 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
               }
             })()}
           </Descriptions.Item>
+          {user?.role === 'admin' && (
           <Descriptions.Item label={t('logs.match_rule', '匹配规则')}>
             <Space size={16} wrap>
-              {user?.role === 'admin' && (
-                <>
-                  <Text type="secondary" style={{ fontSize: 12 }}>{t('logs.billing_rule', '计费规则 (PID)')}: {record.billing_pid ? <Typography.Text keyboard>{record.billing_pid}</Typography.Text> : '-'}</Text>
-                  <Text type="secondary" style={{ fontSize: 12 }}>{t('logs.forward_rule', '转发规则 (EID)')}: {record.forward_eid ? <Typography.Text keyboard>{record.forward_eid}</Typography.Text> : '-'}</Text>
-                </>
-              )}
+              <Text type="secondary" style={{ fontSize: 12 }}>{t('logs.billing_rule', '计费规则 (PID)')}: {record.billing_pid ? <Typography.Text keyboard>{record.billing_pid}</Typography.Text> : '-'}</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>{t('logs.forward_rule', '转发规则 (EID)')}: {record.forward_eid ? <Typography.Text keyboard>{record.forward_eid}</Typography.Text> : '-'}</Text>
               {record.plugin_tag && (() => {
                 try {
                   const tag = JSON.parse(record.plugin_tag);
-                  if (tag && tag.name === 'happyhorse') {
+                  if (tag && tag.name === 'happyhorse' && (tag.custom_model || tag.actual_model)) {
                     return (
                       <Tag color="purple" style={{ fontSize: 11 }}>
                         {tag.title || tag.name}: {tag.custom_model} → {tag.actual_model} ({tag.media_type})
@@ -601,6 +652,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
               })()}
             </Space>
           </Descriptions.Item>
+          )}
           <Descriptions.Item label={t('logs.billing_detail', '计费明细')}>
             <div>
               {merged.billing_detail ? (
@@ -639,6 +691,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
               </pre>
             </div>
           </Col>
+          {user?.role === 'admin' && (
           <Col span={24} style={{ maxWidth: '100%', overflow: 'hidden' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <Text strong style={{ fontSize: 13 }}>{t('logs.upstream_req_params', '真实转发给上游的请求参数（出参）')}</Text>
@@ -654,6 +707,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
               </pre>
             </div>
           </Col>
+          )}
           <Col span={24} style={{ maxWidth: '100%', overflow: 'hidden' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <Text strong style={{ fontSize: 13 }}>{t('logs.resp_content', '响应结果')}</Text>
@@ -765,61 +819,76 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
 
       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 16 }}>
           {user?.role === 'admin' && (
-            <Input
-              placeholder={t('logs.search_user_id', '搜索用户 UID/用户名')}
-              prefix={<Search size={16} />}
-              value={userFilter || ''}
-              onChange={e => setUserFilter(e.target.value || undefined)}
-              onPressEnter={() => fetchLogs()}
-              style={{ width: screens.xs ? '100%' : 180 }}
-              allowClear
-            />
+            <>
+              <Input
+                placeholder={t('logs.search_user_id', '搜索用户 UID/用户名')}
+                prefix={<Search size={16} />}
+                value={userFilter || ''}
+                onChange={e => setUserFilter(e.target.value || undefined)}
+                onPressEnter={() => fetchLogs()}
+                style={{ width: screens.xs ? '100%' : 180, fontSize: 12, height: 32 }}
+                allowClear
+              />
+              <Select
+                placeholder={t('logs.search_user_group', '用户等级')}
+                value={userGroupFilter}
+                onChange={(v) => setUserGroupFilter(v ?? undefined)}
+                options={userLevels.map((l: any) => ({ value: l.group_key, label: `${l.name} (${l.discount}x)` }))}
+                style={{ width: screens.xs ? '100%' : 180, fontSize: 12, height: 32 }}
+                popupMatchSelectWidth={false}
+                allowClear
+                showSearch
+                optionFilterProp="label"
+              />
+            </>
           )}
           {user?.role !== 'admin' && userFilter && (
             <Input
               value={userFilter}
-              style={{ width: screens.xs ? '100%' : 120 }}
+              style={{ width: screens.xs ? '100%' : 120, fontSize: 12, height: 32 }}
               disabled
             />
           )}
           <Input
-            placeholder={t('logs.search_keyword', '搜索日志 ID / 任务 ID')}
+            placeholder={t('logs.search_keyword', '搜索日志 ID / 任务 ID / 渠道 AID')}
             prefix={<Search size={16} />}
             value={searchKeyword}
             onChange={e => setSearchKeyword(e.target.value)}
             onPressEnter={() => fetchLogs()}
-            style={{ width: screens.xs ? '100%' : 240 }}
+            style={{ width: screens.xs ? '100%' : 260, fontSize: 12, height: 32 }}
             allowClear
           />
           <Input
-            placeholder={t('logs.search_model')}
+            placeholder={t('logs.model_name', '模型名称')}
             prefix={<Search size={16} />}
             value={modelFilter}
             onChange={e => setModelFilter(e.target.value)}
             onPressEnter={() => fetchLogs()}
-            style={{ width: screens.xs ? '100%' : 140 }}
+            style={{ width: screens.xs ? '100%' : 140, fontSize: 12, height: 32 }}
           />
-          <Input
-            placeholder={t('logs.search_kid', '搜索 KID')}
-            prefix={<Search size={16} />}
-            value={kidFilter}
-            onChange={e => setKidFilter(e.target.value)}
-            onPressEnter={() => fetchLogs()}
-            style={{ width: screens.xs ? '100%' : 140 }}
+          <Select
+            placeholder={t('logs.search_status_code', '错误码')}
+            value={statusCodeFilter}
+            onChange={(v) => setStatusCodeFilter(v ?? undefined)}
+            options={statusCodeOptions}
+            style={{ width: screens.xs ? '100%' : 160, fontSize: 12, height: 32 }}
+            allowClear
+            showSearch
+            optionFilterProp="label"
           />
           <RangePicker
             value={dateRange}
             placeholder={[t('logs.start_date', '开始日期'), t('logs.end_date', '结束日期')]}
             onChange={(vals) => setDateRange(vals as [any, any] | null)}
-            style={{ width: screens.xs ? '100%' : undefined }}
+            className="font-size-12"
+            style={{ width: screens.xs ? '100%' : undefined, fontSize: 12, height: 32 }}
           />
           <Space size={8} style={{ marginLeft: screens.xs ? 0 : 'auto' }}>
-            <Button type="primary" icon={<Search size={14} />} onClick={() => fetchLogs()} loading={loading} disabled={loading} style={{ borderRadius: 6 }}>{t('logs.query', '查询')}</Button>
-            <Button onClick={handleReset} disabled={loading} style={{ borderRadius: 6 }}>{t('logs.reset', '重置')}</Button>
-            <Button icon={<RefreshCw size={14} />} onClick={() => fetchLogs()} loading={loading} disabled={loading} style={{ borderRadius: 6 }}>{t('common.refresh', '刷新')}</Button>
+            <Button type="primary" icon={<Search size={14} />} onClick={() => fetchLogs()} loading={loading} disabled={loading} style={{ height: 32, borderRadius: 6, fontSize: 12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{t('logs.query', '查询')}</Button>
+            <Button icon={<RefreshCw size={14} />} onClick={() => fetchLogs()} loading={loading} disabled={loading} style={{ height: 32, borderRadius: 6, fontSize: 12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{t('common.refresh', '刷新')}</Button>
             {user?.role === 'admin' && (
               <Tooltip title={t('logs.export_tooltip', '根据当前筛选条件导出 CSV（上限10万条）')}>
-                <Button icon={<Download size={14} />} loading={exporting} disabled={loading} onClick={handleExport} style={{ borderRadius: 6 }}>{t('logs.export', '导出')}</Button>
+                <Button icon={<Download size={14} />} loading={exporting} disabled={loading} onClick={handleExport} style={{ height: 32, borderRadius: 6, fontSize: 12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{t('logs.export', '导出')}</Button>
               </Tooltip>
             )}
           </Space>
@@ -876,7 +945,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
                 {user?.role === 'admin' && record.channel_group_aid && <CardRow label={t('logs.channel_aid', '渠道AID')}>
                   <Space size={4}>
                     <Text type="secondary" style={{ fontSize: 12 }}>{record.channel_group_aid}</Text>
-                    {record.channel_provider_type === 'high_availability_group' && <Tag color="blue" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>HA</Tag>}
+                    {record.is_ha === 1 && <Tag color="blue" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>HA</Tag>}
                   </Space>
                 </CardRow>}
                 {user?.role === 'admin' && record.yid && <CardRow label={t('logs.sub_channel_name', '实际调用上游')}>
@@ -912,7 +981,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
                           </>
                         );
                       }
-                      return (record.cached_tokens ?? 0) > 0 ? <Text type="secondary" style={{ fontSize: 11, color: '#52c41a' }}>缓存(输入内):{record.cached_tokens}</Text> : null;
+                      return (record.cached_tokens ?? 0) > 0 ? <Text type="secondary" style={{ fontSize: 11, color: '#52c41a' }}>{t('logs.cache_read', '缓存读取')}:{record.cached_tokens}</Text> : null;
                     })()}
                   </Space>
                 </CardRow>

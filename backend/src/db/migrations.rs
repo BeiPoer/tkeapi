@@ -26,6 +26,9 @@
    23505 / pg_class_relname_nsp_index；once_migration! 将其视为已成功（幂等）。
 7. 半截/损坏索引上 `DROP INDEX CONCURRENTLY` 可能报 XX000（pg_attribute catalog gap）；
    冗余清理用非并发 DROP + EXCEPTION，或由 once_migration! 按成功跳过，避免卡死启动。
+8. 模型分类排序保护：`model_providers` / `model_api_providers` / `model_types` 的 `sort_order`
+   由管理端配置，升级不得覆盖。种子仅允许 INSERT（WHERE NOT EXISTS / ON CONFLICT 只改
+   is_system 等元数据）；回填 logo/remark/name_en 时禁止顺带 SET sort_order。
 */
 
 // 开源版不再 noop 商业相关 SQL：库表/数据允许存在，插件中心由 is_plugin_compiled 过滤展示。
@@ -423,40 +426,41 @@ macro_rules! pg_migration_blocks {
         r#"INSERT INTO forward_rules (name, rule_type, description, config_json, category, is_system)
         SELECT t.name, t.rule_type, t.description, t.config_json, t.category, t.is_system
         FROM (VALUES
-            ('OpenAI 兼容原生通道 (聊天)', 'openai', '标准的按路径聊天透传规则', '{"mode":"passthrough","header_mapping":{"Authorization":"Bearer ${api_key}"},"path_rewrite":{"old":"/v1/chat/completions","new":"/v1/chat/completions"}}', '聊天', 1),
-            ('OpenAI 兼容原生通道 (图片)', 'openai', '供图片生成调用的原生通道', '{"mode":"passthrough","header_mapping":{"Authorization":"Bearer ${api_key}"},"path_rewrite":{"old":"/v1/images/generations","new":"/v1/images/generations"}}', '图片', 1),
-            ('OpenAI 兼容原生通道 (视频)', 'openai', '供视频生成调用的原生通道', '{"mode":"passthrough","header_mapping":{"Authorization":"Bearer ${api_key}"},"path_rewrite":{"old":"/v1/video/generations","new":"/v1/video/generations"}}', '视频', 1),
-            ('Anthropic 原生转化', 'anthropic', '将 OpenAI 格式请求转换为 Anthropic Messages API 格式，接口 /v1/messages', '{"mode":"transform","target_type":"anthropic","path_rewrite":{"old":"/v1/chat/completions","new":"/v1/messages"},"auth_type":"x-api-key"}', '聊天', 1),
-            ('Google Gemini 原生生图', 'gemini', '将标准的生图请求适配到 Gemini contents 接口', '{"mode":"transform","target_type":"gemini_image","path_rewrite":{"old":"/v1/images/generations","new":"/v1beta/models/${model}:generateContent"},"auth_type":"query_key"}', '图片', 1),
-            ('Google Gemini 格式转换 (聊天)', 'gemini', '将标准请求转换并适配到 Gemini contents', '{"mode":"transform","target_type":"gemini","path_rewrite":{"old":"/v1/chat/completions","new":"/v1beta/models/${model}:generateContent"},"auth_type":"query_key"}', '聊天', 1),
-            ('火山方舟 视频生成', 'volcengine', '将标准的视频生成请求适配到火山方舟 tasks 接口', '{"mode":"transform","target_type":"volcengine","path_rewrite":{"old":"/v1/video/generations","new":"/api/v3/contents/generations/tasks"},"auth_type":"bearer"}', '视频', 1),
-            ('火山方舟 聊天', 'volcengine', '将标准的聊天请求转发到火山方舟官方 Chat 接口，body 保持 OpenAI 兼容格式', '{"mode":"transform","target_type":"volcengine_chat","path_rewrite":{"old":"/v1/chat/completions","new":"/api/v3/chat/completions"},"auth_type":"bearer"}', '聊天', 1),
-            ('火山方舟 图片生成', 'volcengine', '将标准的图片生成请求转发到火山方舟官方 images 接口，body 保持 OpenAI 兼容格式', '{"mode":"transform","target_type":"volcengine_image","path_rewrite":{"old":"/v1/images/generations","new":"/api/v3/images/generations"},"auth_type":"bearer"}', '图片', 1),
-            ('火山方舟 视频素材转换', 'volcengine', '在火山方舟视频生成基础上，自动将 content 中的网络 URL 通过 CreateAsset API 转换为素材 ID（asset://前缀），需配置素材资产管理插件的审核凭证', '{"mode":"transform","target_type":"volcengine","asset_convert":true,"path_rewrite":{"old":"/v1/video/generations","new":"/api/v3/contents/generations/tasks"},"auth_type":"bearer"}', '视频', 1),
-            ('火山方舟 视频素材转换(国际版)', 'volcengine', '在火山方舟视频生成基础上，自动将 content 中的网络 URL 通过 CreateAsset API 转换为素材 ID（asset://前缀），需配置国际版素材资产管理插件的审核凭证', '{"mode":"transform","target_type":"volcengine","asset_convert":true,"asset_convert_ns":"asset_manager_intl","path_rewrite":{"old":"/v1/video/generations","new":"/api/v3/contents/generations/tasks"},"auth_type":"bearer"}', '视频', 1),
-            ('火山方舟 视频素材免审核转换(国际版)', 'volcengine', '在火山方舟视频生成基础上，自动将 content 中的网络 URL 通过 CreateAsset API 转换为素材 ID（asset://前缀），且向火山方舟申请免审核，需配置国际版素材资产管理插件的审核凭证', '{"mode":"transform","target_type":"volcengine","asset_convert":true,"asset_convert_ns":"asset_manager_intl","moderation":true,"path_rewrite":{"old":"/v1/video/generations","new":"/api/v3/contents/generations/tasks"},"auth_type":"bearer"}', '视频', 1),
-            ('阿里百炼 DashScope 视频生成', 'aliyun', '将标准视频生成请求（/v1/video/generations）转换为阿里百炼 DashScope 格式，支持文生视频/图生视频/参考生视频/视频编辑，异步任务自动注入 X-DashScope-Async Header', '{"mode":"transform","target_type":"dashscope","path_rewrite":{"old":"/v1/video/generations","new":"/api/v1/services/aigc/video-generation/video-synthesis"},"auth_type":"bearer","poll_path":"/api/v1/tasks/${task_id}"}', '视频', 1),
-            ('阿里百炼 DashScope 图片生成', 'aliyun', '将标准图片生成请求（/v1/images/generations）转换为阿里百炼 DashScope 格式', '{"mode":"transform","target_type":"dashscope_image","path_rewrite":{"old":"/v1/images/generations","new":"/api/v1/services/aigc/multimodal-generation/generation"},"auth_type":"bearer"}', '图片', 1),
-            ('阿里百炼 DashScope 聊天 (OpenAI兼容)', 'aliyun', '将标准聊天请求转发到阿里百炼兼容接口', '{"mode":"transform","target_type":"openai","path_rewrite":{"old":"/v1/chat/completions","new":"/compatible-mode/v1/chat/completions"},"auth_type":"bearer"}', '聊天', 1),
-            ('阿里百炼 DashScope 聊天 (Anthropic兼容)', 'aliyun', '将请求转换为 Anthropic 格式并转发到阿里百炼兼容接口', '{"mode":"transform","target_type":"anthropic","path_rewrite":{"old":"/v1/messages","new":"/apps/anthropic/v1/messages"},"auth_type":"x-api-key"}', '聊天', 1),
-            ('可灵 视频生成 (文/图/多图)', 'kling', '将标准视频生成请求转发到可灵官方 API，系统根据请求体自动分发到 text2video/image2video/multi-image2video', '{"mode":"transform","target_type":"kling","path_rewrite":{"old":"/v1/video/generations","new":"/v1/videos/text2video"},"auth_type":"bearer"}', '视频', 1),
-            ('可灵 Omni 视频 (kling-v3-omni/video-o1)', 'kling', '将视频生成请求转发到可灵 Omni 视频端点', '{"mode":"transform","target_type":"kling","path_rewrite":{"old":"/v1/video/generations","new":"/v1/videos/omni-video"},"auth_type":"bearer"}', '视频', 1),
-            ('可灵 图片生成', 'kling', '将标准图片生成请求转发到可灵官方 API，含多图参考自动分发', '{"mode":"transform","target_type":"kling","path_rewrite":{"old":"/v1/images/generations","new":"/v1/images/generations"},"auth_type":"bearer"}', '图片', 1),
-            ('可灵 Omni 图片 (kling-v3-omni/image-o1)', 'kling', '将图片生成请求转发到可灵 Omni 图片端点', '{"mode":"transform","target_type":"kling","path_rewrite":{"old":"/v1/images/generations","new":"/v1/images/omni-image"},"auth_type":"bearer"}', '图片', 1),
-            ('腾讯云 VOD AIGC 生图', 'tencent_vod', '将标准图片生成请求转换为腾讯云点播 AIGC CreateAigcImageTask 接口。密钥格式：SecretId:SecretKey:SubAppId，模型格式：ModelName@ModelVersion', '{"mode":"transform","target_type":"tencent_vod_image","path_rewrite":{"old":"/v1/images/generations","new":"/"},"poll_path":"/v1/tasks/${task_id}","auth_type":"tencent_vod"}', '图片', 1),
-            ('腾讯云 VOD AIGC 生图 (同步轮询)', 'tencent_vod', '同步版：无 poll_path，OpenAI 兼容请求将自动同步轮询至终态后返回结果。密钥格式：SecretId:SecretKey:SubAppId，模型格式：ModelName@ModelVersion', '{"mode":"transform","target_type":"tencent_vod_image","path_rewrite":{"old":"/v1/images/generations","new":"/"},"auth_type":"tencent_vod"}', '图片', 1),
-            ('腾讯云 VOD AIGC 生视频', 'tencent_vod', '将标准视频生成请求转换为腾讯云点播 AIGC CreateAigcVideoTask 接口。密钥格式：SecretId:SecretKey:SubAppId，模型格式：ModelName@ModelVersion', '{"mode":"transform","target_type":"tencent_vod_video","path_rewrite":{"old":"/v1/video/generations","new":"/"},"auth_type":"tencent_vod"}', '视频', 1),
-            ('即梦AI 图片生成', 'jimeng', '将标准图片生成请求转换为即梦AI（火山引擎 CV 视觉服务）格式。密钥格式：AccessKeyID:SecretAccessKey，模型映射为 req_key（如 high_aes_general_v30l_tta）', '{"mode":"transform","target_type":"jimeng_image","path_rewrite":{"old":"/v1/images/generations","new":"/"},"auth_type":"jimeng"}', '图片', 1),
-            ('即梦AI 视频生成', 'jimeng', '将标准视频生成请求转换为即梦AI（火山引擎 CV 视觉服务）格式。密钥格式：AccessKeyID:SecretAccessKey，模型映射为 req_key（如 dreamina_ic_generate_video_v2）', '{"mode":"transform","target_type":"jimeng_video","path_rewrite":{"old":"/v1/video/generations","new":"/"},"auth_type":"jimeng"}', '视频', 1),
-            ('GPT 官方图片生成', 'gpt', '将图片生成请求转发到 GPT 官方 API，自动根据请求体内容分发到 generations（文生图）或 edits（图生图/多图生图）端点', '{"mode":"transform","target_type":"gpt","path_rewrite":{"old":"/v1/images/generations","new":"/v1/images/generations"},"auth_type":"bearer"}', '图片', 1),
-            ('火山方舟 语音合成 (TTS V3)', 'volcengine', '将 OpenAI 格式语音合成请求（/v1/audio/speech）转换为火山方舟 TTS V3 SSE 格式。渠道地址: openspeech.bytedance.com，密钥为 X-Api-Key，模型ID通过 X-Api-Resource-Id 传递', '{"mode":"transform","target_type":"volcengine_tts","path_rewrite":{"old":"/v1/audio/speech","new":"/api/v3/tts/unidirectional/sse"},"auth_type":"volcengine_tts"}', '音频', 1),
-            ('火山方舟 语音合成 (TTS V3 Chunked)', 'volcengine', '将 OpenAI 格式语音合成请求（/v1/audio/speech）转换为火山方舟 TTS V3 HTTP Chunked 格式与 SSE 版本请求体和鉴权相同，仅传输协议不同（更轻量）', '{"mode":"transform","target_type":"volcengine_tts","path_rewrite":{"old":"/v1/audio/speech","new":"/api/v3/tts/unidirectional"},"auth_type":"volcengine_tts"}', '音频', 1),
-            ('OpenAI 兼容原生通道 (语音)', 'openai', '标准的语音合成透传规则，直接转发到 /v1/audio/speech', '{"mode":"passthrough","header_mapping":{"Authorization":"Bearer ${api_key}"},"path_rewrite":{"old":"/v1/audio/speech","new":"/v1/audio/speech"}}', '音频', 1),
-            ('阿里百炼 DashScope 文本向量 (OpenAI兼容)', 'aliyun', '将文本向量请求转发到阿里百炼兼容接口', '{"mode":"passthrough","target_type":"openai","path_rewrite":{"old":"/v1/embeddings","new":"/compatible-mode/v1/embeddings"},"auth_type":"bearer"}', '向量', 1),
-            ('阿里百炼 DashScope 排序 (兼容模式)', 'aliyun', '将排序请求转发到阿里百炼兼容接口，适用于 qwen3-rerank 等模型', '{"mode":"passthrough","target_type":"openai","path_rewrite":{"old":"/v1/rerank","new":"/compatible-api/v1/reranks"},"auth_type":"bearer"}', '排序', 1),
-            ('阿里百炼 DashScope 排序 (原生)', 'aliyun', '将排序请求转发到阿里百炼原生 DashScope 接口，适用于 gte-rerank-v2 等模型', '{"mode":"passthrough","target_type":"openai","path_rewrite":{"old":"/v1/rerank","new":"/api/v1/services/rerank/text-rerank/text-rerank"},"auth_type":"bearer"}', '排序', 1),
+            ('OpenAI 兼容原生通道 (聊天)', 'openai', '标准的按路径聊天透传规则', '{"path_rewrite":{"old":"/v1/chat/completions","new":"/v1/chat/completions"}}', '聊天', 1),
+            ('OpenAI 兼容原生通道 (图片)', 'openai', '供图片生成调用的原生通道', '{"path_rewrite":{"old":"/v1/images/generations","new":"/v1/images/generations"}}', '图片', 1),
+            ('OpenAI 兼容原生通道 (视频)', 'openai', '供视频生成调用的原生通道', '{"path_rewrite":{"old":"/v1/video/generations","new":"/v1/video/generations"}}', '视频', 1),
+            ('Anthropic 原生转化', 'anthropic', '将 OpenAI 格式请求转换为 Anthropic Messages API 格式，接口 /v1/messages', '{"target_type":"anthropic","path_rewrite":{"old":"/v1/chat/completions","new":"/v1/messages"},"auth_type":"x-api-key"}', '聊天', 1),
+            ('Google Gemini 原生生图', 'gemini', '将标准的生图请求适配到 Gemini contents 接口', '{"target_type":"gemini_image","path_rewrite":{"old":"/v1/images/generations","new":"/v1beta/models/${model}:generateContent"},"auth_type":"query_key"}', '图片', 1),
+            ('Google Gemini 格式转换 (聊天)', 'gemini', '将标准请求转换并适配到 Gemini contents', '{"target_type":"gemini","path_rewrite":{"old":"/v1/chat/completions","new":"/v1beta/models/${model}:generateContent"},"auth_type":"query_key"}', '聊天', 1),
+            ('火山方舟 视频生成', 'volcengine', '将标准的视频生成请求适配到火山方舟 tasks 接口', '{"target_type":"volcengine","path_rewrite":{"old":"/v1/video/generations","new":"/api/v3/contents/generations/tasks"},"auth_type":"bearer"}', '视频', 1),
+            ('火山方舟 聊天', 'volcengine', '将标准的聊天请求转发到火山方舟官方 Chat 接口，body 保持 OpenAI 兼容格式', '{"target_type":"volcengine_chat","path_rewrite":{"old":"/v1/chat/completions","new":"/api/v3/chat/completions"},"auth_type":"bearer"}', '聊天', 1),
+            ('火山方舟 图片生成', 'volcengine', '将标准的图片生成请求转发到火山方舟官方 images 接口，body 保持 OpenAI 兼容格式', '{"target_type":"volcengine_image","path_rewrite":{"old":"/v1/images/generations","new":"/api/v3/images/generations"},"auth_type":"bearer"}', '图片', 1),
+            ('火山方舟 视频素材转换', 'volcengine', '在火山方舟视频生成基础上，自动将 content 中的网络 URL 通过 CreateAsset API 转换为素材 ID（asset://前缀），需配置素材资产管理插件的审核凭证', '{"target_type":"volcengine","asset_convert":true,"path_rewrite":{"old":"/v1/video/generations","new":"/api/v3/contents/generations/tasks"},"auth_type":"bearer"}', '视频', 1),
+            ('火山方舟 视频素材转换(国际版)', 'volcengine', '在火山方舟视频生成基础上，自动将 content 中的网络 URL 通过 CreateAsset API 转换为素材 ID（asset://前缀），需配置国际版素材资产管理插件的审核凭证', '{"target_type":"volcengine","asset_convert":true,"asset_convert_ns":"asset_manager_intl","path_rewrite":{"old":"/v1/video/generations","new":"/api/v3/contents/generations/tasks"},"auth_type":"bearer"}', '视频', 1),
+            ('火山方舟 视频素材免审核转换(国际版)', 'volcengine', '在火山方舟视频生成基础上，自动将 content 中的网络 URL 通过 CreateAsset API 转换为素材 ID（asset://前缀），且向火山方舟申请免审核，需配置国际版素材资产管理插件的审核凭证', '{"target_type":"volcengine","asset_convert":true,"asset_convert_ns":"asset_manager_intl","moderation":true,"path_rewrite":{"old":"/v1/video/generations","new":"/api/v3/contents/generations/tasks"},"auth_type":"bearer"}', '视频', 1),
+            ('阿里百炼 DashScope 视频生成', 'aliyun', '将标准视频生成请求（/v1/video/generations）转换为阿里百炼 DashScope 格式，支持文生视频/图生视频/参考生视频/视频编辑，异步任务自动注入 X-DashScope-Async Header', '{"target_type":"dashscope","path_rewrite":{"old":"/v1/video/generations","new":"/api/v1/services/aigc/video-generation/video-synthesis"},"auth_type":"bearer","poll_path":"/api/v1/tasks/${task_id}"}', '视频', 1),
+            ('阿里百炼 DashScope 图片生成', 'aliyun', '将标准图片生成请求（/v1/images/generations）转换为阿里百炼 DashScope 格式', '{"target_type":"dashscope_image","path_rewrite":{"old":"/v1/images/generations","new":"/api/v1/services/aigc/multimodal-generation/generation"},"auth_type":"bearer"}', '图片', 1),
+            ('阿里百炼 DashScope 聊天 (OpenAI兼容)', 'aliyun', '将标准聊天请求转发到阿里百炼兼容接口', '{"target_type":"openai","path_rewrite":{"old":"/v1/chat/completions","new":"/compatible-mode/v1/chat/completions"},"auth_type":"bearer"}', '聊天', 1),
+            ('阿里百炼 DashScope 聊天 (Anthropic兼容)', 'aliyun', '将请求转换为 Anthropic 格式并转发到阿里百炼兼容接口', '{"target_type":"anthropic","path_rewrite":{"old":"/v1/messages","new":"/apps/anthropic/v1/messages"},"auth_type":"x-api-key"}', '聊天', 1),
+            ('可灵 视频生成 (文/图/多图)', 'kling', '将标准视频生成请求转发到可灵官方 API，系统根据请求体自动分发到 text2video/image2video/multi-image2video', '{"target_type":"kling","path_rewrite":{"old":"/v1/video/generations","new":"/v1/videos/text2video"},"auth_type":"bearer"}', '视频', 1),
+            ('可灵 Omni 视频 (kling-v3-omni/video-o1)', 'kling', '将视频生成请求转发到可灵 Omni 视频端点', '{"target_type":"kling","path_rewrite":{"old":"/v1/video/generations","new":"/v1/videos/omni-video"},"auth_type":"bearer"}', '视频', 1),
+            ('可灵 图片生成', 'kling', '将标准图片生成请求转发到可灵官方 API，含多图参考自动分发', '{"target_type":"kling","path_rewrite":{"old":"/v1/images/generations","new":"/v1/images/generations"},"auth_type":"bearer"}', '图片', 1),
+            ('可灵 Omni 图片 (kling-v3-omni/image-o1)', 'kling', '将图片生成请求转发到可灵 Omni 图片端点', '{"target_type":"kling","path_rewrite":{"old":"/v1/images/generations","new":"/v1/images/omni-image"},"auth_type":"bearer"}', '图片', 1),
+            ('腾讯云 VOD AIGC 生图', 'tencent_vod', '将标准图片生成请求转换为腾讯云点播 AIGC CreateAigcImageTask 接口。密钥格式：SecretId:SecretKey:SubAppId，模型格式：ModelName@ModelVersion', '{"target_type":"tencent_vod_image","path_rewrite":{"old":"/v1/images/generations","new":"/"},"poll_path":"/v1/tasks/${task_id}","auth_type":"tencent_vod"}', '图片', 1),
+            ('腾讯云 VOD AIGC 生图 (同步轮询)', 'tencent_vod', '同步版：无 poll_path，OpenAI 兼容请求将自动同步轮询至终态后返回结果。密钥格式：SecretId:SecretKey:SubAppId，模型格式：ModelName@ModelVersion', '{"target_type":"tencent_vod_image","path_rewrite":{"old":"/v1/images/generations","new":"/"},"auth_type":"tencent_vod"}', '图片', 1),
+            ('腾讯云 VOD AIGC 生视频', 'tencent_vod', '将标准视频生成请求转换为腾讯云点播 AIGC CreateAigcVideoTask 接口。密钥格式：SecretId:SecretKey:SubAppId，模型格式：ModelName@ModelVersion', '{"target_type":"tencent_vod_video","path_rewrite":{"old":"/v1/video/generations","new":"/"},"auth_type":"tencent_vod"}', '视频', 1),
+            ('即梦AI 图片生成', 'jimeng', '将标准图片生成请求转换为即梦AI（火山引擎 CV 视觉服务）格式。密钥格式：AccessKeyID:SecretAccessKey，模型映射为 req_key（如 high_aes_general_v30l_tta）', '{"target_type":"jimeng_image","path_rewrite":{"old":"/v1/images/generations","new":"/"},"auth_type":"jimeng"}', '图片', 1),
+            ('即梦AI 视频生成', 'jimeng', '将标准视频生成请求转换为即梦AI（火山引擎 CV 视觉服务）格式。密钥格式：AccessKeyID:SecretAccessKey，模型映射为 req_key（如 dreamina_ic_generate_video_v2）', '{"target_type":"jimeng_video","path_rewrite":{"old":"/v1/video/generations","new":"/"},"auth_type":"jimeng"}', '视频', 1),
+            ('GPT 官方图片生成', 'gpt', '将图片生成请求转发到 GPT 官方 API，自动根据请求体内容分发到 generations（文生图）或 edits（图生图/多图生图）端点', '{"target_type":"gpt","path_rewrite":{"old":"/v1/images/generations","new":"/v1/images/generations"},"auth_type":"bearer"}', '图片', 1),
+            ('火山方舟 语音合成 (TTS V3)', 'volcengine', '将 OpenAI 格式语音合成请求（/v1/audio/speech）转换为火山方舟 TTS V3 SSE 格式。渠道地址: openspeech.bytedance.com，密钥为 X-Api-Key，模型ID通过 X-Api-Resource-Id 传递', '{"target_type":"volcengine_tts","path_rewrite":{"old":"/v1/audio/speech","new":"/api/v3/tts/unidirectional/sse"},"auth_type":"volcengine_tts"}', '音频', 1),
+            ('火山方舟 语音合成 (TTS V3 Chunked)', 'volcengine', '将 OpenAI 格式语音合成请求（/v1/audio/speech）转换为火山方舟 TTS V3 HTTP Chunked 格式与 SSE 版本请求体和鉴权相同，仅传输协议不同（更轻量）', '{"target_type":"volcengine_tts","path_rewrite":{"old":"/v1/audio/speech","new":"/api/v3/tts/unidirectional"},"auth_type":"volcengine_tts"}', '音频', 1),
+            ('OpenAI 兼容原生通道 (语音)', 'openai', '标准的语音合成透传规则，直接转发到 /v1/audio/speech', '{"path_rewrite":{"old":"/v1/audio/speech","new":"/v1/audio/speech"}}', '音频', 1),
+            ('阿里百炼 DashScope 文本向量 (OpenAI兼容)', 'aliyun', '将文本向量请求转发到阿里百炼兼容接口', '{"target_type":"openai","path_rewrite":{"old":"/v1/embeddings","new":"/compatible-mode/v1/embeddings"},"auth_type":"bearer"}', '向量', 1),
+            ('阿里百炼 DashScope 排序 (兼容模式)', 'aliyun', '将排序请求转发到阿里百炼兼容接口，适用于 qwen3-rerank 等模型', '{"target_type":"openai","path_rewrite":{"old":"/v1/rerank","new":"/compatible-api/v1/reranks"},"auth_type":"bearer"}', '排序', 1),
+            ('阿里百炼 DashScope 排序 (原生)', 'aliyun', '将排序请求转发到阿里百炼原生 DashScope 接口，适用于 gte-rerank-v2 等模型', '{"target_type":"openai","path_rewrite":{"old":"/v1/rerank","new":"/api/v1/services/rerank/text-rerank/text-rerank"},"auth_type":"bearer"}', '排序', 1),
             ('Bytefor 视频生成', 'bytefor', '将标准的视频生成请求适配到 Bytefor 视频生成 API', '{"target_type":"bytefor_video","path_rewrite":{"old":"/v1/video/generations","new":"/api/v1/generate"},"poll_path":"/api/v1/task/${task_id}","auth_type":"bearer"}', '视频', 1),
-            ('火山方舟 级联视频生成', 'volcengine', '供视频生成级联画质增强调用的火山方舟专属转发规则', '{"mode":"transform","target_type":"volcengine","is_cascade":true,"res_mul":{"720p":2.15,"1080p":2.25,"2k":2.5,"4k":4.0},"path_rewrite":{"old":"/v1/video/generations","new":"/api/v3/contents/generations/tasks"},"auth_type":"bearer"}', '视频', 1)
+            ('火山方舟 级联视频生成', 'volcengine', '供视频生成级联画质增强调用的火山方舟专属转发规则', '{"target_type":"volcengine","is_cascade":true,"res_mul":{"480p":1.5,"720p":2.15,"1080p":2.25,"2k":2.5,"4k":4.0},"path_rewrite":{"old":"/v1/video/generations","new":"/api/v3/contents/generations/tasks"},"auth_type":"bearer"}', '视频', 1),
+            ('ATP Token 视频生成', 'atp', '将标准视频生成请求（/v1/video/generations）或阿里百炼格式参数转换为 ATP Token 媒体视频 API 格式（omni tasks），支持 Seedance / Kling / Wan / HappyHorse 系列模型，自动轮询及参数兼容', '{"target_type":"atp_video","path_rewrite":{"old":"/v1/video/generations","new":"/omni/media/v1/contents/generations/tasks"},"auth_type":"bearer","poll_path":"/omni/media/v1/contents/generations/tasks/${task_id}"}', '视频', 1)
         ) AS t(name, rule_type, description, config_json, category, is_system)
         WHERE NOT EXISTS (SELECT 1 FROM forward_rules WHERE name = t.name)
         "#,
@@ -1668,32 +1672,32 @@ macro_rules! pg_migration_blocks {
                     "火山 MediaKit 视频画质增强 (标准/专业版)",
                     "volcengine",
                     "火山画质增强标准版与专业版通用转发规则，自动进行路径和请求体参数转换，支持异步任务轮询。",
-                    r#"{"mode":"transform","target_type":"volcengine_media_enhance","path_rewrite":{"old":"/v1/video/generations","new":"/api/v1/tools/enhance-video"},"poll_path":"/api/v1/tasks/${task_id}","auth_type":"bearer"}"#
+                    r#"{"target_type":"volcengine_media_enhance","path_rewrite":{"old":"/v1/video/generations","new":"/api/v1/tools/enhance-video"},"poll_path":"/api/v1/tasks/${task_id}","auth_type":"bearer"}"#
                 ),
                 (
                     "火山 MediaKit 视频画质增强 (极速版)",
                     "volcengine",
                     "火山画质增强极速版专用转发规则，自动转发至 enhance-video-fast，支持异步任务轮询。",
-                    r#"{"mode":"transform","target_type":"volcengine_media_enhance","path_rewrite":{"old":"/v1/video/generations","new":"/api/v1/tools/enhance-video-fast"},"poll_path":"/api/v1/tasks/${task_id}","auth_type":"bearer"}"#
+                    r#"{"target_type":"volcengine_media_enhance","path_rewrite":{"old":"/v1/video/generations","new":"/api/v1/tools/enhance-video-fast"},"poll_path":"/api/v1/tasks/${task_id}","auth_type":"bearer"}"#
                 ),
                 (
                     "火山 MediaKit 视频画质增强 (大模型版)",
                     "volcengine",
                     "火山画质增强大模型版专用转发规则，自动转发至 enhance-video-generative，支持异步任务轮询。",
-                    r#"{"mode":"transform","target_type":"volcengine_media_enhance","path_rewrite":{"old":"/v1/video/generations","new":"/api/v1/tools/enhance-video-generative"},"poll_path":"/api/v1/tasks/${task_id}","auth_type":"bearer"}"#
+                    r#"{"target_type":"volcengine_media_enhance","path_rewrite":{"old":"/v1/video/generations","new":"/api/v1/tools/enhance-video-generative"},"poll_path":"/api/v1/tasks/${task_id}","auth_type":"bearer"}"#
                 ),
                 (
                     "火山 MediaKit 视频字幕擦除",
                     "volcengine",
                     "火山视频字幕擦除（标准/精细版）通用转发规则，自动转发至 erase-video-subtitle，支持异步任务轮询。",
-                    r#"{"mode":"transform","target_type":"volcengine_media_enhance","path_rewrite":{"old":"/v1/video/generations","new":"/api/v1/tools/erase-video-subtitle"},"poll_path":"/api/v1/tasks/${task_id}","auth_type":"bearer"}"#
+                    r#"{"target_type":"volcengine_media_enhance","path_rewrite":{"old":"/v1/video/generations","new":"/api/v1/tools/erase-video-subtitle"},"poll_path":"/api/v1/tasks/${task_id}","auth_type":"bearer"}"#
                 )
             ];
 
             for (name, rtype, desc, config) in &preset_rules {
                 let _ = sqlx::query(
-                    "INSERT INTO forward_rules (name, rule_type, description, config_json, category, is_system) \
-                     SELECT $1, $2, $3, $4, '视频', 1 \
+                    "INSERT INTO forward_rules (name, rule_type, description, config_json, category, is_system, eid) \
+                     SELECT $1, $2, $3, $4, '视频', 1, '1' || lpad((floor(random() * 10000)::int)::text, 4, '0') \
                      WHERE NOT EXISTS (SELECT 1 FROM forward_rules WHERE name = $1)"
                 )
                 .bind(name).bind(rtype).bind(desc).bind(config)
@@ -1835,7 +1839,7 @@ macro_rules! pg_migration_blocks {
         ).execute(pool).await;
 
         // 4. 写入初始数据
-        if let Err(e) = crate::api::docs_api::seed_default_docs_direct(pool).await {
+        if let Err(e) = crate::api::plugins::docs_api::seed_default_docs_direct(pool).await {
             tracing::error!("Failed to seed default docs: {:?}", e);
         }
 
@@ -1843,39 +1847,10 @@ macro_rules! pg_migration_blocks {
         tracing::info!("✅ DocsApi 文档插件初始化完成");
     }
 
-    // ── DocsApi 插件默认关闭迁移 ──
-    once_migration!(pool, "docs_api_disable_by_default_v1",
-        "UPDATE plugins SET is_enabled = 0 WHERE name = 'docs_api'"
-    );
-
     // ── DocsApi 插件新增 slug 字段（受一次性迁移保护） ──
     once_migration!(pool, "docs_api_add_slug_v1",
         "ALTER TABLE plugin_docs ADD COLUMN IF NOT EXISTS slug VARCHAR(255) DEFAULT ''"
     );
-
-    // ── DocsApi 国际化翻译表初始化 ──
-    let docs_api_intl_init_done: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sys_migration_history WHERE id = 'docs_api_intl_init_v1'")
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
-
-    if docs_api_intl_init_done == 0 {
-        let _ = sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS plugin_docs_intl (
-                id SERIAL PRIMARY KEY,
-                doc_id INTEGER NOT NULL REFERENCES plugin_docs(id) ON DELETE CASCADE,
-                lang VARCHAR(10) NOT NULL,
-                title VARCHAR(255) NOT NULL,
-                content TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT (now()::text),
-                updated_at TEXT NOT NULL DEFAULT (now()::text),
-                UNIQUE(doc_id, lang)
-            )"#
-        ).execute(pool).await;
-
-        let _ = sqlx::query("INSERT INTO sys_migration_history (id) VALUES ('docs_api_intl_init_v1')").execute(pool).await;
-        tracing::info!("✅ DocsApi 国际化翻译表初始化完成");
-    }
 
     // ── 级联转发规则补充默认 res_mul（分辨率倍率，缺省 1.0 不影响现网计价）──
     once_migration!(pool, "cascade_res_mul_v1",
@@ -1900,29 +1875,12 @@ macro_rules! pg_migration_blocks {
         "UPDATE logs SET is_completed = 1 WHERE is_completed = 0 AND (billing_detail LIKE '[测试渠道，不扣费]%' OR endpoint LIKE 'test|%')"
     );
 
-    // ── DocsApi 火山素材库文档初始化 ──
-    let insert_volcengine_assets_docs_done: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sys_migration_history WHERE id = 'insert_volcengine_assets_docs_v2'")
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
-
-    if insert_volcengine_assets_docs_done == 0 {
-        // 1. 清理可能残留的旧一级目录 'volcengine-assets'
-        let _ = sqlx::query("DELETE FROM plugin_docs WHERE slug = 'volcengine-assets'").execute(pool).await;
-        // 2. 清理可能已插入的文章，防止唯一性约束报错
-        let _ = sqlx::query("DELETE FROM plugin_docs WHERE slug = 'volcengine-assets-guide'").execute(pool).await;
-        // 3. 调用将文章挂载到 'volcengine-ark' 目录下的方法
-        crate::api::docs_api::seed_volcengine_assets_docs_only(pool).await?;
-        let _ = sqlx::query("INSERT INTO sys_migration_history (id) VALUES ('insert_volcengine_assets_docs_v2')").execute(pool).await;
-        tracing::info!("✅ DocsApi 火山素材库文档初始化成功");
-    }
-
     // ── 统一合并的零散 DML 一次性回填 ──
     once_migration!(pool, "backfill_misc_data_v1",
         "UPDATE user_levels SET is_default = 1 WHERE group_key = 'default' AND NOT EXISTS (SELECT 1 FROM user_levels WHERE is_default = 1)",
         "UPDATE forward_rules SET category = '音频' WHERE category = '语音'",
         "UPDATE forward_rules SET rule_type = 'aliyun' WHERE name LIKE '%阿里百炼%' AND rule_type != 'aliyun'",
-        "UPDATE forward_rules SET config_json = '{\"mode\":\"transform\",\"target_type\":\"anthropic\",\"path_rewrite\":{\"old\":\"/v1/chat/completions\",\"new\":\"/v1/messages\"},\"auth_type\":\"x-api-key\"}', description = '将 OpenAI 格式请求转换为 Anthropic Messages API 格式，接口 /v1/messages' WHERE name = 'Anthropic 原生转化' AND is_system = 1",
+        "UPDATE forward_rules SET config_json = '{\"target_type\":\"anthropic\",\"path_rewrite\":{\"old\":\"/v1/chat/completions\",\"new\":\"/v1/messages\"},\"auth_type\":\"x-api-key\"}', description = '将 OpenAI 格式请求转换为 Anthropic Messages API 格式，接口 /v1/messages' WHERE name = 'Anthropic 原生转化' AND is_system = 1",
         "UPDATE forward_rules SET eid = '1' || floor(random() * 9000 + 1000)::text WHERE eid = '' OR eid IS NULL",
         "UPDATE billing_rules SET pid = '7' || floor(random() * 9000 + 1000)::text WHERE is_system = 1 AND (pid = '' OR pid IS NULL)",
         "UPDATE billing_rules SET pid = '6' || floor(random() * 9000 + 1000)::text WHERE is_system = 0 AND (pid = '' OR pid IS NULL)",
@@ -1931,7 +1889,8 @@ macro_rules! pg_migration_blocks {
         "UPDATE model_types SET logo = 'midjourney' WHERE name = '图片' AND (logo IS NULL OR logo = '')",
         "UPDATE model_types SET logo = 'suno' WHERE name = '音频' AND (logo IS NULL OR logo = '')",
         "UPDATE model_types SET logo = 'chatgpt' WHERE name = '聊天' AND (logo IS NULL OR logo = '')",
-        "UPDATE model_types SET logo = 'volcengine', remark = '视频画质增强与字幕擦除处理模型', sort_order = 35 WHERE name = '视频增强' AND (logo IS NULL OR logo = '' OR remark IS NULL OR remark = '')"
+        // 仅回填空 logo/remark，禁止改写 sort_order（管理端自定义排序升级后须保留）
+        "UPDATE model_types SET logo = CASE WHEN logo IS NULL OR logo = '' THEN 'volcengine' ELSE logo END, remark = CASE WHEN remark IS NULL OR remark = '' THEN '视频画质增强与字幕擦除处理模型' ELSE remark END WHERE name = '视频增强' AND (logo IS NULL OR logo = '' OR remark IS NULL OR remark = '')"
     );
 
     // ── usage_daily_stats 每日使用统计落地表及 logs 高性能查询索引（受一次性迁移保护） ──
@@ -2223,12 +2182,6 @@ macro_rules! pg_migration_blocks {
         END $$"#
     );
 
-    // ── 下线 API 教程「级联调用指南」（仅文档，不影响级联转发/计费功能）──
-    once_migration!(pool, "remove_cascade_guide_docs_v1",
-        "DELETE FROM plugin_docs WHERE slug = 'cascade-enhance'",
-        "DELETE FROM plugin_docs WHERE slug = 'cascade-guide'"
-    );
-
     // ── 兑换码：有效期 / 总次数 / 每用户次数 + 兑换记录表 ──
     once_migration!(pool, "redemptions_limits_expiry_v1",
         "ALTER TABLE redemptions ADD COLUMN IF NOT EXISTS expires_at TEXT",
@@ -2244,6 +2197,10 @@ macro_rules! pg_migration_blocks {
             created_at TEXT NOT NULL DEFAULT (now()::text)
         )"#,
         "CREATE INDEX IF NOT EXISTS idx_redemption_logs_code_user ON redemption_logs (redemption_id, user_id)"
+    );
+
+    once_migration!(pool, "redemptions_status_v1",
+        "ALTER TABLE redemptions ADD COLUMN IF NOT EXISTS status INTEGER NOT NULL DEFAULT 1"
     );
 
     // ── 渠道分组 + 上游预设：日/月/总额度 ──
@@ -2448,22 +2405,17 @@ macro_rules! pg_migration_blocks {
         "DROP FUNCTION IF EXISTS _tb_text_to_tstz(TEXT)"
     );
 
-    // ── logs 冷归档表：热表瘦身，明细可查冷表；默认不自动归档（log_row_retention_days=0）──
+    // ── logs 冷归档表：热表瘦身；默认不自动归档（log_row_retention_days=0）──
     once_migration!(pool, "logs_archive_v1",
         r#"CREATE TABLE IF NOT EXISTS logs_archive (LIKE logs INCLUDING DEFAULTS)"#,
-        r#"DO $pk$
-        BEGIN
-          IF NOT EXISTS (
-            SELECT 1 FROM pg_constraint WHERE conname = 'logs_archive_pkey'
-          ) THEN
-            ALTER TABLE logs_archive ADD CONSTRAINT logs_archive_pkey PRIMARY KEY (id);
-          END IF;
-        END
-        $pk$"#,
+        r#"DO $$ BEGIN
+             ALTER TABLE logs_archive ADD CONSTRAINT logs_archive_pkey PRIMARY KEY (id);
+           EXCEPTION WHEN duplicate_object THEN NULL;
+           END $$"#,
         "ALTER TABLE logs_archive ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
         "CREATE INDEX IF NOT EXISTS idx_logs_archive_created_at ON logs_archive (created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_logs_archive_user_created ON logs_archive (user_id, created_at DESC)",
-        "COMMENT ON TABLE logs_archive IS '使用日志冷归档：超期行从 logs 迁入，保留明细供审计；仪表盘统计走 usage_daily_stats'"
+        "COMMENT ON TABLE logs_archive IS '使用日志冷归档：超期行从 logs 迁入；仪表盘统计走 usage_daily_stats'"
     );
 
     // 验证码防爆破：增加 attempts 计数列
@@ -2583,7 +2535,7 @@ macro_rules! pg_migration_blocks {
         "ANALYZE logs"
     );
 
-    // 上游素材中转插件：绑定「上游渠道配置」(channel_configs) + 系统增强插件种子
+    // 火山视频转素材ID：绑定「上游渠道配置」(channel_configs) + 系统增强插件种子
     once_migration!(pool, "upstream_asset_relay_v1",
         r#"CREATE TABLE IF NOT EXISTS upstream_asset_bindings (
             id BIGSERIAL PRIMARY KEY,
@@ -2602,8 +2554,8 @@ macro_rules! pg_migration_blocks {
         r#"INSERT INTO plugins (name, title, description, is_enabled, category, allowed_levels, created_at, updated_at)
            VALUES (
              'upstream_asset_relay',
-             '上游素材中转',
-             '关联上游渠道素材接口，生成转发规则并在中继时完成素材 URL→ID 转换',
+             '火山视频转素材ID',
+             '为火山视频任务自动将请求中的媒体 URL 经上游渠道 CreateAsset 转为素材 ID（asset://），并生成可用转发规则',
              0,
              'system',
              'all',
@@ -2614,6 +2566,424 @@ macro_rules! pg_migration_blocks {
              title = EXCLUDED.title,
              description = EXCLUDED.description,
              category = EXCLUDED.category"#
+    );
+
+    // ── 模型广场：补齐系统供应商与模型类型英文名称 ──
+    once_migration!(pool, "model_marketplace_system_names_en_v1",
+        "UPDATE model_providers SET name_en = CASE name WHEN '火山引擎' THEN 'Volcengine' WHEN '谷歌' THEN 'Google' WHEN '阿里云' THEN 'Alibaba Cloud' WHEN '腾讯云' THEN 'Tencent Cloud' WHEN '可灵 AI' THEN 'Kling AI' ELSE name_en END WHERE name_en = ''",
+        "UPDATE model_types SET name_en = CASE name WHEN '视频' THEN 'Video' WHEN '图片' THEN 'Image' WHEN '音频' THEN 'Audio' WHEN '聊天' THEN 'Chat' WHEN '向量' THEN 'Embedding' WHEN '排序' THEN 'Rerank' WHEN '视频增强' THEN 'Video Enhancement' ELSE name_en END WHERE name_en = ''"
+    );
+
+    // ── 创作中心2026：独立插件注册 + 独立表（与 playground 无共享） ──
+    once_migration!(pool, "init_playground_2026_v1",
+        r#"INSERT INTO plugins (name, title, description, is_enabled, category)
+           VALUES ('playground_2026', '创作中心2026', '提供直接的视频、图片、声音、聊天模型体验服务（2026独立版）', 0, 'user')
+           ON CONFLICT (name) DO NOTHING"#,
+        r#"CREATE TABLE IF NOT EXISTS playground_2026_projects (
+            id BIGSERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            uid TEXT NOT NULL,
+            name TEXT NOT NULL DEFAULT '未命名项目',
+            description TEXT DEFAULT '',
+            cover_url TEXT DEFAULT '',
+            canvas_data TEXT DEFAULT '{}',
+            is_deleted INTEGER NOT NULL DEFAULT 0,
+            is_pinned INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"#,
+        "CREATE INDEX IF NOT EXISTS idx_pg2026_projects_user ON playground_2026_projects(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pg2026_projects_uid ON playground_2026_projects(uid)",
+        "COMMENT ON TABLE playground_2026_projects IS '创作中心2026项目表（独立于 playground_projects）'",
+        r#"CREATE TABLE IF NOT EXISTS playground_2026_assets (
+            id BIGSERIAL PRIMARY KEY,
+            project_id BIGINT NOT NULL REFERENCES playground_2026_projects(id) ON DELETE CASCADE,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            uid TEXT NOT NULL,
+            asset_type TEXT NOT NULL,
+            file_name TEXT DEFAULT '',
+            file_size BIGINT DEFAULT 0,
+            file_url TEXT NOT NULL,
+            tos_object_key TEXT DEFAULT '',
+            thumbnail_url TEXT DEFAULT '',
+            prompt TEXT DEFAULT '',
+            model_id TEXT DEFAULT '',
+            model_name TEXT DEFAULT '',
+            generation_params TEXT DEFAULT '{}',
+            canvas_node_data TEXT DEFAULT '{}',
+            duration_seconds DOUBLE PRECISION DEFAULT 0,
+            width BIGINT DEFAULT 0,
+            height BIGINT DEFAULT 0,
+            is_deleted INTEGER NOT NULL DEFAULT 0,
+            file_hash TEXT DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"#,
+        "CREATE INDEX IF NOT EXISTS idx_pg2026_assets_project ON playground_2026_assets(project_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pg2026_assets_user ON playground_2026_assets(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pg2026_assets_type ON playground_2026_assets(asset_type)",
+        "CREATE INDEX IF NOT EXISTS idx_pg2026_assets_file_hash ON playground_2026_assets(file_hash)",
+        "COMMENT ON TABLE playground_2026_assets IS '创作中心2026素材表（独立于 playground_assets）'",
+        r#"CREATE TABLE IF NOT EXISTS user_model_configs_2026 (
+            id BIGSERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            model_mid TEXT NOT NULL,
+            param_values TEXT NOT NULL DEFAULT '{}',
+            is_locked INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(user_id, model_mid)
+        )"#,
+        "CREATE INDEX IF NOT EXISTS idx_user_model_configs_2026_user ON user_model_configs_2026(user_id)",
+        "COMMENT ON TABLE user_model_configs_2026 IS '用户在创作中心2026锁定的模型自定义参数配置'"
+    );
+
+    // ── 创作中心2026：独立令牌限制字段 ──
+    once_migration!(pool, "init_playground_2026_token_flag_v1",
+        "ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS only_playground_2026 BIGINT NOT NULL DEFAULT 0",
+        "COMMENT ON COLUMN api_tokens.only_playground_2026 IS '是否仅限创作中心2026使用，1=是，0=否'"
+    );
+
+    // ── 站点门户增强版（商业插件，与 site_portal 配置/静态目录隔离）──
+    once_migration!(pool, "init_site_portal_pro_v1",
+        r#"INSERT INTO plugins (name, title, description, is_enabled, category)
+           VALUES ('site_portal_pro', '站点门户增强版', '提供站点内容的基本介绍，支持生成静态HTML页面用于SEO/GEO优化（商业增强版，与站点门户独立）', 0, 'user')
+           ON CONFLICT (name) DO NOTHING"#
+    );
+
+    // ── 站点门户：默认改用经典科技风格接管首页（旧默认 apply_to_homepage=false 走托管页）──
+    once_migration!(pool, "portal_default_classic_style_homepage_v1",
+        r#"UPDATE plugin_configs
+           SET config_value = jsonb_set(config_value::jsonb, '{apply_to_homepage}', 'true', true)::text,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE plugin_name IN ('site_portal', 'site_portal_pro')
+             AND config_key = 'style_config'
+             AND COALESCE(config_value::jsonb->>'apply_to_homepage', 'false') = 'false'"#,
+        r#"UPDATE plugin_configs
+           SET config_value = jsonb_set(
+                 COALESCE(NULLIF(config_value, '')::jsonb, '{"enabled":false,"html":""}'::jsonb),
+                 '{enabled}', 'false', true
+               )::text,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE plugin_name IN ('site_portal', 'site_portal_pro')
+             AND config_key = 'custom_homepage'
+             AND COALESCE(config_value::jsonb->>'enabled', 'false') = 'true'
+             AND COALESCE(TRIM(config_value::jsonb->>'html'), '') = ''"#
+    );
+
+    // ── 站点门户增强版独立 DOCS 文档表初始化 ──
+    once_migration!(pool, "site_portal_pro_docs_init_v1",
+        r#"CREATE TABLE IF NOT EXISTS site_portal_pro_docs (
+            id SERIAL PRIMARY KEY,
+            parent_id INTEGER NULL REFERENCES site_portal_pro_docs(id) ON DELETE CASCADE,
+            title VARCHAR(255) NOT NULL,
+            content TEXT DEFAULT '',
+            is_dir INTEGER NOT NULL DEFAULT 0,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            slug VARCHAR(255) DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (now()::text),
+            updated_at TEXT NOT NULL DEFAULT (now()::text)
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS site_portal_pro_docs_intl (
+            id SERIAL PRIMARY KEY,
+            doc_id INTEGER NOT NULL REFERENCES site_portal_pro_docs(id) ON DELETE CASCADE,
+            lang VARCHAR(10) NOT NULL,
+            title VARCHAR(255) NOT NULL,
+            content TEXT DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (now()::text),
+            updated_at TEXT NOT NULL DEFAULT (now()::text),
+            UNIQUE(doc_id, lang)
+        )"#
+    );
+
+    // ── 站点门户增强版 DOCS 二级分类 ──
+    once_migration!(pool, "site_portal_pro_doc_categories_v1",
+        r#"CREATE TABLE IF NOT EXISTS site_portal_pro_doc_categories (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (now()::text),
+            updated_at TEXT NOT NULL DEFAULT (now()::text)
+        )"#,
+        "ALTER TABLE site_portal_pro_docs ADD COLUMN IF NOT EXISTS category_id INTEGER NULL REFERENCES site_portal_pro_doc_categories(id) ON DELETE SET NULL",
+        "ALTER TABLE plugin_docs ADD COLUMN IF NOT EXISTS category_id INTEGER NULL",
+        r#"INSERT INTO site_portal_pro_doc_categories (name, sort_order)
+           SELECT v.name, v.sort_order
+           FROM (VALUES
+             ('API 参考', 10),
+             ('部署安装', 20),
+             ('商务支持', 30)
+           ) AS v(name, sort_order)
+           WHERE NOT EXISTS (SELECT 1 FROM site_portal_pro_doc_categories LIMIT 1)"#,
+        r#"UPDATE site_portal_pro_docs d
+           SET category_id = c.id
+           FROM site_portal_pro_doc_categories c
+           WHERE d.parent_id IS NULL
+             AND d.category_id IS NULL
+             AND c.name = 'API 参考'"#
+    );
+
+    // 将仍未归属的根文档挂到「API 参考」（兼容迁移后才导入的旧数据）
+    once_migration!(pool, "site_portal_pro_docs_backfill_api_category_v1",
+        r#"INSERT INTO site_portal_pro_doc_categories (name, sort_order)
+           SELECT 'API 参考', 10
+           WHERE NOT EXISTS (
+             SELECT 1 FROM site_portal_pro_doc_categories WHERE name = 'API 参考'
+           )"#,
+        r#"UPDATE site_portal_pro_docs d
+           SET category_id = c.id
+           FROM site_portal_pro_doc_categories c
+           WHERE d.parent_id IS NULL
+             AND d.category_id IS NULL
+             AND c.name = 'API 参考'"#
+    );
+
+    // 合并同名分类（忽略大小写和所有空格），并加唯一约束防止再插入
+    once_migration!(pool, "site_portal_pro_doc_categories_dedupe_v1",
+        r#"UPDATE site_portal_pro_docs d
+           SET category_id = keep.id
+           FROM site_portal_pro_doc_categories dup
+           JOIN (
+             SELECT REPLACE(LOWER(name), ' ', '') AS norm_name, MIN(id) AS id
+             FROM site_portal_pro_doc_categories
+             GROUP BY REPLACE(LOWER(name), ' ', '')
+           ) keep ON REPLACE(LOWER(dup.name), ' ', '') = keep.norm_name
+           WHERE d.category_id = dup.id
+             AND dup.id <> keep.id"#,
+        r#"DELETE FROM site_portal_pro_doc_categories a
+           USING site_portal_pro_doc_categories b
+           WHERE REPLACE(LOWER(a.name), ' ', '') = REPLACE(LOWER(b.name), ' ', '') AND a.id > b.id"#,
+        r#"CREATE UNIQUE INDEX IF NOT EXISTS idx_site_portal_pro_doc_categories_name
+           ON site_portal_pro_doc_categories (name)"#
+    );
+
+    // 确保 site_portal_pro 「使用指南」分类存在并置为首位 (sort_order = 1)
+    once_migration!(pool, "site_portal_pro_doc_categories_user_guide_v2",
+        r#"INSERT INTO site_portal_pro_doc_categories (name, sort_order)
+           SELECT '使用指南', 1
+           WHERE NOT EXISTS (
+             SELECT 1 FROM site_portal_pro_doc_categories WHERE name = '使用指南'
+           )"#,
+        r#"UPDATE site_portal_pro_doc_categories SET sort_order = 1 WHERE name = '使用指南'"#
+    );
+
+    // 确保 site_portal_pro 分类包含 is_default 列，默认将「使用指南」置为默认分类 (is_default = 1)
+    once_migration!(pool, "site_portal_pro_doc_categories_is_default_v1",
+        "ALTER TABLE site_portal_pro_doc_categories ADD COLUMN IF NOT EXISTS is_default INTEGER NOT NULL DEFAULT 0",
+        r#"UPDATE site_portal_pro_doc_categories SET is_default = 1 WHERE name = '使用指南' AND NOT EXISTS (SELECT 1 FROM site_portal_pro_doc_categories WHERE is_default = 1)"#
+    );
+
+    // 新增「商务合作」分类，并将原挂在 API 参考下的商务合作文档迁入
+    once_migration!(pool, "site_portal_pro_doc_categories_business_coop_v1",
+        r#"UPDATE site_portal_pro_doc_categories
+           SET name = '商务合作', sort_order = 40, updated_at = CURRENT_TIMESTAMP
+           WHERE name = '商务支持'
+             AND NOT EXISTS (
+               SELECT 1 FROM site_portal_pro_doc_categories WHERE name = '商务合作'
+             )"#,
+        r#"INSERT INTO site_portal_pro_doc_categories (name, sort_order)
+           SELECT '商务合作', 40
+           WHERE NOT EXISTS (
+             SELECT 1 FROM site_portal_pro_doc_categories WHERE name = '商务合作'
+           )"#,
+        r#"UPDATE site_portal_pro_doc_categories SET sort_order = 40 WHERE name = '商务合作'"#,
+        r#"UPDATE site_portal_pro_docs d
+           SET category_id = c.id, updated_at = CURRENT_TIMESTAMP
+           FROM site_portal_pro_doc_categories c
+           WHERE c.name = '商务合作'
+             AND d.parent_id IS NULL
+             AND (
+               d.slug = 'business-cooperation'
+               OR REPLACE(LOWER(d.title), ' ', '') IN ('商务合作', 'businesscooperation')
+             )"#
+    );
+
+    // ── 火山方舟：钱包入账锚点 + 停用原因；删除已废弃的独立 limit_quota ──
+    once_migration!(pool, "ark_bindings_wallet_fuse_v1",
+        "ALTER TABLE ark_endpoint_bindings ADD COLUMN IF NOT EXISTS wallet_charged_quota DOUBLE PRECISION NOT NULL DEFAULT 0.0",
+        "ALTER TABLE ark_endpoint_bindings ADD COLUMN IF NOT EXISTS fuse_reason TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE ark_endpoint_bindings DROP COLUMN IF EXISTS limit_quota",
+        "COMMENT ON COLUMN ark_endpoint_bindings.wallet_charged_quota IS '已成功扣入用户钱包的累计消费(元)，与 used_quota 差值即为待扣/待退'",
+        "COMMENT ON COLUMN ark_endpoint_bindings.fuse_reason IS '停用原因: wallet=余额熔断(可自动恢复) manual=管理员停用(cron不拉起) 空=正常'",
+        // 存量 status=0 视为余额熔断，保证上线后仍可被 cron 自动恢复
+        "UPDATE ark_endpoint_bindings SET fuse_reason = 'wallet' WHERE status = 0 AND fuse_reason = ''"
+    );
+
+    // ── 级联支持 480p 目标：补默认 res_mul（已有 key 不覆盖）──
+    once_migration!(pool, "cascade_480p_target_v1",
+        r#"UPDATE forward_rules
+           SET config_json = jsonb_set(
+             COALESCE(config_json::jsonb, '{}'::jsonb),
+             '{res_mul}',
+             '{"480p":1.5}'::jsonb || COALESCE(config_json::jsonb -> 'res_mul', '{}'::jsonb),
+             true
+           )::text
+           WHERE COALESCE(config_json::jsonb->>'is_cascade', 'false') IN ('true', '1')
+             AND (config_json::jsonb -> 'res_mul' -> '480p') IS NULL"#
+    );
+
+    // ── 团队营销：主题推广落地页 ──
+    once_migration!(pool, "theme_promotions_v1",
+        r#"CREATE TABLE IF NOT EXISTS theme_promotions (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            slug TEXT NOT NULL UNIQUE,
+            html_content TEXT NOT NULL DEFAULT '',
+            status INTEGER NOT NULL DEFAULT 1,
+            is_permanent INTEGER NOT NULL DEFAULT 1,
+            start_at TIMESTAMPTZ,
+            end_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )"#,
+        "CREATE INDEX IF NOT EXISTS idx_theme_promotions_status ON theme_promotions (status)",
+        "COMMENT ON TABLE theme_promotions IS '高级营销主题推广落地页（HTML 单页活动）'",
+        "COMMENT ON COLUMN theme_promotions.slug IS '公开路径段，访问 /promo/{slug}'",
+        "COMMENT ON COLUMN theme_promotions.status IS '1=上线 0=下线'",
+        "COMMENT ON COLUMN theme_promotions.is_permanent IS '1=长期有效 0=按 start_at/end_at 判断'"
+    );
+
+    // ── 主题推广：INTEGER → BIGINT，与全局 i64 约定对齐 ──
+    once_migration!(pool, "theme_promotions_bigint_v1",
+        "ALTER TABLE theme_promotions ALTER COLUMN status TYPE BIGINT",
+        "ALTER TABLE theme_promotions ALTER COLUMN is_permanent TYPE BIGINT"
+    );
+
+    // ── 主题推广：新增 promo_type 字段（system=系统推广 custom=自定义推广） ──
+    once_migration!(pool, "theme_promotions_promo_type_v1",
+        "ALTER TABLE theme_promotions ADD COLUMN IF NOT EXISTS promo_type TEXT NOT NULL DEFAULT 'custom'",
+        "COMMENT ON COLUMN theme_promotions.promo_type IS 'system=系统推广(直接跳转首页) custom=自定义推广(单页HTML)'"
+    );
+
+    // ── 主题推广：新增 target_path 字段并预置默认系统推广（首页推广 & 模型广场推广） ──
+    once_migration!(pool, "theme_promotions_system_defaults_v1",
+        "ALTER TABLE theme_promotions ADD COLUMN IF NOT EXISTS target_path TEXT NOT NULL DEFAULT '/'",
+        "COMMENT ON COLUMN theme_promotions.target_path IS '系统推广点击后跳转的目标路径'",
+        r#"INSERT INTO theme_promotions (id, title, slug, html_content, promo_type, target_path, status, is_permanent)
+           VALUES
+             ('preset_system_portal', '首页推广', 'portal', '', 'system', '/', 1, 1),
+             ('preset_system_models', '模型广场推广', 'models', '', 'system', '/home/models', 1, 1)
+           ON CONFLICT (slug) DO UPDATE SET target_path = EXCLUDED.target_path, promo_type = EXCLUDED.promo_type"#
+    );
+
+    // 日志 HA 标志请求时快照（读路径勿 JOIN 当前 channels.provider_type）
+    once_migration!(pool, "logs_is_ha_snapshot_v1",
+        "ALTER TABLE logs ADD COLUMN IF NOT EXISTS is_ha INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE logs_archive ADD COLUMN IF NOT EXISTS is_ha INTEGER NOT NULL DEFAULT 0",
+        "COMMENT ON COLUMN logs.is_ha IS '请求当时是否走高可用组(1=是)；写路径快照，不随渠道配置变更'"
+    );
+
+    // ── 营销链接点击统计：同 IP 同日同链接只计 1 次（粗略 UV） ──
+    once_migration!(pool, "marketing_link_clicks_v1",
+        r#"CREATE TABLE IF NOT EXISTS marketing_link_click_dedup (
+            link_type TEXT NOT NULL,
+            link_key TEXT NOT NULL,
+            promoter_uid TEXT NOT NULL,
+            client_ip TEXT NOT NULL,
+            click_date DATE NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (link_type, link_key, promoter_uid, client_ip, click_date)
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS marketing_link_click_stats (
+            link_type TEXT NOT NULL,
+            link_key TEXT NOT NULL,
+            promoter_uid TEXT NOT NULL,
+            click_count BIGINT NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (link_type, link_key, promoter_uid)
+        )"#,
+        "CREATE INDEX IF NOT EXISTS idx_mlc_stats_promoter ON marketing_link_click_stats (promoter_uid)",
+        "COMMENT ON TABLE marketing_link_click_dedup IS '营销链接点击去重：link_type+link_key+promoter+IP+自然日唯一'",
+        "COMMENT ON TABLE marketing_link_click_stats IS '营销链接点击累计（按推广员与链接维度）'",
+        "COMMENT ON COLUMN marketing_link_click_dedup.link_type IS 'invite | team_invite | theme_promo'",
+        "COMMENT ON COLUMN marketing_link_click_dedup.link_key IS 'invite=_ ; team_invite=邀请码 ; theme_promo=slug'",
+        "COMMENT ON COLUMN marketing_link_click_dedup.click_date IS '站点时区下的自然日'"
+    );
+
+    // ── 补全预置 ATP Token 视频转发规则与用户等级折扣模式 ──
+    once_migration!(pool, "user_level_discount_type_v1",
+        r#"INSERT INTO forward_rules (name, rule_type, description, config_json, category, is_system, eid)
+        SELECT 'ATP Token 视频生成', 'atp', '将标准视频生成请求（/v1/video/generations）或阿里百炼格式参数转换为 ATP Token 媒体视频 API 格式（omni tasks），支持 Seedance / Kling / Wan / HappyHorse 系列模型，自动轮询及参数兼容', '{"target_type":"atp_video","path_rewrite":{"old":"/v1/video/generations","new":"/omni/media/v1/contents/generations/tasks"},"auth_type":"bearer","poll_path":"/omni/media/v1/contents/generations/tasks/${task_id}"}', '视频', 1, '1' || lpad((floor(random() * 10000)::int)::text, 4, '0')
+        WHERE NOT EXISTS (SELECT 1 FROM forward_rules WHERE name = 'ATP Token 视频生成')"#,
+        "ALTER TABLE user_levels ADD COLUMN IF NOT EXISTS discount_type INTEGER NOT NULL DEFAULT 0",
+        "COMMENT ON COLUMN user_levels.discount_type IS '折扣模式: 0=不选择(跟随老逻辑全站+等级), 1=使用全站折扣, 2=使用等级折扣'"
+    );
+
+    // ── 补全预置 MiniMax 视频生成转发规则（并回填缺失 eid）──
+    once_migration!(pool, "minimax_video_forward_rule_v1",
+        r#"INSERT INTO forward_rules (name, rule_type, description, config_json, category, is_system, eid)
+        SELECT 'MiniMax 视频生成', 'minimax_video', 'MiniMax V2 视频生成原生通道，自动将多模态请求转换为 prompt 数组，并支持异步任务轮询', '{"target_type":"minimax_video","path_rewrite":{"old":"/v1/video/generations","new":"/v2/video_generation"},"auth_type":"bearer","poll_path":"/v2/query/video_generation/${task_id}"}', '视频', 1, '1' || lpad((floor(random() * 10000)::int)::text, 4, '0')
+        WHERE NOT EXISTS (SELECT 1 FROM forward_rules WHERE name = 'MiniMax 视频生成')"#,
+        "UPDATE forward_rules SET eid = '1' || lpad((floor(random() * 10000)::int)::text, 4, '0') WHERE eid IS NULL OR eid = ''"
+    );
+
+    // ── 数据同步插件：跨站拉取模型目录与计费规则 ──
+    once_migration!(pool, "init_data_sync_plugin_v1",
+        r#"INSERT INTO plugins (name, title, description, is_enabled, category, allowed_levels, created_at, updated_at)
+           VALUES (
+             'data_sync',
+             '数据同步',
+             '通过站点请求密钥跨站拉取模型列表与计费规则；本站优先跳过冲突，不同步折扣与渠道密钥',
+             0,
+             'system_builtin',
+             'all',
+             CURRENT_TIMESTAMP,
+             CURRENT_TIMESTAMP
+           )
+           ON CONFLICT (name) DO UPDATE SET
+             title = EXCLUDED.title,
+             description = EXCLUDED.description,
+             category = EXCLUDED.category"#,
+        r#"CREATE TABLE IF NOT EXISTS data_sync_logs (
+            id BIGSERIAL PRIMARY KEY,
+            action TEXT NOT NULL,
+            peer_url TEXT,
+            operator_id TEXT,
+            summary TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'success',
+            error_message TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )"#,
+        "CREATE INDEX IF NOT EXISTS idx_data_sync_logs_created ON data_sync_logs (created_at DESC)",
+        "COMMENT ON TABLE data_sync_logs IS '数据同步插件操作审计日志'"
+    );
+
+    // ── 数据同步：多站点请求密钥（命名/备注/有效期/IP 白名单）──
+    once_migration!(pool, "data_sync_multi_keys_v1",
+        r#"CREATE TABLE IF NOT EXISTS data_sync_keys (
+            id BIGSERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            remark TEXT NOT NULL DEFAULT '',
+            secret TEXT NOT NULL,
+            expires_at TIMESTAMPTZ,
+            ip_whitelist TEXT NOT NULL DEFAULT '[]',
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )"#,
+        "CREATE INDEX IF NOT EXISTS idx_data_sync_keys_active ON data_sync_keys (is_active)",
+        "COMMENT ON TABLE data_sync_keys IS '数据同步站点请求密钥：支持多密钥、备注、有效期、IP白名单(空=不限制)'",
+        r#"INSERT INTO data_sync_keys (name, remark, secret, expires_at, ip_whitelist, is_active)
+           SELECT '默认密钥', '由旧版单密钥自动迁移', config_value, NULL, '[]', 1
+           FROM plugin_configs
+           WHERE plugin_name = 'data_sync'
+             AND config_key = 'site_request_secret'
+             AND COALESCE(config_value, '') <> ''
+             AND NOT EXISTS (SELECT 1 FROM data_sync_keys LIMIT 1)"#,
+        r#"DELETE FROM plugin_configs
+           WHERE plugin_name = 'data_sync' AND config_key = 'site_request_secret'"#
+    );
+
+    // ── 上游渠道配置启用/禁用状态 ──
+    once_migration!(pool, "channel_configs_status_v1",
+        "ALTER TABLE channel_configs ADD COLUMN IF NOT EXISTS status INTEGER NOT NULL DEFAULT 1",
+        "COMMENT ON COLUMN channel_configs.status IS '1=启用, 0=禁用'"
+    );
+
+    // ── 上游渠道配置分类（复用 channel_categories）──
+    once_migration!(pool, "channel_configs_category_v1",
+        "ALTER TABLE channel_configs ADD COLUMN IF NOT EXISTS category_id BIGINT REFERENCES channel_categories(id)",
+        "COMMENT ON COLUMN channel_configs.category_id IS '上游分类，关联 channel_categories.id'"
     );
 
     tracing::info!("PostgreSQL AnyPool migrations completed successfully");

@@ -25,6 +25,8 @@
   --color-card-foreground: var(--card-foreground);
   --color-popover: var(--popover);
   --color-popover-foreground: var(--popover-foreground);
+  /* 控制台内容区灰底（与 DashboardLayout 一致） */
+  --color-dashboard: var(--dashboard);
 
   --radius-lg: var(--radius);
   --radius-md: calc(var(--radius) - 2px);
@@ -67,11 +69,13 @@
   --popover-foreground: hsl(240, 10%, 3.9%);
   --primary: hsl(240, 5.9%, 10%);
   --primary-foreground: hsl(0, 0%, 98%);
-  --secondary: hsl(240, 4.8%, 95.9%);
+  /* 控制台仪表盘灰底；muted/secondary/accent 与之对齐，保证全局灰一致 */
+  --dashboard: #f0f4f9;
+  --secondary: #f0f4f9;
   --secondary-foreground: hsl(240, 5.9%, 10%);
-  --muted: hsl(240, 4.8%, 95.9%);
+  --muted: #f0f4f9;
   --muted-foreground: hsl(240, 3.8%, 46.1%);
-  --accent-custom: hsl(240, 4.8%, 95.9%);
+  --accent-custom: #f0f4f9;
   --accent-custom-foreground: hsl(240, 5.9%, 10%);
   --border-custom: hsl(240, 5.9%, 90%);
   --input: hsl(240, 5.9%, 90%);
@@ -107,6 +111,7 @@
   --popover-foreground: hsl(0, 0%, 98%);
   --primary: hsl(0, 0%, 98%);
   --primary-foreground: hsl(240, 5.9%, 10%);
+  --dashboard: #000000;
   --secondary: hsl(240, 3.7%, 15.9%);
   --secondary-foreground: hsl(0, 0%, 98%);
   --muted: hsl(240, 3.7%, 15.9%);
@@ -233,6 +238,13 @@ code {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* 控制台顶栏毛玻璃（用户端 / 管理端 DashboardLayout） */
+.dashboard-top-nav-glass.ant-layout-header {
+  line-height: inherit;
+  -webkit-backdrop-filter: blur(18px) saturate(180%) !important;
+  backdrop-filter: blur(18px) saturate(180%) !important;
 }
 
 /* 修复亮色模式下 Radio.Button 选中状态（shadcn zinc，非蓝） */
@@ -408,19 +420,87 @@ body[data-theme='dark'] .ant-btn-primary:not(:disabled):not(.ant-btn-dangerous):
   color: #18181b !important;
 }
 
-/* Checkbox / Radio 选中描边跟主色（由 token 驱动，这里兜底去掉蓝倾向） */
-body[data-theme='light'] .ant-checkbox-checked .ant-checkbox-inner,
-body[data-theme='light'] .ant-radio-checked .ant-radio-inner {
+/*
+ * Checkbox — Ant Design 6：方框在 .ant-checkbox，勾在 .ant-checkbox::after
+ * 暗色 shadcn：白底 + 黑勾；亮色：深底 + 浅勾
+ */
+.ant-checkbox {
+  border-radius: 4px !important;
+}
+
+body[data-theme='light'] .ant-checkbox:not(.ant-checkbox-disabled) {
+  background-color: #ffffff !important;
+  border-color: #a1a1aa !important;
+}
+
+body[data-theme='dark'] .ant-checkbox:not(.ant-checkbox-disabled) {
+  background-color: transparent !important;
+  border-color: #71717a !important;
+}
+
+body[data-theme='light'] .ant-checkbox-checked:not(.ant-checkbox-disabled),
+body[data-theme='light'] .ant-checkbox-indeterminate:not(.ant-checkbox-disabled) {
   background-color: #18181b !important;
   border-color: #18181b !important;
 }
 
-body[data-theme='dark'] .ant-checkbox-checked .ant-checkbox-inner {
-  background-color: #fafafa !important;
+body[data-theme='light'] .ant-checkbox-checked:not(.ant-checkbox-disabled)::after {
   border-color: #fafafa !important;
 }
 
-body[data-theme='dark'] .ant-checkbox-checked .ant-checkbox-inner::after {
+body[data-theme='light'] .ant-checkbox-indeterminate:not(.ant-checkbox-disabled)::after {
+  background-color: #fafafa !important;
+  border: 0 !important;
+}
+
+body[data-theme='dark'] .ant-checkbox-checked:not(.ant-checkbox-disabled),
+body[data-theme='dark'] .ant-checkbox-indeterminate:not(.ant-checkbox-disabled) {
+  background-color: #ffffff !important;
+  border-color: #ffffff !important;
+}
+
+/* 暗色选中：勾必须是黑色（白底上可见） */
+body[data-theme='dark'] .ant-checkbox-checked:not(.ant-checkbox-disabled)::after {
+  border-color: #09090b !important;
+}
+
+body[data-theme='dark'] .ant-checkbox-indeterminate:not(.ant-checkbox-disabled)::after {
+  background-color: #09090b !important;
+  border: 0 !important;
+}
+
+/* hover 保持对比，避免被主色冲掉 */
+body[data-theme='light'] .ant-checkbox-wrapper:not(.ant-checkbox-wrapper-disabled):hover .ant-checkbox-checked,
+body[data-theme='light'] .ant-checkbox-checked:not(.ant-checkbox-disabled):hover {
+  background-color: #27272a !important;
+  border-color: #27272a !important;
+}
+
+body[data-theme='dark'] .ant-checkbox-wrapper:not(.ant-checkbox-wrapper-disabled):hover .ant-checkbox-checked,
+body[data-theme='dark'] .ant-checkbox-checked:not(.ant-checkbox-disabled):hover {
+  background-color: #f4f4f5 !important;
+  border-color: #f4f4f5 !important;
+}
+
+body[data-theme='dark'] .ant-checkbox-wrapper:not(.ant-checkbox-wrapper-disabled):hover .ant-checkbox-checked::after,
+body[data-theme='dark'] .ant-checkbox-checked:not(.ant-checkbox-disabled):hover::after {
+  border-color: #09090b !important;
+}
+
+/* shadcn focus ring */
+body[data-theme='light'] .ant-checkbox-wrapper:focus-within .ant-checkbox,
+body[data-theme='light'] .ant-checkbox:has(.ant-checkbox-input:focus-visible) {
+  outline: 3px solid rgba(24, 24, 27, 0.2) !important;
+  outline-offset: 2px !important;
+}
+
+body[data-theme='dark'] .ant-checkbox-wrapper:focus-within .ant-checkbox,
+body[data-theme='dark'] .ant-checkbox:has(.ant-checkbox-input:focus-visible) {
+  outline: 3px solid rgba(255, 255, 255, 0.28) !important;
+  outline-offset: 2px !important;
+}
+
+body[data-theme='light'] .ant-radio-checked .ant-radio-inner {
   border-color: #18181b !important;
 }
 
@@ -430,6 +510,38 @@ body[data-theme='dark'] .ant-radio-checked .ant-radio-inner {
 
 body[data-theme='dark'] .ant-radio-checked .ant-radio-inner::after {
   background-color: #fafafa !important;
+}
+
+/* 权限勾选网格：多行文字时勾选框与首行文字顶对齐 */
+.admin-perm-check-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 8px;
+  row-gap: 6px;
+  align-items: start;
+}
+
+.admin-perm-check-grid .admin-perm-check-item.ant-checkbox-wrapper {
+  display: inline-flex !important;
+  align-items: flex-start !important;
+  width: 100%;
+  margin-inline-end: 0 !important;
+  white-space: normal !important;
+}
+
+.admin-perm-check-grid .admin-perm-check-item .ant-checkbox {
+  align-self: flex-start !important;
+  /* 与 12px 首行文字光学对齐 */
+  margin-top: 2px !important;
+}
+
+.admin-perm-check-grid .admin-perm-check-item .ant-checkbox-label,
+.admin-perm-check-grid .admin-perm-check-label {
+  display: block;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: normal;
+  word-break: break-word;
 }
 
 /* 全局统一开关样式（AppSwitch / antd Switch — 与令牌页同一套灰阶） */
@@ -645,321 +757,6 @@ body[data-theme='light'] .ant-switch.ant-switch-checked .ant-switch-handle::befo
   font-size: 22px !important;
 }
 
-.tiptap-editor-container {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background-color: var(--bg);
-  color: var(--text);
-  overflow: hidden;
-  transition: border-color 0.2s, box-shadow 0.2s;
-}
-
-.tiptap-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  padding: 6px;
-  border-bottom: 1px solid var(--border);
-  background-color: var(--bg);
-}
-
-.tiptap-toolbar-divider {
-  width: 1px;
-  height: 16px;
-  background-color: var(--border);
-  margin: 0 4px;
-}
-
-.tiptap-toolbar-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 4px;
-  border: none;
-  background: transparent;
-  color: var(--text);
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.tiptap-toolbar-btn:hover {
-  background-color: var(--border);
-  color: var(--text-h);
-}
-
-.tiptap-toolbar-btn.is-active {
-  background-color: var(--accent-bg);
-  color: var(--accent);
-}
-
-.tiptap-toolbar-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.tiptap-content {
-  min-height: 200px;
-  max-height: 500px;
-  overflow-y: auto;
-  padding: 12px;
-}
-
-.tiptap-content .ProseMirror {
-  outline: none;
-  min-height: 180px;
-}
-
-.tiptap-content .ProseMirror p.is-editor-empty:first-child::before {
-  color: var(--text);
-  opacity: 0.4;
-  content: attr(data-placeholder);
-  float: left;
-  height: 0;
-  pointer-events: none;
-}
-
-/* TipTap Editor ProseMirror Typography */
-.tiptap-content .ProseMirror h1,
-.tiptap-content .ProseMirror h2,
-.tiptap-content .ProseMirror h3,
-.tiptap-content .ProseMirror h4 {
-  color: var(--text-h);
-  font-weight: 600;
-  margin-top: 1em;
-  margin-bottom: 0.5em;
-  line-height: 1.25;
-}
-
-.tiptap-content .ProseMirror h1 { font-size: 1.5rem; }
-.tiptap-content .ProseMirror h2 { font-size: 1.25rem; }
-.tiptap-content .ProseMirror h3 { font-size: 1.125rem; }
-
-.tiptap-content .ProseMirror p {
-  margin-top: 0;
-  margin-bottom: 0.75rem;
-  line-height: 1.6;
-}
-
-.tiptap-content .ProseMirror ul,
-.tiptap-content .ProseMirror ol {
-  margin-top: 0;
-  margin-bottom: 0.75rem;
-  padding-left: 1.5rem;
-}
-
-.tiptap-content .ProseMirror ul {
-  list-style-type: disc;
-}
-
-.tiptap-content .ProseMirror ol {
-  list-style-type: decimal;
-}
-
-.tiptap-content .ProseMirror li {
-  margin-bottom: 0.25rem;
-}
-
-.tiptap-content .ProseMirror blockquote {
-  border-left: 3px solid var(--accent);
-  padding-left: 1rem;
-  margin-left: 0;
-  margin-right: 0;
-  margin-top: 0.75rem;
-  margin-bottom: 0.75rem;
-  color: var(--text);
-  font-style: italic;
-  opacity: 0.85;
-}
-
-.tiptap-content .ProseMirror pre {
-  background: var(--code-bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text-h);
-  font-family: var(--mono);
-  padding: 0.75rem 1rem;
-  margin: 0.75rem 0;
-  overflow-x: auto;
-}
-
-.tiptap-content .ProseMirror pre code {
-  background: none;
-  color: inherit;
-  font-size: 0.875rem;
-  padding: 0;
-  border-radius: 0;
-}
-
-.tiptap-content .ProseMirror code {
-  background: var(--code-bg);
-  color: var(--accent);
-  font-family: var(--mono);
-  font-size: 0.85em;
-  padding: 0.2em 0.4em;
-  border-radius: 4px;
-}
-
-.tiptap-content .ProseMirror a {
-  color: var(--accent);
-  text-decoration: underline;
-  cursor: pointer;
-}
-
-.tiptap-content .ProseMirror a:hover {
-  opacity: 0.8;
-}
-
-.tiptap-content .ProseMirror hr {
-  border: none;
-  border-top: 1px solid var(--border);
-  margin: 1.5rem 0;
-}
-
-.tiptap-content .ProseMirror img {
-  max-width: 100%;
-  height: auto;
-  border-radius: 6px;
-  margin: 1rem 0;
-  display: block;
-}
-
-/* Fullscreen Editor Mode */
-.tiptap-editor-container.is-fullscreen {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100vw !important;
-  height: 100vh !important;
-  z-index: 9999;
-  border-radius: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.tiptap-editor-container.is-fullscreen .tiptap-content {
-  flex: 1;
-  max-height: none !important;
-  height: calc(100vh - 80px) !important;
-  overflow-y: auto;
-}
-
-/* Table Styles */
-.tiptap-content .ProseMirror table {
-  border-collapse: collapse;
-  table-layout: fixed;
-  width: 100%;
-  margin: 1.5rem 0;
-  overflow: hidden;
-}
-
-.tiptap-content .ProseMirror th,
-.tiptap-content .ProseMirror td {
-  border: 1px solid var(--border);
-  padding: 8px 12px;
-  min-width: 1em;
-  position: relative;
-  vertical-align: top;
-  box-sizing: border-box;
-}
-
-.tiptap-content .ProseMirror th {
-  background-color: var(--code-bg);
-  color: var(--text-h);
-  font-weight: 600;
-  text-align: left;
-}
-
-.tiptap-content .ProseMirror td p,
-.tiptap-content .ProseMirror th p {
-  margin: 0;
-}
-
-.tiptap-content .ProseMirror .selectedCell:after {
-  background: rgba(170, 59, 255, 0.08);
-  content: "";
-  left: 0;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  pointer-events: none;
-  position: absolute;
-  z-index: 2;
-}
-
-.tiptap-content .ProseMirror .column-resize-handle {
-  background-color: var(--accent);
-  bottom: 0;
-  position: absolute;
-  right: -2px;
-  top: 0;
-  width: 4px;
-  cursor: col-resize;
-  z-index: 10;
-}
-
-/* Task List Styles */
-.tiptap-content .ProseMirror ul[data-type="taskList"] {
-  list-style: none;
-  padding: 0;
-}
-
-.tiptap-content .ProseMirror ul[data-type="taskList"] li {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin-bottom: 0.5rem;
-}
-
-.tiptap-content .ProseMirror ul[data-type="taskList"] li > label {
-  margin-top: 4px;
-  user-select: none;
-}
-
-.tiptap-content .ProseMirror ul[data-type="taskList"] li > div {
-  flex: 1;
-}
-
-.tiptap-content .ProseMirror ul[data-type="taskList"] input[type="checkbox"] {
-  cursor: pointer;
-  accent-color: var(--accent);
-  width: 14px;
-  height: 14px;
-}
-
-/* Tiptap Custom Popovers in Dark Theme */
-.tiptap-dark-popover .ant-popover-content {
-  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.5) !important;
-}
-.tiptap-dark-popover .ant-popover-inner {
-  background-color: #18181b !important;
-  border: 1px solid #27272a !important;
-  border-radius: 12px !important;
-  padding: 12px !important;
-  color: #fff !important;
-}
-.tiptap-dark-popover .ant-popover-arrow::before {
-  background-color: #18181b !important;
-  border-color: #27272a !important;
-}
-
-/* Link Popover (Pill shape) */
-.tiptap-link-popover .ant-popover-inner {
-  background-color: #18181b !important;
-  border: 1px solid #27272a !important;
-  border-radius: 9999px !important;
-  padding: 6px 12px !important;
-  color: #fff !important;
-}
-.tiptap-link-popover .ant-popover-content {
-  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5) !important;
-}
-.tiptap-link-popover .ant-popover-arrow {
-  display: none !important;
-}
-
 .shadcn-auth-grid {
   position: relative;
   background-color: #09090b;
@@ -1102,4 +899,14 @@ body[data-theme='light'] .ant-switch.ant-switch-checked .ant-switch-handle::befo
  */
 .ant-message {
   display: none !important;
+}
+
+/* DatePicker / RangePicker 内部输入框文字及分隔符统一12px字号 */
+.ant-picker[style*="font-size: 12px"] .ant-picker-input > input,
+.ant-picker[style*="font-size: 12px"] .ant-picker-separator,
+.ant-picker[style*="font-size: 12px"] .ant-picker-range-separator,
+.ant-picker.font-size-12 .ant-picker-input > input,
+.ant-picker.font-size-12 .ant-picker-separator,
+.ant-picker.font-size-12 .ant-picker-range-separator {
+  font-size: 12px !important;
 }

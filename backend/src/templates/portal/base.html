@@ -243,10 +243,14 @@ strong{color:var(--text-primary);font-weight:600}
 .ftr-brand{max-width:360px}
 .ftr-brand b{font-size:18px;color:var(--text-primary);display:block;margin-bottom:12px;letter-spacing:-0.5px;font-weight:800}
 .ftr-brand p{color:var(--text-secondary);font-size:14px;line-height:1.6}
-.ftr-links{display:flex;gap:48px}
+.ftr-brand .ftr-meta{margin-top:12px;color:var(--text-muted);font-size:13px;line-height:1.5}
+.ftr-brand .ftr-meta p{margin:0 0 4px;color:var(--text-muted);font-size:13px}
+.ftr-links{display:flex;gap:48px;flex-wrap:wrap}
+.ftr-col{min-width:140px;max-width:240px}
 .ftr-col h4{font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:16px;letter-spacing:0.5px;text-transform:uppercase}
 .ftr-col a{display:block;font-size:14px;color:var(--text-secondary);margin-bottom:10px;transition:color var(--transition-fast);font-weight:500}
 .ftr-col a:hover{color:var(--text-primary)}
+.ftr-col p{color:var(--text-secondary);font-size:14px;line-height:1.6;margin:0}
 .ftr-btm{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:20px 0;border-top:1px solid var(--border-color);font-size:13px;color:var(--text-muted);text-align:center}
 .ftr-btm a{color:var(--text-secondary);font-weight:500;transition:color var(--transition-fast)}
 .ftr-btm a:hover{color:var(--text-primary)}
@@ -354,8 +358,8 @@ body.dark .invert-dark,
       <input type="text" data-i18n-placeholder="search_placeholder" placeholder="搜索模型名称、ID或MID..." onkeydown="if(event.key === 'Enter') { window.location.href = '/home/models?q=' + encodeURIComponent(this.value.trim()); }">
     </div>
     <nav class="hdr-nav">
-      {% if nav.items %}{% for item in nav.items %}{% if item.enabled | default(value=true) %}
-      <a href="{{ item.path | safe }}"{% if current_page is defined and item.key is defined and current_page == item.key %} class="on"{% endif %} {% if item.key %}data-i18n-title="nav_{{ item.key }}" title="{{ item.label }}"{% endif %}>
+      {% if nav.items %}{% for item in nav.items %}{% if item.enabled != false %}
+      <a href="{{ item.path | default(value='#') | safe }}"{% if current_page is defined and item.key is defined and current_page == item.key %} class="on"{% endif %} {% if item.key %}data-i18n-title="nav_{{ item.key }}" title="{{ item.label }}"{% endif %}>
         {% if item.icon %}
           {{ item.icon | safe }}
         {% else %}
@@ -406,37 +410,64 @@ body.dark .invert-dark,
 <div class="ftr-in">
   <div class="ftr-top">
     <div class="ftr-brand">
-      <b>{{ nav.logo_text | default(value="TokensByte") }}</b>
-      <p>{{ footer.description | default(value="OpenAI 兼容格式，极速接入主流模型。按量付费，零门槛开始。") }}</p>
+      <b data-i18n-dynamic="{{ footer.brand_name | default(value='TokensByte') }}">{{ footer.brand_name | default(value="TokensByte") }}</b>
+      {% if footer.description %}
+      <p data-i18n-dynamic="{{ footer.description }}">{{ footer.description }}</p>
+      {% endif %}
+      {% if footer.company_name or footer.company_address %}
+      <div class="ftr-meta">
+        {% if footer.company_name %}<p>{{ footer.company_name }}</p>{% endif %}
+        {% if footer.company_address %}<p>{{ footer.company_address }}</p>{% endif %}
+      </div>
+      {% endif %}
     </div>
     <div class="ftr-links">
-      {% if footer.links and footer.links | length > 0 %}
-        {% for group in footer.links %}
-        <div class="ftr-col">
-          <h4>{{ group.group_title | default(value="") }}</h4>
-          {% if group.links %}{% for link in group.links %}
-          <a href="{{ link.url | safe }}">{{ link.label }}</a>
-          {% endfor %}{% endif %}
-        </div>
-        {% endfor %}
-      {% else %}
-        <div class="ftr-col">
-          <h4 data-i18n="footer_products">产品</h4>
+      <div class="ftr-col">
+        <h4 data-i18n-dynamic="{{ footer.links_title | default(value='产品与服务|Products & Services') }}">{{ footer.links_title | default(value="产品与服务") }}</h4>
+        {% if footer.links %}
+          {% for link in footer.links %}
+            {% if link.enabled is not defined or link.enabled %}
+            {% if link.links %}
+              {% for nested in link.links %}
+              <a href="{% if nested.url %}{{ nested.url | safe }}{% elif nested.path %}{{ nested.path | safe }}{% else %}#{% endif %}" data-i18n-dynamic="{{ nested.label }}">{{ nested.label }}</a>
+              {% endfor %}
+            {% else %}
+              <a href="{% if link.path %}{{ link.path | safe }}{% elif link.url %}{{ link.url | safe }}{% else %}#{% endif %}" data-i18n-dynamic="{{ link.label }}">{{ link.label }}</a>
+            {% endif %}
+            {% endif %}
+          {% endfor %}
+        {% else %}
           <a href="/home/models" data-i18n="footer_models">模型列表</a>
           <a href="/home/about" data-i18n="footer_about">关于我们</a>
           <a href="/home/contact" data-i18n="footer_contact">联系我们</a>
-        </div>
-        <div class="ftr-col">
-          <h4 data-i18n="footer_developers">开发者</h4>
-          <a href="/login" data-i18n="footer_console">控制台</a>
-          <a href="/register" data-i18n="nav_register">免费注册</a>
-        </div>
+        {% endif %}
+      </div>
+      {% if footer.news_title or footer.news_description %}
+      <div class="ftr-col">
+        <h4 data-i18n-dynamic="{{ footer.news_title | default(value='') }}">{{ footer.news_title | default(value="") }}</h4>
+        {% if footer.news_description %}
+        <p data-i18n-dynamic="{{ footer.news_description }}">{{ footer.news_description }}</p>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if ((footer.terms_enabled is not defined or footer.terms_enabled) and footer.terms_text) or ((footer.privacy_enabled is not defined or footer.privacy_enabled) and footer.privacy_text) or footer.icp_number %}
+      <div class="ftr-col">
+        <h4>LEGAL</h4>
+        {% if (footer.terms_enabled is not defined or footer.terms_enabled) and footer.terms_text %}
+        <a href="{{ footer.terms_link | default(value='/legal/terms') | safe }}" data-i18n-dynamic="{{ footer.terms_text }}">{{ footer.terms_text }}</a>
+        {% endif %}
+        {% if (footer.privacy_enabled is not defined or footer.privacy_enabled) and footer.privacy_text %}
+        <a href="{{ footer.privacy_link | default(value='/legal/privacy') | safe }}" data-i18n-dynamic="{{ footer.privacy_text }}">{{ footer.privacy_text }}</a>
+        {% endif %}
+        {% if footer.icp_number %}
+        <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">{{ footer.icp_number }}</a>
+        {% endif %}
+      </div>
       {% endif %}
     </div>
   </div>
   <div class="ftr-btm">
-    <span>&copy; {{ year }} {{ footer.copyright | default(value="TokensByte") }}. All rights reserved.</span>
-    {% if footer.icp_number %}<a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">{{ footer.icp_number }}</a>{% endif %}
+    <span data-i18n-dynamic="{{ footer.copyright | default(value='© 2026 TokensByte. All rights reserved.') }}">{{ footer.copyright | default(value="© 2026 TokensByte. All rights reserved.") }}</span>
   </div>
 </div>
 </footer>

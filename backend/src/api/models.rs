@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -23,14 +23,10 @@ pub struct ModelQuery {
     pub api_provider_id: Option<i64>,
     pub type_id: Option<i64>,
     pub page_size: Option<i64>,
-    pub search: Option<String>, // 支持按 name / model_id / mid 搜索
 }
 
-pub async fn list_models(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Query(query): axum::extract::Query<ModelQuery>,
-) -> AppResult<Json<ModelListResponse>> {
-    let mut sql = "SELECT * FROM models WHERE 1=1".to_string();
+fn model_list_where(query: &ModelQuery) -> String {
+    let mut sql = String::from(" WHERE 1=1");
     if query.provider_id.is_some() {
         sql.push_str(" AND provider_id = ?");
     }
@@ -40,64 +36,61 @@ pub async fn list_models(
     if query.type_id.is_some() {
         sql.push_str(" AND type_id = ?");
     }
-    if query.search.is_some() {
-        sql.push_str(" AND (name ILIKE ? OR model_id ILIKE ? OR mid = ?)");
+    sql
+}
+
+/// 与 [`model_list_where`] 占位符顺序一致
+fn model_filter_ids(query: &ModelQuery) -> impl Iterator<Item = i64> + '_ {
+    [query.provider_id, query.api_provider_id, query.type_id]
+        .into_iter()
+        .flatten()
+}
+
+pub async fn list_models(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<ModelQuery>,
+) -> AppResult<Json<ModelListResponse>> {
+    let mut where_sql = model_list_where(&query);
+
+    #[cfg(feature = "plugin_volcengine_enhance")]
+    {
+        let volc_active =
+            crate::api::plugins::is_plugin_enabled(&state, "volcengine_enhance").await;
+        if !volc_active {
+            where_sql.push_str(" AND (mid IS NULL OR mid NOT IN ('vve-sd', 'vve-pf', 'vve-ft', 'vve-gt', 'vvs-er', 'vvs-ep', 'dbs-sr', 'dbs-fs'))");
+        }
     }
-    sql.push_str(" ORDER BY id DESC");
-    if let Some(ps) = query.page_size {
-        sql.push_str(&format!(" LIMIT {}", ps));
+    #[cfg(not(feature = "plugin_volcengine_enhance"))]
+    {
+        where_sql.push_str(" AND (mid IS NULL OR mid NOT IN ('vve-sd', 'vve-pf', 'vve-ft', 'vve-gt', 'vvs-er', 'vvs-ep', 'dbs-sr', 'dbs-fs'))");
     }
 
-    let formatted_sql = state.db.format_query(&sql);
+    // 忽略 ≤0；上限防止异常大 LIMIT
+    let limit = query.page_size.filter(|&p| p > 0).map(|p| p.min(10_000));
+    let mut list_sql = format!("SELECT * FROM models{where_sql} ORDER BY id DESC");
+    if let Some(ps) = limit {
+        list_sql.push_str(&format!(" LIMIT {ps}"));
+    }
+
+    let formatted_sql = state.db.format_query(&list_sql);
     let mut q = sqlx::query_as::<_, Model>(&formatted_sql);
-    if let Some(pid) = query.provider_id {
-        q = q.bind(pid);
+    for id in model_filter_ids(&query) {
+        q = q.bind(id);
     }
-    if let Some(apid) = query.api_provider_id {
-        q = q.bind(apid);
-    }
-    if let Some(tid) = query.type_id {
-        q = q.bind(tid);
-    }
-    if let Some(ref kw) = query.search {
-        let like = format!("%{}%", kw);
-        q = q.bind(like.clone()).bind(like).bind(kw);
-    }
-
     let models = q.fetch_all(&state.db.pool).await?;
 
-    // Total count for the filtered list
-    let mut count_sql = "SELECT COUNT(*) FROM models WHERE 1=1".to_string();
-    if query.provider_id.is_some() {
-        count_sql.push_str(" AND provider_id = ?");
-    }
-    if query.api_provider_id.is_some() {
-        count_sql.push_str(" AND api_provider_id = ?");
-    }
-    if query.type_id.is_some() {
-        count_sql.push_str(" AND type_id = ?");
-    }
-    if query.search.is_some() {
-        count_sql.push_str(" AND (name ILIKE ? OR model_id ILIKE ? OR mid = ?)");
-    }
-
-    let formatted_count_sql = state.db.format_query(&count_sql);
-    let mut cq = sqlx::query_scalar::<_, i64>(&formatted_count_sql);
-    if let Some(pid) = query.provider_id {
-        cq = cq.bind(pid);
-    }
-    if let Some(apid) = query.api_provider_id {
-        cq = cq.bind(apid);
-    }
-    if let Some(tid) = query.type_id {
-        cq = cq.bind(tid);
-    }
-    if let Some(ref kw) = query.search {
-        let like = format!("%{}%", kw);
-        cq = cq.bind(like.clone()).bind(like).bind(kw);
-    }
-
-    let total = cq.fetch_one(&state.db.pool).await?;
+    // 无 LIMIT 时列表即全集，不必再跑 COUNT
+    let total = if limit.is_some() {
+        let count_sql = format!("SELECT COUNT(*) FROM models{where_sql}");
+        let formatted_count_sql = state.db.format_query(&count_sql);
+        let mut cq = sqlx::query_scalar::<_, i64>(&formatted_count_sql);
+        for id in model_filter_ids(&query) {
+            cq = cq.bind(id);
+        }
+        cq.fetch_one(&state.db.pool).await?
+    } else {
+        models.len() as i64
+    };
 
     Ok(Json(ModelListResponse {
         data: models,

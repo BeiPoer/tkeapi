@@ -8,7 +8,9 @@
 import React, { useEffect, useState } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import axios from 'axios';
 import request from './utils/request';
+import { captureInviteFromSearch } from './utils/inviteTracking';
 import Login from './pages/Login/Login';
 import Register from './pages/Login/Register';
 import ForgotPassword from './pages/Login/ForgotPassword';
@@ -30,18 +32,23 @@ import Users from './pages/Users/Users';
 import UserLevels from './pages/Users/UserLevels';
 import UserLevelEdit from './pages/Users/UserLevelEdit';
 import AdminGroups from './pages/Users/AdminGroups';
+import AdminGroupEdit from './pages/Users/AdminGroupEdit';
 import Logs from './pages/Logs/Logs';
 import TaskLogs from './pages/Logs/TaskLogs';
-import Playground from './pages/Playground/Playground';
-import PlaygroundHome from './pages/Playground/PlaygroundHome';
-import ModelMarketplace from './pages/ModelMarketplace/ModelMarketplace';
 import {
   RelayAPI,
+  PortalDocsViewer,
   PluginsList,
   PluginConfig,
   ArkUserDashboard,
   UserAssets,
   AdvancedMarketing,
+  ThemePromoLanding,
+  Playground,
+  PlaygroundHome,
+  Playground2026,
+  PlaygroundHome2026,
+  ModelMarketplace,
 } from './plugins-registry';
 import Redemptions from './pages/Redemptions/Redemptions';
 import Profile from './pages/Profile/Profile';
@@ -65,9 +72,63 @@ import useSettingsStore from './store/settings';
 const PrivateRoute = ({ children, adminOnly = false, userOnly = false }: { children: React.ReactNode, adminOnly?: boolean, userOnly?: boolean }) => {
   const { token, user } = useAuthStore();
   const adminPath = localStorage.getItem('tokensbyte_admin_path') || 'admin1688';
-  if (!token) return <Navigate to="/login" />;
-  if (adminOnly && user?.role !== 'admin') return <Navigate to="/dashboard" />;
-  if (userOnly && user?.role === 'admin') return <Navigate to={`/${adminPath}/dashboard`} />;
+  // 管理端未登录应回管理登录页，而非用户端 /login
+  if (!token) return <Navigate to={adminOnly ? `/${adminPath}` : '/login'} replace />;
+  if (adminOnly && user?.role !== 'admin') return <Navigate to="/dashboard" replace />;
+  if (userOnly && user?.role === 'admin') return <Navigate to={`/${adminPath}/dashboard`} replace />;
+  return <>{children}</>;
+};
+
+/**
+ * 全新安装（尚无管理员）时，任意入口都直接进入管理员初始化页。
+ */
+const AdminSetupGate = ({ children }: { children: React.ReactNode }) => {
+  const [bootState, setBootState] = useState<'loading' | 'ready' | 'need_setup'>('loading');
+  const adminPath = localStorage.getItem('tokensbyte_admin_path') || 'admin1688';
+  const { token, setToken, setUser } = useAuthStore();
+
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const response = await axios.get<{ initialized: boolean }>('/api/v1/auth/admin/init-status');
+        if (cancelled) return;
+        if (!response.data.initialized) {
+          // 清空残留登录态，避免初始化页被旧 token 误跳转
+          if (token) {
+            setToken(null);
+            setUser(null);
+          }
+          setBootState('need_setup');
+          return;
+        }
+        setBootState('ready');
+      } catch {
+        // 后端短暂不可用时不锁死在初始化页
+        if (!cancelled) setBootState('ready');
+      }
+    };
+    void check();
+    return () => { cancelled = true; };
+  }, [token, setToken, setUser]);
+
+  if (bootState === 'loading') {
+    return (
+      <div style={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center', color: '#666' }}>
+        Loading...
+      </div>
+    );
+  }
+
+  if (bootState === 'need_setup') {
+    return (
+      <Routes>
+        <Route path={`/${adminPath}`} element={<AdminLogin />} />
+        <Route path="*" element={<Navigate to={`/${adminPath}`} replace />} />
+      </Routes>
+    );
+  }
+
   return <>{children}</>;
 };
 
@@ -94,7 +155,11 @@ const PluginRoute = ({
           setIsActive(false);
           return;
         }
-        if (allowGuest && matched.mp_allow_guest) {
+        if (
+          allowGuest &&
+          (matched.mp_allow_guest ||
+            ['site_portal_pro', 'site_portal', 'docs_api', 'model_marketplace'].includes(pluginName))
+        ) {
           setIsActive(true);
           return;
         }
@@ -131,7 +196,8 @@ const PluginRoute = ({
 
 /**
  * UserEndRoute – 用户端根路由守卫
- * 当 site_portal 插件已启用时，访问精确的 '/' 路径会跳转到后端渲染的门户首页 '/home'。
+ * 当站点门户（或增强版）已启用时，访问精确的 '/' 路径会跳转到后端渲染的门户首页。
+ * 增强版优先：site_portal_pro → /home-pro；否则 site_portal → /home。
  * 其他子路径（如 /tokens, /docs 等）仍需登录后才能访问。
  */
 const UserEndRoute = () => {
@@ -139,7 +205,7 @@ const UserEndRoute = () => {
   const location = useLocation();
   const isRootPath = location.pathname === '/';
   const [checking, setChecking] = useState(isRootPath);
-  const [portalEnabled, setPortalEnabled] = useState(false);
+  const [portalHomePath, setPortalHomePath] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isRootPath) { setChecking(false); return; }
@@ -148,7 +214,13 @@ const UserEndRoute = () => {
       .then((res: any) => {
         if (cancelled) return;
         const active: any[] = res?.active_plugins || [];
-        setPortalEnabled(active.some((p: any) => p.name === 'site_portal'));
+        if (active.some((p: any) => p.name === 'site_portal_pro')) {
+          setPortalHomePath('/home-pro');
+        } else if (active.some((p: any) => p.name === 'site_portal')) {
+          setPortalHomePath('/home');
+        } else {
+          setPortalHomePath(null);
+        }
       })
       .catch(() => {})
       .finally(() => { if (!cancelled) setChecking(false); });
@@ -156,8 +228,8 @@ const UserEndRoute = () => {
   }, [isRootPath]);
 
   // 精确 '/' 路径 & 门户已启用 → 跳转到后端渲染的门户首页
-  if (isRootPath && !checking && portalEnabled) {
-    window.location.href = '/home';
+  if (isRootPath && !checking && portalHomePath) {
+    window.location.href = portalHomePath;
     return null;
   }
   // 精确 '/' 路径，仍在检测中 → 展示空白避免闪烁
@@ -167,6 +239,15 @@ const UserEndRoute = () => {
   if (!token) return <Navigate to="/login" />;
   if (user?.role === 'admin') return <Navigate to={`/${adminPath}/dashboard`} />;
   return <DashboardLayout isUserEnd={true} />;
+};
+
+/** SPA 路由变化时再次捕获 aff/team（覆盖 /promo、/register、站内跳转） */
+const InviteParamCapture: React.FC = () => {
+  const location = useLocation();
+  useEffect(() => {
+    captureInviteFromSearch(location.search);
+  }, [location.search]);
+  return null;
 };
 
 const App: React.FC = () => {
@@ -179,43 +260,27 @@ const App: React.FC = () => {
     document.documentElement.lang = i18n.language === 'zh' ? 'zh-CN' : (i18n.language || 'en');
   }, [i18n.language]);
 
-  // ─── Affiliate & Team Tracking: 3-day persistent invite codes ───
-  // Runs synchronously on EVERY render cycle so child components
-  // (Register / Login) can read the stored value immediately.
-  // Uses both localStorage AND cookie as dual-storage for maximum reliability.
+  // 首屏同步捕获 URL 邀请参数，保证 Register/Login 首渲可读到存储
   React.useMemo(() => {
-    const params = new URLSearchParams(window.location.search);
-    const aff = params.get('aff');
-    const team = params.get('team');
-    const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
-
-    const persist = (key: string, value: string) => {
-      const expiry = Date.now() + THREE_DAYS_MS;
-      // localStorage
-      localStorage.setItem(key, JSON.stringify({ value, expiry }));
-      // cookie (HttpOnly=false so JS can read; path=/ so all routes see it)
-      const expires = new Date(expiry).toUTCString();
-      document.cookie = `${key}=${encodeURIComponent(value)}; path=/; expires=${expires}; SameSite=Lax`;
-    };
-
-    if (aff) persist('tokensbyte_affiliate_code', aff);
-    if (team) persist('tokensbyte_team_invite', team);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    captureInviteFromSearch();
+  }, []);
 
   useEffect(() => {
     fetchSettings();
   }, [fetchSettings]);
 
   return (
-    <Router>
+    <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <InviteParamCapture />
       <React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', color: '#666' }}>Loading...</div>}>
+        <AdminSetupGate>
         <Routes>
         {/* Public Routes */}
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
-        <Route path={`/${adminPath}`} element={<AdminLogin />} />
         <Route path="/legal/:type" element={<LegalPage />} />
+        <Route path="/promo/:slug" element={<ThemePromoLanding />} />
 
         <Route
           path="/playground"
@@ -237,9 +302,37 @@ const App: React.FC = () => {
             </PrivateRoute>
           }
         />
+        <Route
+          path="/playground-2026"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
+                <PlaygroundHome2026 />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/playground-2026/:projectId"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
+                <Playground2026 />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
 
-        {/* Model Marketplace Route (Full Screen, Independent) */}
-        {/* Model Marketplace Route (Full Screen, Independent) */}
+        {/* Model Marketplace Routes (Full Screen, Independent) */}
+        <Route
+          path="/home/models"
+          element={
+            <PluginRoute pluginName="model_marketplace" allowGuest={true}>
+              <ModelMarketplace />
+            </PluginRoute>
+          }
+        />
+        {/* 保留旧地址兼容已有外链 */}
         <Route
           path="/models"
           element={
@@ -249,12 +342,12 @@ const App: React.FC = () => {
           }
         />
 
-        {/* API Reference Route (Full Screen, Independent) */}
+        {/* API 教程：仅绑定 docs_api，与 site_portal_pro 数据源解耦 */}
         <Route
           path="/docs"
           element={
             <PluginRoute pluginName="docs_api" allowGuest={true}>
-              <RelayAPI />
+              <RelayAPI apiPrefix="/plugins/docs-api" />
             </PluginRoute>
           }
         />
@@ -262,7 +355,7 @@ const App: React.FC = () => {
           path="/docs/:id"
           element={
             <PluginRoute pluginName="docs_api" allowGuest={true}>
-              <RelayAPI />
+              <RelayAPI apiPrefix="/plugins/docs-api" />
             </PluginRoute>
           }
         />
@@ -270,7 +363,33 @@ const App: React.FC = () => {
           path="/docs/:category/:id"
           element={
             <PluginRoute pluginName="docs_api" allowGuest={true}>
-              <RelayAPI />
+              <RelayAPI apiPrefix="/plugins/docs-api" />
+            </PluginRoute>
+          }
+        />
+
+        {/* 高级门户文档：仅绑定 site_portal_pro，独立路径与库表 */}
+        <Route
+          path="/home-pro/docs"
+          element={
+            <PluginRoute pluginName="site_portal_pro" allowGuest={true}>
+              <PortalDocsViewer />
+            </PluginRoute>
+          }
+        />
+        <Route
+          path="/home-pro/docs/:id"
+          element={
+            <PluginRoute pluginName="site_portal_pro" allowGuest={true}>
+              <PortalDocsViewer />
+            </PluginRoute>
+          }
+        />
+        <Route
+          path="/home-pro/docs/:category/:id"
+          element={
+            <PluginRoute pluginName="site_portal_pro" allowGuest={true}>
+              <PortalDocsViewer />
             </PluginRoute>
           }
         />
@@ -297,56 +416,60 @@ const App: React.FC = () => {
           <Route path="profile/notifications" element={<NotificationSubscription />} />
         </Route>
 
-        {/* System End Routes */}
-        <Route
-          path={`/${adminPath}`}
-          element={
-            <PrivateRoute adminOnly={true}>
-              <DashboardLayout isUserEnd={false} />
-            </PrivateRoute>
-          }
-        >
-          <Route path="dashboard" element={<Dashboard />} />
-          <Route path="docs" element={<RelayAPI />} />
-          <Route path="docs/:id" element={<RelayAPI />} />
-          <Route path="docs/:category/:id" element={<RelayAPI />} />
-          <Route path="upstreams" element={<Upstreams />} />
-          <Route path="channel-configs" element={<ChannelConfigs />} />
-          <Route path="channels" element={<Channels />} />
-          <Route path="channels/model-display" element={<ModelChannelsDisplay />} />
-          <Route path="channels/test/:id" element={<ChannelTest />} />
-          <Route path="models" element={<Models />} />
-          <Route path="forward-rules" element={<ForwardRules />} />
-          <Route path="billing-rules" element={<BillingRules />} />
-          <Route path="tokens" element={<Tokens />} />
+        {/* System End Routes：index 为管理登录页，子路由需管理员鉴权 */}
+        <Route path={`/${adminPath}`}>
+          <Route index element={<AdminLogin />} />
+          <Route
+            element={
+              <PrivateRoute adminOnly={true}>
+                <DashboardLayout isUserEnd={false} />
+              </PrivateRoute>
+            }
+          >
+            <Route path="dashboard" element={<Dashboard />} />
+            <Route path="docs" element={<RelayAPI apiPrefix="/plugins/docs-api" />} />
+            <Route path="docs/:id" element={<RelayAPI apiPrefix="/plugins/docs-api" />} />
+            <Route path="docs/:category/:id" element={<RelayAPI apiPrefix="/plugins/docs-api" />} />
+            <Route path="upstreams" element={<Upstreams />} />
+            <Route path="channel-configs" element={<ChannelConfigs />} />
+            <Route path="channels" element={<Channels />} />
+            <Route path="channels/model-display" element={<ModelChannelsDisplay />} />
+            <Route path="channels/test/:id" element={<ChannelTest />} />
+            <Route path="models" element={<Models />} />
+            <Route path="forward-rules" element={<ForwardRules />} />
+            <Route path="billing-rules" element={<BillingRules />} />
+            <Route path="tokens" element={<Tokens />} />
 
-          <Route path="logs" element={<Logs />} />
-          <Route path="task-logs" element={<TaskLogs />} />
-          <Route path="plugins" element={<PluginsList />} />
-          <Route path="plugins/:name/config" element={<PluginConfig />} />
+            <Route path="logs" element={<Logs />} />
+            <Route path="task-logs" element={<TaskLogs />} />
+            <Route path="plugins" element={<PluginsList />} />
+            <Route path="plugins/:name/config" element={<PluginConfig />} />
 
-          <Route path="redemptions" element={<Redemptions />} />
-          <Route path="users" element={<Users />} />
-          <Route path="admins" element={<Users />} />
-          <Route path="user-levels" element={<UserLevels />} />
-          <Route path="user-levels/:actionId" element={<UserLevelEdit />} />
-          <Route path="admin-groups" element={<AdminGroups />} />
-          <Route path="finance/recharges" element={<RechargeRecords />} />
-          <Route path="finance/gifts" element={<GiftRecords />} />
-          <Route path="finance/orders" element={<OrderDetails />} />
-          <Route path="finance/analysis" element={<FinanceDataAnalysis />} />
-          <Route path="settings" element={<Settings />} />
-          <Route path="payment-settings" element={<PaymentSettings />} />
-          <Route path="message-notification" element={<MessageNotification />} />
-          <Route path="oauth-settings" element={<OAuthSettings />} />
-          <Route path="marketing/registration-gifts" element={<RegistrationGifts />} />
-          <Route path="marketing/announcements" element={<Announcements />} />
-          <Route path="about" element={<SystemAbout />} />
+            <Route path="redemptions" element={<Redemptions />} />
+            <Route path="users" element={<Users />} />
+            <Route path="admins" element={<Users />} />
+            <Route path="user-levels" element={<UserLevels />} />
+            <Route path="user-levels/:actionId" element={<UserLevelEdit />} />
+            <Route path="admin-groups" element={<AdminGroups />} />
+            <Route path="admin-groups/:actionId" element={<AdminGroupEdit />} />
+            <Route path="finance/recharges" element={<RechargeRecords />} />
+            <Route path="finance/gifts" element={<GiftRecords />} />
+            <Route path="finance/orders" element={<OrderDetails />} />
+            <Route path="finance/analysis" element={<FinanceDataAnalysis />} />
+            <Route path="settings" element={<Settings />} />
+            <Route path="payment-settings" element={<PaymentSettings />} />
+            <Route path="message-notification" element={<MessageNotification />} />
+            <Route path="oauth-settings" element={<OAuthSettings />} />
+            <Route path="marketing/registration-gifts" element={<RegistrationGifts />} />
+            <Route path="marketing/announcements" element={<Announcements />} />
+            <Route path="about" element={<SystemAbout />} />
+          </Route>
         </Route>
 
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        </AdminSetupGate>
       </React.Suspense>
     </Router>
   );

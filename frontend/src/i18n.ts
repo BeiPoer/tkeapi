@@ -7,13 +7,13 @@
 
 import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
-import LanguageDetector from 'i18next-browser-languagedetector';
 
 import en from './locales/en.json';
 import zh from './locales/zh.json';
 import ja from './locales/ja.json';
 import ko from './locales/ko.json';
 import vi from './locales/vi.json';
+import { getUserLanguagePreference } from './utils/language';
 
 // ── 插件独立多语言 (动态加载) ──
 const pluginLocaleFiles = import.meta.glob('./pages/Plugins/*/locales/*.json', { eager: true });
@@ -58,22 +58,17 @@ for (const ns of pluginNs) {
   }
 }
 
-i18n
-  .use(LanguageDetector)
-  .use(initReactI18next)
-  .init({
-    resources,
-    ns: ['translation', ...pluginNs],
-    defaultNS: 'translation',
-    fallbackLng: 'zh',
-    lng: localStorage.getItem('i18nextLng') || 'zh', // Force zh as default if not set
-    interpolation: {
-      escapeValue: false, // react already safes from xss
-    },
-    detection: {
-      order: ['localStorage', 'navigator'],
-      caches: ['localStorage'],
-    },
-  });
+// 仅使用「用户手动选择」的语言；未选择时先用 zh，等站点设置加载后再应用 default_language。
+// 不再使用 LanguageDetector：它会把浏览器语言写入 localStorage，导致站点默认语言失效。
+i18n.use(initReactI18next).init({
+  resources,
+  ns: ['translation', ...pluginNs],
+  defaultNS: 'translation',
+  fallbackLng: 'zh',
+  lng: getUserLanguagePreference() || 'zh',
+  interpolation: {
+    escapeValue: false, // react already safes from xss
+  },
+});
 
 export default i18n;

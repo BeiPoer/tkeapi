@@ -12,6 +12,10 @@ fn is_false(v: &bool) -> bool {
     !*v
 }
 
+fn is_zero_i32(v: &i32) -> bool {
+    *v == 0
+}
+
 /// 任务日志 — 直接映射 logs 表 JOIN channels/users 的结果集
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct TaskLog {
@@ -59,9 +63,10 @@ pub struct TaskLog {
     #[sqlx(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_group_aid: Option<String>,
+    /// 请求当时是否走 HA 组（写路径快照）
     #[sqlx(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub channel_provider_type: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub is_ha: i32,
     #[sqlx(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_nickname: Option<String>,
@@ -87,6 +92,10 @@ pub struct TaskLog {
     #[sqlx(default)]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview_urls: Vec<String>,
+    /// 任务是否已终结（列表用于级联进行中不向普通用户暴露 S1 产物预览）
+    #[sqlx(default)]
+    #[serde(skip_serializing)]
+    pub is_completed: i16,
     pub created_at: DbTs,
 }
 

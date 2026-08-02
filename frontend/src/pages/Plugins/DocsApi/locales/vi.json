@@ -1,7 +1,9 @@
 {
   "doc_outline": "Cấu trúc tài liệu",
-  "reset_confirm_title": "Bạn có chắc chắn muốn đặt lại về tài liệu hướng dẫn API mặc định của hệ thống không? Thao tác này sẽ ghi đè toàn bộ nội dung tài liệu hiện tại của bạn!",
-  "reset_tooltip": "Đặt lại về tài liệu hướng dẫn mặc định",
+  "reset_confirm_title": "Đặt lại về tài liệu mặc định?",
+  "reset_confirm_desc": "Xóa nội dung hiện có và khôi phục dữ liệu mặc định.",
+  "reset_tooltip": "Khởi tạo lại",
+  "reset_init_btn": "Khởi tạo lại",
   "search_placeholder": "Tìm kiếm tài liệu...",
   "no_docs": "Chưa có tài liệu",
   "new_dir": "Thư mục mới",
@@ -46,8 +48,8 @@
   "msg_save_failed": "Lưu thất bại",
   "msg_delete_success": "Xóa thành công",
   "msg_delete_failed": "Xóa thất bại",
-  "msg_reset_success": "Đặt lại tài liệu mặc định thành công",
-  "msg_reset_failed": "Đặt lại dữ liệu mặc định thất bại",
+  "msg_reset_success": "DOCS đã được khôi phục về dữ liệu mặc định ban đầu",
+  "msg_reset_failed": "Khởi tạo lại DOCS thất bại",
   "msg_add_success": "Thêm thành công",
   "msg_add_failed": "Thêm thất bại",
   "msg_drag_not_dir": "Không thể kéo thả vào bên trong tập tin không phải thư mục",
@@ -57,7 +59,7 @@
   "translate_loading": "Đang gọi AI dịch đa ngôn ngữ...",
   "translate_success": "Đã hoàn thành dịch đa ngôn ngữ bằng AI, vui lòng kiểm tra và lưu lại.",
   "translate_failed": "Dịch bằng AI thất bại",
-  "reset_btn": "Đặt lại",
+  "reset_btn": "Xác nhận đặt lại",
   "cat_settings": "Cài đặt danh mục",
   "cat_settings_desc": "Nút hiện tại là \"Danh mục thư mục\", được sử dụng để nhóm menu đa cấp.",
   "cat_name": "Tên danh mục",
@@ -81,5 +83,10 @@
   "client_palette_select": "Chọn",
   "client_palette_exit": "Nhấn ESC để thoát",
   "client_palette_placeholder": "Nhập tên tài liệu hoặc danh mục để tìm kiếm nhanh...",
-  "client_palette_no_results": "Không tìm thấy tài liệu phù hợp"
+  "client_palette_no_results": "Không tìm thấy tài liệu phù hợp",
+  "client_lang_select": "Chọn ngôn ngữ",
+  "client_style_select": "Chọn giao diện",
+  "client_style_light": "Sáng",
+  "client_style_dark": "Tối",
+  "client_github": "GitHub"
 }

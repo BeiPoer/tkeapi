@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -160,6 +160,29 @@ pub async fn update_settings(
     if let Some(v) = request.smtp {
         merge_and_save_setting(&state, "smtp_settings", &v, default_smtp_settings()).await?;
     }
+    // 短信余额提醒开关与余额模板 ID 跨配置校验（保存前合并预览，避免开了却发不了）
+    if request.sms.is_some() || request.notification.is_some() {
+        let current_sms =
+            get_setting::<SmsSettings>(&state, "sms_settings", default_sms_settings()).await?;
+        let current_notif = get_setting::<crate::models::NotificationSettings>(
+            &state,
+            "notification_settings",
+            crate::models::NotificationSettings::default(),
+        )
+        .await?;
+        let effective_sms = match &request.sms {
+            Some(v) => merge_patch(&current_sms, v)?,
+            None => current_sms,
+        };
+        let effective_notif = match &request.notification {
+            Some(v) => merge_patch(&current_notif, v)?,
+            None => current_notif,
+        };
+        crate::services::sms::ensure_balance_sms_config(
+            effective_notif.sms_balance_notification,
+            &effective_sms,
+        )?;
+    }
     if let Some(v) = request.sms {
         merge_and_save_setting(&state, "sms_settings", &v, default_sms_settings()).await?;
     }
@@ -215,7 +238,6 @@ pub async fn update_settings(
                 e
             )));
         }
-
 
         // 5. 复制系统设置表记录（从当前数据库同步拷贝至新数据库）
         if let Ok(current_settings) =
@@ -406,19 +428,24 @@ pub async fn test_sms(
         .as_str()
         .ok_or_else(|| AppError::BadRequest("缺少手机号 mobile".to_string()))?;
     let sms = get_setting::<SmsSettings>(&state, "sms_settings", default_sms_settings()).await?;
-    if sms.secret_id.is_empty() || sms.secret_key.is_empty() {
+    if !sms.credentials_configured() {
         return Err(AppError::BadRequest("请先完善短信通知配置".to_string()));
     }
     let svc = crate::services::sms::SmsService::new(&sms);
-    svc.send_verification_code(mobile, "666666").await?;
-    Ok(Json(
-        serde_json::json!({"success": true, "message": "测试短信发送成功"}),
-    ))
+    let sent = svc.send_verification_code(mobile, "666666").await?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": sent.accepted_message(mobile, "测试短信"),
+        "serial_no": sent.serial_no,
+        "request_id": sent.request_id,
+        "phone": sent.phone,
+    })))
 }
 
 /// 测试发送余额不足提醒（邮件 / 短信）
 /// body: { channel: "email"|"sms", to?: email, mobile?: phone, balance?: "88.0000", threshold?: "100.0000",
-///         subject?: "...", html?: "..." }  — subject/html 可传草稿内容做预览发送，不传则用已保存配置
+///         subject?: "...", html?: "..." }
+/// — balance/threshold/subject/html 仅邮件用；短信为无变量模板，只传 mobile
 pub async fn test_low_balance_notification(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -486,26 +513,22 @@ pub async fn test_low_balance_notification(
                 .ok_or_else(|| AppError::BadRequest("缺少手机号 mobile".to_string()))?;
             let sms =
                 get_setting::<SmsSettings>(&state, "sms_settings", default_sms_settings()).await?;
-            if sms.secret_id.is_empty() || sms.secret_key.is_empty() {
+            if !sms.credentials_configured() {
                 return Err(AppError::BadRequest(
                     "请先在「短信通知」中完善短信配置".to_string(),
                 ));
             }
-            if sms.balance_template_id.trim().is_empty() {
-                return Err(AppError::BadRequest(
-                    "请先在「短信通知」中配置余额提醒模板 ID".to_string(),
-                ));
-            }
+            crate::services::sms::ensure_balance_sms_config(true, &sms)?;
             let svc = crate::services::sms::SmsService::new(&sms);
-            svc.send_with_template(
-                mobile,
-                &sms.balance_template_id,
-                &[balance.clone(), threshold.clone()],
-            )
-            .await?;
+            let sent = svc
+                .send_balance_alert(mobile, sms.balance_template_id_effective())
+                .await?;
             Ok(Json(serde_json::json!({
                 "success": true,
-                "message": "余额提醒测试短信已发送"
+                "message": sent.accepted_message(mobile, "余额提醒测试短信"),
+                "serial_no": sent.serial_no,
+                "request_id": sent.request_id,
+                "phone": sent.phone,
             })))
         }
         _ => Err(AppError::BadRequest(
@@ -862,6 +885,18 @@ fn merge_json(old: &mut serde_json::Value, new: &serde_json::Value) {
     }
 }
 
+/// 内存合并配置补丁（不落库），用于跨配置校验
+fn merge_patch<T: serde::de::DeserializeOwned + serde::Serialize>(
+    current: &T,
+    patch: &serde_json::Value,
+) -> AppResult<T> {
+    let mut cur = serde_json::to_value(current)
+        .map_err(|e| AppError::BadRequest(format!("配置序列化失败: {}", e)))?;
+    merge_json(&mut cur, patch);
+    serde_json::from_value(cur)
+        .map_err(|e| AppError::BadRequest(format!("配置合并后数据格式错误: {}", e)))
+}
+
 async fn merge_and_save_setting<T: serde::de::DeserializeOwned + serde::Serialize + Clone>(
     state: &Arc<AppState>,
     key: &str,
@@ -914,6 +949,8 @@ pub fn default_site_settings() -> SiteSettings {
         admin_path: "admin1688".to_string(),
         login_style: "split".to_string(),
         login_quote: String::new(),
+        ip_blacklist_enabled: false,
+        ip_blacklist: Vec::new(),
     }
 }
 
@@ -985,14 +1022,7 @@ pub fn default_smtp_settings() -> SMTPSettings {
 }
 
 pub fn default_sms_settings() -> SmsSettings {
-    SmsSettings {
-        secret_id: String::new(),
-        secret_key: String::new(),
-        sdk_app_id: String::new(),
-        sign_name: String::new(),
-        template_id: String::new(),
-        balance_template_id: String::new(),
-    }
+    SmsSettings::default()
 }
 
 pub fn default_marketing_settings() -> MarketingSettings {
@@ -1035,6 +1065,14 @@ pub fn default_agreement_settings() -> AgreementSettings {
         tos_enabled: false,
         privacy_enabled: false,
     }
+}
+
+async fn collect_runtime(version: &str) -> serde_json::Value {
+    let version = version.to_string();
+    let version_fb = version.clone();
+    tokio::task::spawn_blocking(move || crate::services::runtime_info::collect(&version))
+        .await
+        .unwrap_or_else(|_| crate::services::runtime_info::fallback(&version_fb))
 }
 
 pub async fn system_about() -> AppResult<Json<serde_json::Value>> {
@@ -1088,10 +1126,16 @@ pub async fn system_about() -> AppResult<Json<serde_json::Value>> {
 
             if !commits.is_empty() {
                 let current = commits.first().cloned().unwrap_or(serde_json::json!({}));
+                let version = current
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-");
+                let runtime = collect_runtime(version).await;
                 return Ok(Json(serde_json::json!({
                     "success": true,
                     "current": current,
                     "commits": commits,
+                    "runtime": runtime,
                     "is_open_source": cfg!(not(feature = "commercial_plugins")),
                 })));
             }
@@ -1116,11 +1160,17 @@ pub async fn system_about() -> AppResult<Json<serde_json::Value>> {
         });
 
     let current = commits.first().cloned().unwrap_or(serde_json::json!({}));
+    let version = current
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("-");
+    let runtime = collect_runtime(version).await;
 
     Ok(Json(serde_json::json!({
         "success": true,
         "current": current,
         "commits": commits,
+        "runtime": runtime,
         "is_open_source": cfg!(not(feature = "commercial_plugins")),
     })))
 }
@@ -1147,12 +1197,21 @@ pub fn default_menu_config_settings() -> crate::models::MenuConfigSettings {
                 allowed_levels: "all".to_string(),
             },
             crate::models::MenuItemConfig {
+                key: "/playground-2026".to_string(),
+                label_zh: "创作中心2026".to_string(),
+                label_en: "Playground 2026".to_string(),
+                icon: "ExperimentOutlined".to_string(),
+                enabled: true,
+                sort_order: 3,
+                allowed_levels: "all".to_string(),
+            },
+            crate::models::MenuItemConfig {
                 key: "/docs".to_string(),
                 label_zh: "中继接口".to_string(),
                 label_en: "Relay API".to_string(),
                 icon: "RocketOutlined".to_string(),
                 enabled: true,
-                sort_order: 3,
+                sort_order: 4,
                 allowed_levels: "all".to_string(),
             },
             crate::models::MenuItemConfig {
@@ -1161,7 +1220,7 @@ pub fn default_menu_config_settings() -> crate::models::MenuConfigSettings {
                 label_en: "Tokens".to_string(),
                 icon: "KeyOutlined".to_string(),
                 enabled: true,
-                sort_order: 4,
+                sort_order: 5,
                 allowed_levels: "all".to_string(),
             },
             crate::models::MenuItemConfig {
@@ -1170,7 +1229,7 @@ pub fn default_menu_config_settings() -> crate::models::MenuConfigSettings {
                 label_en: "Logs".to_string(),
                 icon: "HistoryOutlined".to_string(),
                 enabled: true,
-                sort_order: 5,
+                sort_order: 6,
                 allowed_levels: "all".to_string(),
             },
             crate::models::MenuItemConfig {
@@ -1179,7 +1238,7 @@ pub fn default_menu_config_settings() -> crate::models::MenuConfigSettings {
                 label_en: "Task Logs".to_string(),
                 icon: "ScheduleOutlined".to_string(),
                 enabled: true,
-                sort_order: 6,
+                sort_order: 7,
                 allowed_levels: "all".to_string(),
             },
             crate::models::MenuItemConfig {
@@ -1188,7 +1247,7 @@ pub fn default_menu_config_settings() -> crate::models::MenuConfigSettings {
                 label_en: "Assets".to_string(),
                 icon: "PictureOutlined".to_string(),
                 enabled: true,
-                sort_order: 7,
+                sort_order: 8,
                 allowed_levels: "all".to_string(),
             },
             crate::models::MenuItemConfig {
@@ -1197,7 +1256,7 @@ pub fn default_menu_config_settings() -> crate::models::MenuConfigSettings {
                 label_en: "Assets Intl".to_string(),
                 icon: "FolderOpenOutlined".to_string(),
                 enabled: true,
-                sort_order: 8,
+                sort_order: 9,
                 allowed_levels: "all".to_string(),
             },
             crate::models::MenuItemConfig {

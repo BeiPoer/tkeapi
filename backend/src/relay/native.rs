@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -134,7 +134,7 @@ pub async fn gemini_proxy(
             qs
         );
         tracing::info!(
-            "[Native] model={}, url={}",
+            "[Native] 模型={} URL={}",
             model,
             super::forward::mask_key_in_string(&url, &channel.api_key)
         );
@@ -180,52 +180,46 @@ pub async fn gemini_proxy(
             .await;
         }
 
-        let resp = match state
+        let mut native_builder = state
             .http_client
             .post(&url)
             .header("Content-Type", "application/json")
-            .body(body.to_vec())
-            .send()
-            .await
-        {
+            .body(body.to_vec());
+        // 流式不设总超时，避免切断长 SSE；非流式挂防挂死上限
+        if is_stream == 0 {
+            native_builder =
+                crate::services::http_client::with_upstream_timeout(native_builder);
+        }
+        let resp = match native_builder.send().await {
             Ok(r) => r,
             Err(e) => {
                 let err_msg = e.to_string();
                 let latency_ms = start_time.elapsed().as_millis() as u32;
-                proxy::record_and_bill_inner(proxy::BillRecord {
+                let app_err = proxy::record_zero_cost_upstream_fail(proxy::ZeroCostUpstreamFail {
                     state: &state,
                     token: &token,
                     channel: &channel,
-                    model: model,
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    cached_tokens: 0,
-                    cost: 0.0,
-                    pre_deducted: 0.0,
-                    pre_deduct_gift: 0.0,
-                    status_code: 502,
+                    model,
+                    prefer_http_status: Some(502),
                     endpoint: &endpoint,
-                    error_msg: Some(&err_msg),
-                    latency_ms: latency_ms,
-                    is_stream: is_stream,
-                    request_content: Some(request_content_str.clone()),
+                    latency_ms,
+                    is_stream,
+                    request_content: request_content_str.clone(),
+                    response_body: err_msg.clone(),
                     response_content: None,
                     upstream_req_content: Some(request_content_str.clone()),
                     billing_detail: None,
                     hint_category: Some(resolved_cat.as_str()),
                     pending_log_id: ha.pending_log_id,
                     billing_model_hint: None,
-                    plugin_tag: None,
                     db_model: db_model.as_ref(),
+                    client_msg: Some(&err_msg),
+                    pre_deducted: 0.0,
+                    pre_deduct_gift: 0.0,
                 })
                 .await;
                 if ha
-                    .on_spawn_result_err(
-                        &state,
-                        &channel,
-                        proxy::upstream_fail(502, &err_msg),
-                        Some(&url),
-                    )
+                    .on_spawn_result_err(&state, &channel, app_err, Some(&url))
                     .await
                 {
                     ha.bump();
@@ -239,42 +233,32 @@ pub async fn gemini_proxy(
 
         if !resp.status().is_success() {
             let err = resp.text().await.unwrap_or_default();
-            let display_err = proxy::upstream_error_text(status, &err);
             let latency_ms = start_time.elapsed().as_millis() as u32;
-            proxy::record_and_bill_inner(proxy::BillRecord {
+            let app_err = proxy::record_zero_cost_upstream_fail(proxy::ZeroCostUpstreamFail {
                 state: &state,
                 token: &token,
                 channel: &channel,
-                model: model,
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                cached_tokens: 0,
-                cost: 0.0,
-                pre_deducted: 0.0,
-                pre_deduct_gift: 0.0,
-                status_code: status,
+                model,
+                prefer_http_status: Some(status),
                 endpoint: &endpoint,
-                error_msg: Some(&display_err),
-                latency_ms: latency_ms,
-                is_stream: is_stream,
-                request_content: Some(request_content_str.clone()),
+                latency_ms,
+                is_stream,
+                request_content: request_content_str.clone(),
+                response_body: err,
                 response_content: None,
                 upstream_req_content: Some(request_content_str.clone()),
                 billing_detail: None,
                 hint_category: Some(resolved_cat.as_str()),
                 pending_log_id: ha.pending_log_id,
                 billing_model_hint: None,
-                plugin_tag: None,
                 db_model: db_model.as_ref(),
+                client_msg: None,
+                pre_deducted: 0.0,
+                pre_deduct_gift: 0.0,
             })
             .await;
             if ha
-                .on_spawn_result_err(
-                    &state,
-                    &channel,
-                    proxy::upstream_fail(status, &display_err),
-                    Some(&url),
-                )
+                .on_spawn_result_err(&state, &channel, app_err, Some(&url))
                 .await
             {
                 ha.bump();
@@ -283,7 +267,7 @@ pub async fn gemini_proxy(
             break;
         }
 
-        // 预扣费（管理员跳过）
+        // 预扣费
         let pre_deduct_gift = match proxy::pre_deduct_or_intercept(
             &state,
             &token,
@@ -298,7 +282,6 @@ pub async fn gemini_proxy(
             None,
             ha.pending_log_id,
             db_model.as_ref(),
-            &ctx.role,
             Some(resolved_cat.as_str()),
         )
         .await
@@ -321,8 +304,7 @@ pub async fn gemini_proxy(
                 channel.clone(),
                 model.to_string(),
                 resp,
-                ctx.discount,
-                ctx.model_discounts.clone(),
+                ctx.clone(),
                 request_content_str.clone(),
                 start_time,
                 endpoint.clone(),
@@ -355,18 +337,13 @@ pub async fn gemini_proxy(
             {
                 features.image_count = Some(resp_count);
             }
-            features.cache_creation = if usage.cache_creation > 0 {
-                Some(usage.cache_creation)
-            } else {
-                None
-            };
+            crate::relay::usage_extractor::enrich_features_from_usage(&mut features, &usage);
             let (cost, detail) = crate::relay::calculate_relay_cost(
                 &state,
                 db_model.as_ref(),
                 db_rule.as_mut(),
                 &channel,
-                ctx.discount,
-                &ctx.model_discounts,
+                &ctx,
                 &usage,
                 &features,
                 mapping_source.as_deref(),
@@ -375,7 +352,7 @@ pub async fn gemini_proxy(
             )
             .await;
             tracing::info!(
-                "[Gemini] model={}, prompt={}, completion={}, cost={:.6}",
+                "[Gemini] 模型={} 输入Tokens={} 输出Tokens={} 扣费={:.6}",
                 model,
                 usage.prompt,
                 usage.completion,
@@ -705,6 +682,18 @@ pub async fn ark_asset_proxy(
                     serde_json::Value::String("default".to_string()),
                 );
             }
+            // Create/Update Asset(Group) 的 Name 上限 64 字符
+            if let Some(serde_json::Value::String(n)) = obj.get_mut("Name") {
+                match action.as_str() {
+                    "CreateAsset" | "UpdateAsset" => {
+                        *n = crate::services::volcengine::clamp_create_asset_name(n);
+                    }
+                    "CreateAssetGroup" | "UpdateAssetGroup" => {
+                        *n = crate::services::volcengine::clamp_ark_name(n);
+                    }
+                    _ => {}
+                }
+            }
         }
 
         // 预提取请求体关键字段（body 将在转发时被消费，需提前保存）
@@ -908,7 +897,7 @@ pub async fn ark_asset_proxy(
             }
             Err(e) => {
                 tracing::error!(
-                    "[Ark Asset Proxy] {} Failed (ns={}): {}",
+                    "[ArkAssetProxy] {} 失败 命名空间={}: {}",
                     action,
                     plugin_ns,
                     e
@@ -979,7 +968,7 @@ pub async fn volcengine_task_cancel(
         &format!("/api/v3/contents/generations/tasks/{}", task_id),
     );
     tracing::info!(
-        "[Volcengine Cancel] user={}, task_id={}, url={}",
+        "[Volcengine Cancel] 用户ID={} 任务ID={} URL={}",
         token.user_id,
         task_id,
         url
@@ -998,7 +987,7 @@ pub async fn volcengine_task_cancel(
     if !resp.status().is_success() {
         let err_body = resp.text().await.unwrap_or_default();
         tracing::warn!(
-            "[Volcengine Cancel] 上游返回错误 status={}, body={}",
+            "[Volcengine Cancel] 上游返回错误 状态码={} 响应体={}",
             status,
             err_body
         );
@@ -1045,7 +1034,7 @@ pub async fn volcengine_task_cancel(
         )
         .await;
         tracing::info!(
-            "[Volcengine Cancel] 预扣费已退还 log_id={}, refunded={:.6}",
+            "[Volcengine Cancel] 预扣费已退还 日志ID={} 退款金额={:.6}",
             log_id,
             pre_deduction
         );
@@ -1152,7 +1141,7 @@ pub async fn volcengine_task_list(
         qs
     );
     tracing::info!(
-        "[Volcengine TaskList] user={}, task_count={}, url_len={}",
+        "[Volcengine TaskList] 用户ID={} 任务数={} URL长度={}",
         token.user_id,
         task_ids.len(),
         url.len()

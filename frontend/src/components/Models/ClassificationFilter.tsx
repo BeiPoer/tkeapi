@@ -68,32 +68,35 @@ const ClassificationFilter: React.FC<ClassificationFilterProps> = ({
     items: ClassificationCount[],
     selectedValue: number | null,
     onSelect: (id: number | null) => void,
-    onManage?: () => void
+    onManage?: () => void,
+    isLast: boolean = false
   ) => (
-    <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8, padding: 0 }}>
-      <Text type="secondary" style={{ width: 80, flexShrink: 0, fontSize: '13px' }}>{label}</Text>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, flexGrow: 1 }}>
+    <div style={{ display: 'flex', alignItems: 'center', marginBottom: isLast ? 0 : 6, padding: 0 }}>
+      <Text type="secondary" style={{ width: 76, flexShrink: 0, fontSize: '13px', fontWeight: 500 }}>{label}</Text>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 6px', flexGrow: 1, alignItems: 'center' }}>
         <div
           onClick={() => onSelect(null)}
           style={{ 
-            padding: '4px 12px', 
-            borderRadius: 16,
-            fontSize: '14px',
-            backgroundColor: selectedValue === null ? '#1677ff' : (isLight ? '#f0f0f0' : '#1d1d1d'),
-            color: selectedValue === null ? '#fff' : (isLight ? 'rgba(0,0,0,0.65)' : 'rgba(255, 255, 255, 0.65)'),
-            border: isLight ? '1px solid #d9d9d9' : '1px solid #303030',
+            padding: '3px 10px', 
+            borderRadius: 14,
+            fontSize: '13.5px',
+            lineHeight: '20px',
+            backgroundColor: selectedValue === null ? '#1677ff' : (isLight ? '#f2f2f4' : '#1f1f1f'),
+            color: selectedValue === null ? '#fff' : (isLight ? 'rgba(0,0,0,0.85)' : 'rgba(255, 255, 255, 0.85)'),
+            border: selectedValue === null ? '1px solid #1677ff' : (isLight ? '1px solid #e0e0e0' : '1px solid #303030'),
             cursor: 'pointer',
             display: 'inline-flex',
             alignItems: 'center',
-            gap: 6,
-            transition: 'all 0.2s',
+            gap: 5,
+            transition: 'all 0.15s ease',
+            userSelect: 'none',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 16, height: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 15, height: 15 }}>
             <LayoutGrid size={14} style={{ color: selectedValue === null ? '#fff' : (isLight ? 'rgba(0,0,0,0.65)' : 'rgba(255,255,255,0.65)') }} />
           </div>
           <div style={{ display: 'flex', alignItems: 'center' }}>
-            {t('common.all')} <span style={{ opacity: 0.6, marginLeft: 4 }}>{items.reduce((acc, item) => acc + item.count, 0)}</span>
+            {t('common.all')} <span style={{ opacity: 0.65, marginLeft: 4, fontSize: '12px' }}>{items.reduce((acc, item) => acc + item.count, 0)}</span>
           </div>
         </div>
         {items.map(item => (
@@ -101,31 +104,33 @@ const ClassificationFilter: React.FC<ClassificationFilterProps> = ({
             key={item.id}
             onClick={() => onSelect(item.id)}
             style={{ 
-              padding: '4px 12px', 
-              borderRadius: 16,
-              fontSize: '14px',
-              backgroundColor: selectedValue === item.id ? '#1677ff' : (isLight ? '#f0f0f0' : '#1d1d1d'),
-              color: selectedValue === item.id ? '#fff' : (isLight ? 'rgba(0,0,0,0.65)' : 'rgba(255, 255, 255, 0.65)'),
-              border: isLight ? '1px solid #d9d9d9' : '1px solid #303030',
+              padding: '3px 10px', 
+              borderRadius: 14,
+              fontSize: '13.5px',
+              lineHeight: '20px',
+              backgroundColor: selectedValue === item.id ? '#1677ff' : (isLight ? '#f2f2f4' : '#1f1f1f'),
+              color: selectedValue === item.id ? '#fff' : (isLight ? 'rgba(0,0,0,0.85)' : 'rgba(255, 255, 255, 0.85)'),
+              border: selectedValue === item.id ? '1px solid #1677ff' : (isLight ? '1px solid #e0e0e0' : '1px solid #303030'),
               cursor: 'pointer',
               display: 'inline-flex',
               alignItems: 'center',
-              gap: 6,
-              transition: 'all 0.2s',
+              gap: 5,
+              transition: 'all 0.15s ease',
+              userSelect: 'none',
             }}
           >
             {(() => {
               const sysIcon = renderSystemIcon(item.name_en || item.name, isLight, selectedValue === item.id);
               if (sysIcon) {
-                return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 16, height: 16 }}>{sysIcon}</div>;
+                return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 15, height: 15 }}>{sysIcon}</div>;
               }
               if (item.logo) {
-                return <SmartSvgIcon src={`/assets/icons/lobe/${item.logo}.svg`} alt="" style={{ width: 16, height: 16, objectFit: 'contain', display: 'block' }} onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />;
+                return <SmartSvgIcon src={`/assets/icons/lobe/${item.logo}.svg`} alt="" style={{ width: 15, height: 15, objectFit: 'contain', display: 'block' }} onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />;
               }
-              return <div style={{ width: 16, height: 16, borderRadius: 4, background: 'rgba(128,128,128,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10 }}>{(item.name_en || item.name).charAt(0)}</div>;
+              return <div style={{ width: 15, height: 15, borderRadius: 3, background: 'rgba(128,128,128,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9.5 }}>{(item.name_en || item.name).charAt(0)}</div>;
             })()}
             <div style={{ display: 'flex', alignItems: 'center' }}>
-              {(isEn && item.name_en) ? item.name_en : item.name} <span style={{ opacity: 0.6, marginLeft: 4 }}>{item.count}</span>
+              {(isEn && item.name_en) ? item.name_en : item.name} <span style={{ opacity: 0.65, marginLeft: 4, fontSize: '12px' }}>{item.count}</span>
             </div>
           </div>
         ))}
@@ -134,9 +139,9 @@ const ClassificationFilter: React.FC<ClassificationFilterProps> = ({
             <Button 
               type="text" 
               size="small" 
-              icon={<SettingOutlined style={{ color: '#1677ff' }} />} 
+              icon={<SettingOutlined style={{ color: '#1677ff', fontSize: 13.5 }} />} 
               onClick={onManage}
-              style={{ marginLeft: 8 }}
+              style={{ padding: 0, height: 24, width: 24, minWidth: 24, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
             />
           </Tooltip>
         )}
@@ -144,17 +149,19 @@ const ClassificationFilter: React.FC<ClassificationFilterProps> = ({
     </div>
   );
 
+  const hasApiProviders = Boolean(apiProviders && onApiProviderChange);
+
   return (
     <div style={{ 
       backgroundColor: isLight ? '#fafafa' : '#141414', 
-      padding: '12px 16px', 
+      padding: '8px 12px', 
       borderRadius: 8, 
-      marginBottom: 16,
-      border: isLight ? '1px solid #e8e8e8' : '1px solid #303030'
+      marginBottom: 12,
+      border: isLight ? '1px solid #e8e8e8' : '1px solid #282828'
     }}>
-      {renderFilterRow(t('models.provider', '官方服务商'), providers, selectedProvider, onProviderChange, onManageProviders)}
-      {apiProviders && onApiProviderChange && renderFilterRow(t('models.api_provider', 'API服务商'), apiProviders, selectedApiProvider ?? null, onApiProviderChange, onManageApiProviders)}
-      {renderFilterRow(t('models.type', '类型'), types, selectedType, onTypeChange, onManageTypes)}
+      {renderFilterRow(t('models.provider', '官方服务商'), providers, selectedProvider, onProviderChange, onManageProviders, !hasApiProviders)}
+      {hasApiProviders && renderFilterRow(t('models.api_provider', 'API服务商'), apiProviders!, selectedApiProvider ?? null, onApiProviderChange!, onManageApiProviders, false)}
+      {renderFilterRow(t('models.type', '类型'), types, selectedType, onTypeChange, onManageTypes, true)}
     </div>
   );
 };

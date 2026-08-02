@@ -54,6 +54,8 @@ export interface UserLevel {
   name: string;
   group_key: string;
   discount: number;
+  /** 折扣模式: 0=不选择(跟随系统全站与等级), 1=使用全站折扣, 2=使用等级折扣 */
+  discount_type?: number;
   commission_ratio: number;
   invite_reward_inviter: number;
   invite_reward_invitee: number;
@@ -139,11 +141,6 @@ export interface ClassificationCount {
   logo?: string;
 }
 
-export interface ClassificationsResponse {
-  providers: ClassificationCount[];
-  types: ClassificationCount[];
-}
-
 export interface RechargeRecord {
   id: number;
   user_id: string;
@@ -152,18 +149,6 @@ export interface RechargeRecord {
   remark?: string;
   wallet_type?: string;
   operator?: string;
-  created_at: string;
-}
-
-interface FinanceRechargeRecord {
-  id: number;
-  user_id: string;
-  username: string;
-  uid: string;
-  amount: number;
-  recharge_type: string;
-  remark: string | null;
-  operator: string | null;
   created_at: string;
 }
 
@@ -245,6 +230,7 @@ export interface ApiToken {
   forward_rule_ids?: string;
   is_active: number | boolean;
   only_playground?: number;
+  only_playground_2026?: number;
   high_availability?: number;
 
   last_used_at?: string;
@@ -283,6 +269,19 @@ export interface Redemption {
   used_count?: number;
   /** 单兑换码单用户兑换次数，-1 = 不限（兼容历史 0） */
   per_user_limit?: number;
+  /** 状态: 1=正常, 0=禁用, -1=作废 */
+  status?: number;
+}
+
+export interface RedemptionGroup {
+  name: string;
+  total_count: number;
+  total_quota: number;
+  created_at: string;
+  expires_at?: string | null;
+  total_used_count: number;
+  max_uses: number;
+  per_user_limit: number;
 }
 
 export interface RequestLog {
@@ -303,7 +302,8 @@ export interface RequestLog {
   error_message?: string;
   upstream_url?: string;
   channel_group_aid?: string;
-  channel_provider_type?: string;
+  /** 请求当时是否走 HA 组（写路径快照） */
+  is_ha?: number;
   yid?: string;
   channel_name?: string;
   user_nickname?: string;
@@ -422,6 +422,8 @@ interface SiteSettings {
   login_quote?: string;
   default_timezone?: string;
   show_timezone?: boolean;
+  ip_blacklist_enabled?: boolean;
+  ip_blacklist?: string[];
 }
 
 interface AuxiliaryCurrency {
@@ -460,33 +462,6 @@ interface RegistrationSettings {
   email_validation_strict?: boolean;
   email_whitelist_enabled?: boolean;
   email_whitelist?: string[];
-}
-
-interface SMTPSettings {
-  host: string;
-  port: number;
-  username: string;
-  password?: string;
-  from_address: string;
-  from_name: string;
-}
-
-interface SmsSettings {
-  secret_id: string;
-  secret_key: string;
-  sdk_app_id: string;
-  sign_name: string;
-  template_id: string;
-}
-
-interface GoogleOAuthSettings {
-  client_id: string;
-  client_secret: string;
-}
-
-interface WechatOAuthSettings {
-  app_id: string;
-  app_secret: string;
 }
 
 export interface MarketingSettings {
@@ -602,6 +577,10 @@ export interface ChannelConfig {
   last_reset_day?: string;
   last_reset_week?: string;
   last_reset_month?: string;
+  /** 1=启用, 0=禁用 */
+  status?: number;
+  /** 上游分类（channel_categories.id） */
+  category_id?: number | null;
   created_at: string;
   updated_at: string;
 }

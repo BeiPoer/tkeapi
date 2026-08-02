@@ -8,29 +8,36 @@
 import React, { useState, useEffect, Suspense } from 'react';
 import { Typography, Switch, Button, Checkbox, Divider, Spin, Tag, Tabs, Input, InputNumber, Form, Space, Alert, Select, Table, Drawer, Radio, App, Segmented, Modal, Tooltip, Row, Col } from 'antd';
 import { AppMessageBridge } from '../../components/AppMessageBridge';
-import { EyeOutlined, ArrowLeftOutlined, SaveOutlined, PictureOutlined, AppstoreOutlined, CloudServerOutlined, ApiOutlined, CheckCircleOutlined, LoadingOutlined, CloseCircleOutlined, SendOutlined, TeamOutlined, ExperimentOutlined, SettingOutlined, VideoCameraOutlined, PlusOutlined, DeleteOutlined, EditOutlined, ShopOutlined, MessageOutlined, ReloadOutlined, ApartmentOutlined, HomeOutlined, ThunderboltOutlined, InfoCircleOutlined, BookOutlined } from '@ant-design/icons';
+import { EyeOutlined, ArrowLeftOutlined, SaveOutlined, PictureOutlined, AppstoreOutlined, CloudServerOutlined, ApiOutlined, CheckCircleOutlined, LoadingOutlined, CloseCircleOutlined, SendOutlined, TeamOutlined, ExperimentOutlined, SettingOutlined, VideoCameraOutlined, PlusOutlined, DeleteOutlined, EditOutlined, ShopOutlined, MessageOutlined, ReloadOutlined, HomeOutlined, ThunderboltOutlined, InfoCircleOutlined, BookOutlined } from '@ant-design/icons';
 import { useParams, useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
+import { modelMatchesKeyword } from '../../utils/modelKeywordMatch';
+import { buildClassificationParams } from '../../utils/classificationParams';
 import type { Plugin, UserLevel } from '../../types';
 import {
   AdminPresetAssets,
   RelayConvertAssets,
   ApiProxyAssets,
   TeamConfig,
+  ThemePromo,
   SiteIconsManager,
   PortalManager,
   PortalStyleSelection,
+  PortalManagerPro,
+  PortalStyleSelectionPro,
+  PortalDocsManager,
+  PortalAboutManagerPro,
+  PortalContactManagerPro,
   HappyHorseManager,
   DocsManager,
   ApiAccessConfig
 } from '../../plugins-registry';
 import ModerationQuery from '../ModerationQuery/ModerationQuery';
-import JsonView from '@uiw/react-json-view';
-import { darkTheme } from '@uiw/react-json-view/dark';
-import { lightTheme } from '@uiw/react-json-view/light';
 import { useThemeStore } from '../../store/theme';
+import ApiLogPayloadExpand from './components/ApiLogPayloadExpand';
 import useSettingsStore from '../../store/settings';
 import ClassificationFilter from '../../components/Models/ClassificationFilter';
+import MarketplaceTrendingTab from './ModelMarketplace/MarketplaceTrendingTab';
 import { useTranslation } from 'react-i18next';
 import { formatApiDateTime } from '../../utils/timedisplay';
 
@@ -67,9 +74,18 @@ const PluginModule: React.FC<{ children: React.ReactNode }> = ({ children }) => 
 /** 内置 Tab hash 白名单（与 Tabs items 的 key 对齐） */
 const BUILTIN_TAB_KEYS = [
   'audit_log', 'basic', 'api_access', 'storage', 'moderation', 'moderation_query',
-  'preset', 'api_log', 'team_config', 'pg_storage', 'marketplace_models',
+  'preset', 'api_log', 'team_config', 'theme_promo', 'pg_storage', 'marketplace_models',
   'routing_rules', 'portal_manager', 'ha_config', 'docs_manager',
 ] as const;
+
+/** 使用独立 TOS 表单的插件（其余仅展示全局存储） */
+const INDEPENDENT_STORAGE_PLUGINS = new Set([
+  'asset_manager',
+  'asset_manager_intl',
+  'playground',
+  'playground_2026',
+  'upstream_asset_relay',
+]);
 
 const { Title, Text } = Typography;
 
@@ -128,20 +144,19 @@ const TOS_REGION_GROUPS = [
 // 扁平化用于快速查找
 const ALL_TOS_REGIONS = TOS_REGION_GROUPS.flatMap(g => g.regions);
 
-// 兼容旧代码的 TOS_REGIONS
-const TOS_REGIONS = ALL_TOS_REGIONS;
-
 // ── 插件图标映射（各插件均可独立移除，未匹配时使用默认图标 AppstoreOutlined） ──
 const pluginIcons: Record<string, React.ReactNode> = {
   asset_manager: <PictureOutlined style={{ fontSize: 20 }} />,
   asset_manager_intl: <PictureOutlined style={{ fontSize: 20 }} />,
   team_marketing: <TeamOutlined style={{ fontSize: 20 }} />,
   playground: <ExperimentOutlined style={{ fontSize: 20 }} />,
+  playground_2026: <ExperimentOutlined style={{ fontSize: 20 }} />,
 
   model_marketplace: <ShopOutlined style={{ fontSize: 20 }} />,
   site_icons: <AppstoreOutlined style={{ fontSize: 20 }} />,
 
   site_portal: <HomeOutlined style={{ fontSize: 20 }} />,
+  site_portal_pro: <HomeOutlined style={{ fontSize: 20 }} />,
   docs_api: <BookOutlined style={{ fontSize: 20 }} />,
   happyhorse_router: <ThunderboltOutlined style={{ fontSize: 20 }} />
 };
@@ -192,7 +207,7 @@ const PluginConfigInner: React.FC = () => {
     const currentPlugin = name ? dynamicPlugins[name] : null;
     const customTabKeys = currentPlugin?.tabs?.map((t: any) => t.key) || [];
     if ([...BUILTIN_TAB_KEYS, ...customTabKeys].includes(hash)) return hash;
-    if (name === 'site_portal') return 'portal_manager';
+    if (name === 'site_portal' || name === 'site_portal_pro') return 'portal_manager';
     if (name === 'docs_api') return 'docs_manager';
     return 'basic'; // default to basic, will be adjusted when plugin loads
   });
@@ -206,7 +221,7 @@ const PluginConfigInner: React.FC = () => {
       setActiveTabKey(hash);
       return;
     }
-    if (name === 'site_portal') {
+    if (name === 'site_portal' || name === 'site_portal_pro') {
       setActiveTabKey('portal_manager');
     } else if (name === 'docs_api') {
       setActiveTabKey('docs_manager');
@@ -294,6 +309,7 @@ const PluginConfigInner: React.FC = () => {
   const [mpModelActiveFilter, setMpModelActiveFilter] = useState<string>('all'); // 'all' | 'active' | 'inactive' (模型管理里的状态)
   const [mpDisplayMode, setMpDisplayMode] = useState<'whitelist' | 'blacklist'>('whitelist');
   const [mpAllowGuest, setMpAllowGuest] = useState<boolean>(false);
+  const [mpTrendingConfig, setMpTrendingConfig] = useState<any>({ enabled: false, hero: {}, sections: [] });
 
   const fetchMarketplaceConfig = async () => {
     try {
@@ -303,7 +319,13 @@ const PluginConfigInner: React.FC = () => {
         setMpModels(sorted);
       }
       if (res.display_mode) setMpDisplayMode(res.display_mode);
-      if (res.allow_guest !== undefined) setMpAllowGuest(res.allow_guest);
+      if (res.allow_guest !== undefined) {
+        setMpAllowGuest(res.allow_guest);
+        setDocsApiAllowGuest(res.allow_guest);
+      }
+      if (res.trending_config) {
+        setMpTrendingConfig(res.trending_config);
+      }
     } catch (e) {
       console.error(e);
     }
@@ -321,11 +343,13 @@ const PluginConfigInner: React.FC = () => {
       const payload = {
         display_mode: mpDisplayMode,
         allow_guest: mpAllowGuest,
+        trending_config: mpTrendingConfig,
         models: mpModels.map(m => ({
           id: m.id,
           enabled: m.mp_enabled,
           sort_order: m.mp_sort_order || 0,
-          description: m.mp_description || ''
+          description: m.mp_description || '',
+          description_en: m.mp_description_en || ''
         }))
       };
       await request.post(`/plugins/${name}/marketplace-models`, payload);
@@ -345,8 +369,9 @@ const PluginConfigInner: React.FC = () => {
     setMpModels(prev => prev.map(m => m.id === id ? { ...m, mp_sort_order: sort } : m));
   };
 
-  const handleMpDescChange = (id: number, desc: string) => {
-    setMpModels(prev => prev.map(m => m.id === id ? { ...m, mp_description: desc } : m));
+  const handleMpDescChange = (id: number, desc: string, language: 'zh' | 'en' = 'zh') => {
+    const field = language === 'en' ? 'mp_description_en' : 'mp_description';
+    setMpModels(prev => prev.map(m => m.id === id ? { ...m, [field]: desc } : m));
   };
 
   const fetchPlaygroundConfigBase = async () => {
@@ -401,13 +426,10 @@ const PluginConfigInner: React.FC = () => {
     }
   };
 
-  const fetchPgClassificationsStats = async (searchTerm = '') => {
+  const fetchPgClassificationsStats = async () => {
     try {
-      let url = `/classifications/stats?search=${encodeURIComponent(searchTerm)}`;
-      if (pgSelectedProvider) url += `&provider_id=${pgSelectedProvider}`;
-      if (pgSelectedApiProvider) url += `&api_provider_id=${pgSelectedApiProvider}`;
-      if (pgSelectedType) url += `&type_id=${pgSelectedType}`;
-      const resp = await (request.get(url) as any);
+      const params = buildClassificationParams(pgSelectedProvider, pgSelectedApiProvider, pgSelectedType);
+      const resp = await (request.get('/classifications/stats', { params }) as any);
       setPgProvidersStats(resp.providers || []);
       setPgApiProvidersStats(resp.api_providers || []);
       setPgTypesStats(resp.types || []);
@@ -440,8 +462,10 @@ const PluginConfigInner: React.FC = () => {
     }
   };
 
+  const isPlaygroundLike = name === 'playground' || name === 'playground_2026';
+
   useEffect(() => {
-    if (name === 'playground') {
+    if (isPlaygroundLike) {
       fetchPlaygroundConfigBase();
     } else if (name === 'high_availability_channel') {
       fetchHaConfigBase();
@@ -450,7 +474,7 @@ const PluginConfigInner: React.FC = () => {
 
   // Playground: 等级被选中时，将其配额初始化为当前全局默认值的快照（确保等级配额与全局默认互不影响）
   useEffect(() => {
-    if (name !== 'playground' || isAllLevels || levels.length === 0) return;
+    if (!isPlaygroundLike || isAllLevels || levels.length === 0) return;
     let changed = false;
     const nq = { ...levelQuotas }, np = { ...levelMaxProjects }, na = { ...levelMaxAssets };
     for (const lv of levels) {
@@ -468,10 +492,10 @@ const PluginConfigInner: React.FC = () => {
   }, [selectedLevels, levels]);
 
   useEffect(() => {
-    if (name === 'playground') {
-      fetchPgClassificationsStats(pgSearchKeyword);
+    if (isPlaygroundLike) {
+      fetchPgClassificationsStats();
     }
-  }, [name, pgSelectedProvider, pgSelectedApiProvider, pgSelectedType, pgSearchKeyword]);
+  }, [name, pgSelectedProvider, pgSelectedApiProvider, pgSelectedType]);
 
   const handleSavePlaygroundConfig = async () => {
     try {
@@ -559,7 +583,7 @@ const PluginConfigInner: React.FC = () => {
   };
 
   useEffect(() => {
-    if (name === 'playground') {
+    if (isPlaygroundLike) {
       fetchSchemeList();
     }
   }, [name]);
@@ -806,7 +830,10 @@ const PluginConfigInner: React.FC = () => {
         }
         if (storageRes.default_max_assets != null) setDefaultMaxAssets(storageRes.default_max_assets);
         if (storageRes.show_in_playground_prompt != null) setShowInPlaygroundPrompt(storageRes.show_in_playground_prompt);
-        if (storageRes.docs_api_allow_guest != null) setDocsApiAllowGuest(storageRes.docs_api_allow_guest);
+        if (storageRes.docs_api_allow_guest != null) {
+          setDocsApiAllowGuest(storageRes.docs_api_allow_guest);
+          if (name === 'model_marketplace') setMpAllowGuest(storageRes.docs_api_allow_guest);
+        }
 
         // 延迟设置表单值，等待 Tabs 内的 Form 组件渲染完毕
         setTimeout(() => {
@@ -1030,8 +1057,8 @@ const PluginConfigInner: React.FC = () => {
         </div>
       )}
 
-      {/* DocsApi 插件专属：免登录访问教程中心 */}
-      {isEnabled && name === 'docs_api' && (
+      {/* DocsApi / SitePortalPro / ModelMarketplace 插件专属：免登录访问 */}
+      {isEnabled && (name === 'docs_api' || name === 'site_portal_pro' || name === 'model_marketplace') && (
         <div style={{
           background: _isLight ? '#fff' : '#141414', borderRadius: 8,
           border: _isLight ? '1px solid rgba(0,0,0,0.08)' : '1px solid rgba(255,255,255,0.08)',
@@ -1039,14 +1066,17 @@ const PluginConfigInner: React.FC = () => {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between'
         }}>
           <div>
-            <Text strong style={{ color: _isLight ? '#1f2937' : '#fff', fontSize: 14 }}>免登录访问教程中心</Text><br />
+            <Text strong style={{ color: _isLight ? '#1f2937' : '#fff', fontSize: 14 }}>不登录可以直接访问</Text><br />
             <Text style={{ color: _isLight ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,0.35)', fontSize: 12 }}>
-              开启后，即使在没有登陆状态的情况下，游客也可以查询并访问 API 教程中心
+              开启后，即使在没有登陆状态的情况下，游客也可以直接访问该内容
             </Text>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <Tag color={docsApiAllowGuest ? 'success' : 'default'} style={{ margin: 0 }}>{docsApiAllowGuest ? '已开启' : '已关闭'}</Tag>
-            <Switch checked={docsApiAllowGuest} onChange={setDocsApiAllowGuest} />
+            <Switch checked={docsApiAllowGuest} onChange={(val) => {
+              setDocsApiAllowGuest(val);
+              if (name === 'model_marketplace') setMpAllowGuest(val);
+            }} />
           </div>
         </div>
       )}
@@ -1177,7 +1207,7 @@ const PluginConfigInner: React.FC = () => {
                 {levels.map(lv => {
                   const lvIdStr = lv.id.toString();
                   const isSelected = selectedLevels.includes(lvIdStr) || selectedLevels.includes(lv.group_key);
-                  const showLimits = name !== 'team_marketing' && name !== 'playground' && name !== 'model_marketplace';
+                  const showLimits = name !== 'team_marketing' && name !== 'playground' && name !== 'playground_2026' && name !== 'model_marketplace';
                   return (
                     <div key={lv.group_key}
                       style={{ padding: '10px 14px', borderRadius: 6, border: isSelected ? '1px solid rgba(22,119,255,0.3)' : (_isLight ? '1px solid rgba(0,0,0,0.06)' : '1px solid rgba(255,255,255,0.06)'), background: isSelected ? 'rgba(22,119,255,0.04)' : 'transparent', marginBottom: 6, transition: 'all 0.15s' }}
@@ -1237,7 +1267,7 @@ const PluginConfigInner: React.FC = () => {
             )}
           </div>
 
-          {name === 'playground' && (
+          {isPlaygroundLike && (
             <div style={{
               background: _isLight ? '#fff' : '#141414', borderRadius: 8,
               border: _isLight ? '1px solid rgba(0,0,0,0.08)' : '1px solid rgba(255,255,255,0.08)', padding: '20px', marginBottom: 16
@@ -1413,13 +1443,12 @@ const PluginConfigInner: React.FC = () => {
   );
 
   const inputStyle = {};
-  // 支持独立存储配置的插件：素材中心、素材中心国际版、创作中心
-  const isAssetManagerPlugin = name === 'asset_manager' || name === 'asset_manager_intl' || name === 'playground';
+  const hasIndependentStorage = !!name && INDEPENDENT_STORAGE_PLUGINS.has(name);
   // 创作中心插件标识（用于展示前端直传 CORS 配置说明）
-  const isPlaygroundPlugin = name === 'playground';
+  const isPlaygroundPlugin = isPlaygroundLike;
   const storageTab = (
     <div>
-      {isAssetManagerPlugin ? (
+      {hasIndependentStorage ? (
         <>
           {/* 状态提示：基于插件独立存储是否已配置 tos_access_key 来判断 */}
           {storageConfig && (
@@ -1438,7 +1467,13 @@ const PluginConfigInner: React.FC = () => {
                   type="warning"
                   showIcon
                   message="对象存储未配置"
-                  description="用户上传素材功能需要先完成火山引擎 TOS 对象存储配置"
+                  description={
+                    name === 'upstream_asset_relay'
+                      ? storageConfig.global_configured
+                        ? '尚未单独配置本插件存储。base64 转素材将暂时使用「站点设置 → 存储设置」全局 TOS；保存下方配置后优先使用本插件存储。'
+                        : 'base64 转素材 ID 需要 TOS。请在此单独配置，或先到「站点设置 → 存储设置」配置全局存储作为回退。'
+                      : '用户上传素材功能需要先完成火山引擎 TOS 对象存储配置'
+                  }
                   style={{ background: 'rgba(250,173,20,0.06)', border: '1px solid rgba(250,173,20,0.2)' }}
                 />
               )}
@@ -1840,7 +1875,7 @@ const PluginConfigInner: React.FC = () => {
                 tooltip="控制当物理上游损坏时，允许向下 Failover 切换重试的最大子渠道个数。同时也作为添加渠道虚拟组时多渠道绑定的多选勾选上限。"
                 rules={[{ required: true, message: '请输入最大重试次数' }]}
               >
-                <InputNumber min={1} max={10} style={{ width: '100%' }} />
+                <InputNumber min={1} max={100} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
             <Col span={12}>
@@ -2149,27 +2184,12 @@ const PluginConfigInner: React.FC = () => {
           onChange: (page) => fetchApiLogs(page)
         }}
         expandable={{
-          expandedRowRender: record => {
-            const safeParse = (str: string) => {
-              try { return typeof str === 'string' ? JSON.parse(str) : str; } catch { return { raw_text: str || '(空)' }; }
-            };
-            return (
-              <div style={{ margin: 0, padding: 16, background: '#1e1e1e', borderRadius: 8 }}>
-                <div style={{ marginBottom: 16 }}>
-                  <Text strong style={{ color: '#1677ff', display: 'block', marginBottom: 8 }}>📤 Request Payload</Text>
-                  <div style={{ background: _isLight ? '#fff' : '#141414', padding: '16px', borderRadius: '8px', maxHeight: '500px', overflow: 'auto', border: _isLight ? '1px solid #e8e8e8' : '1px solid #303030' }}>
-                    <JsonView value={safeParse(record.request_payload)} style={_isLight ? lightTheme : darkTheme} collapsed={false} shortenTextAfterLength={0} displayDataTypes={false} displayObjectSize={false} />
-                  </div>
-                </div>
-                <div>
-                  <Text strong style={{ color: '#faad14', display: 'block', marginBottom: 8 }}>📥 Response Payload</Text>
-                  <div style={{ background: _isLight ? '#fff' : '#141414', padding: '16px', borderRadius: '8px', maxHeight: '600px', overflow: 'auto', border: _isLight ? '1px solid #e8e8e8' : '1px solid #303030' }}>
-                    <JsonView value={safeParse(record.response_payload)} style={_isLight ? lightTheme : darkTheme} collapsed={false} shortenTextAfterLength={0} displayDataTypes={false} displayObjectSize={false} />
-                  </div>
-                </div>
-              </div>
-            );
-          }
+          expandedRowRender: (record) => (
+            <ApiLogPayloadExpand
+              request={record.request_payload}
+              response={record.response_payload}
+            />
+          ),
         }}
       />
     </div>
@@ -2178,13 +2198,10 @@ const PluginConfigInner: React.FC = () => {
 
 
   const filteredPgModels = pgModels.filter(m => {
-    if (pgSelectedProvider && m.provider_id !== pgSelectedProvider) return false;
-    if (pgSelectedApiProvider && m.api_provider_id !== pgSelectedApiProvider) return false;
-    if (pgSelectedType && m.type_id !== pgSelectedType) return false;
-
-    if (!pgSearchKeyword) return true;
-    const kw = pgSearchKeyword.toLowerCase();
-    return m.name.toLowerCase().includes(kw) || m.model_id.toLowerCase().includes(kw) || m.mid?.toLowerCase()?.includes(kw);
+    if (pgSelectedProvider != null && m.provider_id !== pgSelectedProvider) return false;
+    if (pgSelectedApiProvider != null && m.api_provider_id !== pgSelectedApiProvider) return false;
+    if (pgSelectedType != null && m.type_id !== pgSelectedType) return false;
+    return modelMatchesKeyword(m, pgSearchKeyword);
   });
 
   const pgModelColumns = [
@@ -3602,11 +3619,11 @@ const PluginConfigInner: React.FC = () => {
   const mpTypeOptions = Array.from(new Set(mpModels.map(m => m.type_name).filter(Boolean)));
 
   const filteredMpModels = mpModels.filter(m => {
-    // 关键词搜索
-    if (mpSearchKeyword) {
-      const kw = mpSearchKeyword.toLowerCase();
-      const matchText = m.name.toLowerCase().includes(kw) || m.model_id.toLowerCase().includes(kw) || m.mid?.toLowerCase()?.includes(kw) || m.provider_name?.toLowerCase()?.includes(kw);
-      if (!matchText) return false;
+    if (mpSearchKeyword.trim()) {
+      const kw = mpSearchKeyword.trim().toLowerCase();
+      if (!modelMatchesKeyword(m, mpSearchKeyword) && !(m.provider_name || '').toLowerCase().includes(kw)) {
+        return false;
+      }
     }
     // 供应商筛选
     if (mpProviderFilter !== 'all' && (m.provider_name || '') !== mpProviderFilter) return false;
@@ -3721,15 +3738,22 @@ const PluginConfigInner: React.FC = () => {
     {
       title: '广场描述',
       key: 'mp_description',
-      width: 240,
+      width: 300,
       render: (_: any, record: any) => (
-        <Input
-          size="small"
-          value={record.mp_description || ''}
-          onChange={(e) => handleMpDescChange(record.id, e.target.value)}
-          placeholder="简短描述..."
-
-        />
+        <Space direction="vertical" size={4} style={{ width: '100%' }}>
+          <Input
+            size="small"
+            value={record.mp_description || ''}
+            onChange={(e) => handleMpDescChange(record.id, e.target.value, 'zh')}
+            placeholder="中文简短描述..."
+          />
+          <Input
+            size="small"
+            value={record.mp_description_en || ''}
+            onChange={(e) => handleMpDescChange(record.id, e.target.value, 'en')}
+            placeholder="English short description..."
+          />
+        </Space>
       )
     },
   ];
@@ -3794,26 +3818,6 @@ const PluginConfigInner: React.FC = () => {
               已展示 {enabledCount} / {mpModels.length}（启用 {mpModels.filter(m => m.is_active === 1).length} 个）
             </Text>
           </div>
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
-            marginBottom: 16, padding: '10px 14px', borderRadius: 8,
-            background: mpAllowGuest
-              ? (_isLight ? 'rgba(22,119,255,0.04)' : 'rgba(22,119,255,0.08)')
-              : (_isLight ? '#fafafa' : 'rgba(255,255,255,0.02)'),
-            border: mpAllowGuest
-              ? '1px solid rgba(22,119,255,0.2)'
-              : (_isLight ? '1px solid rgba(0,0,0,0.04)' : '1px solid rgba(255,255,255,0.04)'),
-          }}>
-            <Text style={{ color: _isLight ? 'rgba(0,0,0,0.6)' : 'rgba(255,255,255,0.6)', fontSize: 12, whiteSpace: 'nowrap' }}>游客访问：</Text>
-            <Switch
-              checked={mpAllowGuest}
-              onChange={(val) => setMpAllowGuest(val)}
-              size="small"
-            />
-            <Text style={{ color: _isLight ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,0.35)', fontSize: 12 }}>
-              允许未登录用户浏览模型广场（仅做价格/模型展示，实际聊天及对话仍需注册并登录）。
-            </Text>
-          </div>
 
           {/* 筛选区 */}
           <div style={{
@@ -3832,9 +3836,9 @@ const PluginConfigInner: React.FC = () => {
                 allowClear
                 size="small"
               />
-              {/* 供应商筛选 */}
+              {/* 模型品牌筛选 */}
               <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, flex: 1 }}>
-                <Text type="secondary" style={{ fontSize: 13, flexShrink: 0, marginTop: 2 }}>供应商:</Text>
+                <Text type="secondary" style={{ fontSize: 13, flexShrink: 0, marginTop: 2 }}>模型品牌:</Text>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                   <span
                     onClick={() => setMpProviderFilter('all')}
@@ -3953,6 +3957,16 @@ const PluginConfigInner: React.FC = () => {
             <Text style={{ color: _isLight ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.3)', fontSize: 12 }}>{plugin.name}</Text>
           </div>
         </div>
+        {(plugin.name === 'site_portal' || plugin.name === 'site_portal_pro') && (
+          <div>
+            <Button
+              icon={<EyeOutlined />}
+              onClick={() => window.open(plugin.name === 'site_portal_pro' ? '/home-pro' : '/home', '_blank')}
+            >
+              预览门户
+            </Button>
+          </div>
+        )}
       </div>
 
 
@@ -3961,17 +3975,6 @@ const PluginConfigInner: React.FC = () => {
       <Tabs
         activeKey={activeTabKey}
         onChange={handleTabChange}
-        tabBarExtraContent={
-          plugin.name === 'site_portal' && ['portal_manager', 'style_selection'].includes(activeTabKey) ? (
-            <Button
-              icon={<EyeOutlined />}
-              onClick={() => window.open('/home', '_blank')}
-              style={{ marginRight: 8 }}
-            >
-              预览门户
-            </Button>
-          ) : undefined
-        }
         items={
           currentDyn
             ? [
@@ -3990,7 +3993,11 @@ const PluginConfigInner: React.FC = () => {
                         children: <PluginModule>{React.createElement(safeLazy(currentDyn.component!))}</PluginModule>
                       }
                     ]
-                  : [])
+                  : []),
+              // 独立 TOS 表单（可单独配置；未填则运行时回退全局存储）
+              ...(name === 'upstream_asset_relay'
+                ? [{ key: 'storage', label: '存储配置', children: storageTab }]
+                : []),
             ]
             : plugin.name === 'high_availability_channel'
               ? [
@@ -4001,8 +4008,9 @@ const PluginConfigInner: React.FC = () => {
               ? [
                 { key: 'basic', label: '基本配置', children: basicTab },
                 { key: 'team_config', label: '团队配置', children: <PluginModule><TeamConfig /></PluginModule> },
+                { key: 'theme_promo', label: '主题推广', children: <PluginModule><ThemePromo /></PluginModule> },
               ]
-            : plugin.name === 'playground'
+            : (plugin.name === 'playground' || plugin.name === 'playground_2026')
               ? [
                 { key: 'basic', label: '基本配置', children: basicTab },
                 { key: 'pg_storage', label: '存储配置', children: storageTab },
@@ -4015,6 +4023,7 @@ const PluginConfigInner: React.FC = () => {
                     ? [
                       { key: 'basic', label: '基本配置', children: basicTab },
                       { key: 'marketplace_models', label: '模型列表', children: marketplaceModelTab },
+                      { key: 'marketplace_trending', label: '热门推荐', children: <PluginModule><MarketplaceTrendingTab config={mpTrendingConfig} onChange={setMpTrendingConfig} onSave={handleSaveMarketplaceConfig} saving={savingMarketplace} allModels={mpModels} allProviders={pgProvidersStats} /></PluginModule> },
                     ]
                     : plugin.name === 'site_icons'
                       ? [
@@ -4025,6 +4034,16 @@ const PluginConfigInner: React.FC = () => {
                           ? [
                             { key: 'portal_manager', label: '门户管理', children: <PluginModule><PortalManager /></PluginModule> },
                             { key: 'style_selection', label: '风格选择', children: <PluginModule><PortalStyleSelection /></PluginModule> },
+                            { key: 'basic', label: '基本配置', children: basicTab },
+                            { key: 'storage', label: '门户存储配置', children: storageTab },
+                          ]
+                        : plugin.name === 'site_portal_pro'
+                          ? [
+                            { key: 'portal_manager', label: '门户管理', children: <PluginModule><PortalManagerPro /></PluginModule> },
+                            { key: 'docs_manager', label: 'DOCS文档', children: <PluginModule><PortalDocsManager /></PluginModule> },
+                            { key: 'about_manager', label: '关于我们', children: <PluginModule><PortalAboutManagerPro /></PluginModule> },
+                            { key: 'contact_manager', label: '联系我们', children: <PluginModule><PortalContactManagerPro /></PluginModule> },
+                            { key: 'style_selection', label: '风格选择', children: <PluginModule><PortalStyleSelectionPro /></PluginModule> },
                             { key: 'basic', label: '基本配置', children: basicTab },
                             { key: 'storage', label: '门户存储配置', children: storageTab },
                           ]
@@ -4073,7 +4092,7 @@ const PluginConfigInner: React.FC = () => {
       />
 
       {/* 针对部分插件可能不挂载而导致 useForm() 失去关联的警告处理 */}
-      {name === 'playground' && (
+      {isPlaygroundLike && (
         <div style={{ display: 'none' }}>
           <Form form={moderationForm} />
         </div>

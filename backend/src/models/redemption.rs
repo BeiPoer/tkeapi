@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -31,6 +31,9 @@ pub struct Redemption {
     /// 单兑换码单用户可兑换次数，-1 = 不限（兼容历史 0 = 不限）
     #[sqlx(default)]
     pub per_user_limit: i32,
+    /// 状态: 1=正常, 0=禁用, -1=作废
+    #[sqlx(default)]
+    pub status: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +69,36 @@ fn default_unlimited() -> i32 {
 #[derive(Debug, Deserialize)]
 pub struct RedeemRequest {
     pub code: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateRedemptionStatusRequest {
+    pub status: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RedemptionQuery {
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct RedemptionGroup {
+    pub name: String,
+    pub total_count: i64,
+    pub total_quota: f64,
+    pub created_at: DbTs,
+    pub expires_at: Option<DbTs>,
+    pub total_used_count: i64,
+    pub max_uses: i32,
+    pub per_user_limit: i32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RedemptionGroupResponse {
+    pub data: Vec<RedemptionGroup>,
+    pub total: i64,
 }
 
 #[derive(Debug, Serialize)]

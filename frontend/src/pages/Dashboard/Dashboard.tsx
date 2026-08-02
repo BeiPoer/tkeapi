@@ -132,7 +132,7 @@ const Dashboard: React.FC = () => {
   const scopeLabel = isAdmin
     ? t('dashboard.scope_admin')
     : t('dashboard.scope_user');
-  const modelDetailHint = t('dashboard.model_detail_period', { period: periodLabel });
+  const modelDetailHint = t('dashboard.model_detail_recent');
   const [cardHeight, setCardHeight] = useState(580);
   const [isTrendModalVisible, setIsTrendModalVisible] = useState(false);
   const [isFullscreenTrend, setIsFullscreenTrend] = useState(false);

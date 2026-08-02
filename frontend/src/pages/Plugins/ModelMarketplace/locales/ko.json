@@ -30,5 +30,11 @@
   "no_access_desc": "현재 사용자 수준에는 모델 스퀘어를 탐색할 수 있는 권한이 없습니다. 관리자에게 문의하시거나 레벨을 업그레이드해주세요.",
   "back_dashboard": "반품",
   "back_list": "목록으로 돌아가기",
-  "pricing_count": "{{count}} 가격"
+  "pricing_count": "{{count}} 가격",
+  "unavailable": "사용 불가",
+  "default_pricing": "기본 요금",
+  "other_category": "기타",
+  "unknown_provider": "공급자",
+  "upstream": "업스트림",
+  "default_group": "기본 그룹"
 }

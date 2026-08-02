@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -65,7 +65,7 @@ pub(crate) fn cascade_resolve_scene(
 pub(crate) fn cascade_is_res(s: &str) -> bool {
     matches!(
         s.trim().to_ascii_lowercase().as_str(),
-        "720p" | "1080p" | "2k" | "4k"
+        "480p" | "720p" | "768p" | "1080p" | "2k" | "4k"
     )
 }
 
@@ -74,21 +74,31 @@ pub(crate) fn cascade_is_version(s: &str) -> bool {
     cascade_enhance_pair(s).is_some()
 }
 
-/// 目标分辨率允许的底座列表（首项为默认一级）
+/// 目标分辨率允许的底座列表（首项为默认一级；单元素即锁定不可改）
 pub(crate) fn cascade_allowed_bases(target: &str) -> &'static [&'static str] {
     match target.trim().to_ascii_lowercase().as_str() {
-        "720p" => &["480p"],
+        "480p" | "720p" => &["480p"],
         "1080p" => &["720p", "480p"],
         "2k" | "4k" => &["1080p", "720p", "480p"],
         _ => &["720p"],
     }
 }
 
-/// 有分辨率计费时返回已启用集合；无则 None
+/// 有分辨率计费时返回已启用集合；非分辨率计费或无配置则返回 None
 pub(crate) fn cascade_billing_enabled_resolutions(
     rule: &BillingRule,
     cascade_version: &str,
 ) -> Option<HashSet<String>> {
+    // requests (按次计费) 不参与分辨率拦截
+    if rule.billing_type.eq_ignore_ascii_case("requests") {
+        return None;
+    }
+    if (rule.extended_config.is_empty() || rule.extended_config == "{}")
+        && (rule.pricing_tiers.is_empty() || rule.pricing_tiers == "[]")
+    {
+        return None;
+    }
+
     let ext: serde_json::Value = serde_json::from_str(&rule.extended_config).unwrap_or_default();
     let mut has_res_billing = false;
     let mut enabled = HashSet::new();
@@ -116,7 +126,11 @@ pub(crate) fn cascade_billing_enabled_resolutions(
             let res = match parts.as_slice() {
                 [ver, res, ..] if cascade_is_version(ver) && cascade_is_res(res) => {
                     has_res_billing = true;
-                    ver.eq_ignore_ascii_case(cascade_version).then_some(*res)
+                    if cascade_version.is_empty() || ver.eq_ignore_ascii_case(cascade_version) {
+                        Some(*res)
+                    } else {
+                        None
+                    }
                 }
                 [attr, res] if !cascade_is_version(attr) && cascade_is_res(res) => {
                     has_res_billing = true;
@@ -156,25 +170,19 @@ pub(crate) fn cascade_billing_enabled_resolutions(
     has_res_billing.then_some(enabled)
 }
 
-/// 格式校验 + 计费启用校验（无分辨率计费则只做格式）
+/// 格式与计费启用校验：仅当模型存在生效的分辨率计费配置时才进行开启拦截；非分辨率计费则直接放行。
 pub(crate) fn cascade_check_resolution(
     db_rule: Option<&BillingRule>,
     cascade_version: &str,
     res_str: &str,
 ) -> AppResult<()> {
-    let key = res_str.trim().to_ascii_lowercase();
-    if !cascade_is_res(&key) {
-        return Err(AppError::BadRequest(format!(
-            "此模型不支持的分辨率: {}",
-            res_str
-        )));
-    }
     let Some(rule) = db_rule else {
         return Ok(());
     };
     let Some(enabled) = cascade_billing_enabled_resolutions(rule, cascade_version) else {
         return Ok(());
     };
+    let key = res_str.trim().to_ascii_lowercase();
     if enabled.contains(&key) {
         return Ok(());
     }
@@ -184,7 +192,7 @@ pub(crate) fn cascade_check_resolution(
     )))
 }
 
-/// 目标超分分辨率 → 默认一级底座（未配置 res_base 时）
+/// 目标分辨率 → 默认一级底座（未配置 res_base 时）
 pub(crate) fn cascade_clamp_base_resolution(target: &str) -> &'static str {
     cascade_allowed_bases(target)
         .first()
@@ -203,10 +211,7 @@ pub(crate) fn cascade_resolve_base(
         .get(&key)
         .and_then(|configured| {
             let b = configured.trim().to_ascii_lowercase();
-            allowed
-                .iter()
-                .copied()
-                .find(|a| a.eq_ignore_ascii_case(&b))
+            allowed.iter().copied().find(|a| a.eq_ignore_ascii_case(&b))
         })
         .unwrap_or_else(|| cascade_clamp_base_resolution(&key))
 }
@@ -264,14 +269,16 @@ pub(crate) async fn cascade_ensure_standard_480p_video(
     let crop_task_id = loop {
         attempt += 1;
         let mut body = payload.clone();
-        let builder = forward::apply_request_auth(
-            http_client
-                .post(&crop_url)
-                .header("Content-Type", "application/json"),
-            &crop_resolved,
-            &channel.api_key,
-            &mut body,
-            &channel.base_url,
+        let builder = crate::services::http_client::with_upstream_timeout(
+            forward::apply_request_auth(
+                http_client
+                    .post(&crop_url)
+                    .header("Content-Type", "application/json"),
+                &crop_resolved,
+                &channel.api_key,
+                &mut body,
+                &channel.base_url,
+            ),
         );
         let retry = match builder.send().await {
             Ok(resp) => {
@@ -339,7 +346,7 @@ pub(crate) fn cascade_json_str(json: &str, pointer: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// 级联目标分辨率：plugin_tag.cascade.resolution → 720p
+/// 级联目标分辨率：plugin_tag.cascade.resolution；缺省 720p（与历史行为一致）
 pub(crate) fn cascade_target_resolution(plugin_tag: &str) -> String {
     cascade_json_str(plugin_tag, "/cascade/resolution").unwrap_or_else(|| "720p".into())
 }
@@ -479,18 +486,23 @@ pub(crate) fn cascade_scrub_plugin_tag_for_user(plugin_tag: &mut Option<String>)
     changed
 }
 
-/// 普通用户日志级联字段脱敏：隐藏 stage1/stage2 内部结构，避免泄露超分模型信息。
-/// 对三个字段按以下规则处理，非级联日志（无 stage1+stage2 键）不受影响：
-/// - upstream_req_content：取 stage1；若 stage2 含 resolution，覆盖 s1 同名字段
-/// - response_content：调用 cascade_s1_with_s2_url 合并（URL/分辨率/帧率），再以 s2 实际 resolution 精确覆盖
-/// - post_response：只返回 stage1 的 POST 提交 ack
+/// 普通用户日志级联字段脱敏（仅 response / post_response；上游出参接口层已不返回）。
+/// - 未完成级联：响应改为处理中形态，硬保证无产物 URL
+/// - 已完成级联：折叠 stage，合并 S2 产物 URL
+/// - 非级联：仅在有 cascade 配置时修补 resolution
 pub(crate) fn cascade_sanitize_for_user(
-    upstream_req: &mut Option<String>,
     response: &mut Option<String>,
     post_resp: &mut Option<String>,
     plugin_tag: Option<&str>,
+    is_completed: bool,
+    task_id: &str,
+    request_content: Option<&str>,
 ) {
-    /// 从 stage2 JSON 中提取 resolution 字符串（顶层或 result.resolution）
+    fn parse_cascade(s: &str) -> Option<(serde_json::Value, serde_json::Value)> {
+        let v: serde_json::Value = serde_json::from_str(s).ok()?;
+        Some((v.get("stage1")?.clone(), v.get("stage2")?.clone()))
+    }
+
     fn s2_resolution(s2: &serde_json::Value) -> Option<String> {
         s2.get("resolution")
             .or_else(|| s2.pointer("/result/resolution"))
@@ -498,41 +510,80 @@ pub(crate) fn cascade_sanitize_for_user(
             .map(|s| s.to_string())
     }
 
-    /// 解析 JSON 并检查是否为级联结构，返回 (stage1, stage2)
-    fn parse_cascade(s: &str) -> Option<(serde_json::Value, serde_json::Value)> {
-        let v: serde_json::Value = serde_json::from_str(s).ok()?;
-        let s1 = v.get("stage1")?.clone();
-        let s2 = v.get("stage2")?.clone();
-        Some((s1, s2))
+    fn apply_resolution(s: &str, res: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(s)
+            .map(|mut v| {
+                patch_json_fields_by_key(&mut v, &[("resolution", res)], &[]);
+                v.to_string()
+            })
+            .unwrap_or_else(|_| s.to_string())
     }
 
-    // upstream_req_content：取 stage1，用 stage2 的 resolution 覆盖同名字段（如存在）
-    if let Some(ref s) = upstream_req.clone() {
-        if let Some((mut s1, s2)) = parse_cascade(s) {
-            if let Some(res) = s2_resolution(&s2) {
-                patch_json_fields_by_key(&mut s1, &[("resolution", res.as_str())], &[]);
+    fn take_map(slot: &mut Option<String>, f: impl FnOnce(String) -> String) {
+        if let Some(raw) = slot.take() {
+            *slot = Some(f(raw));
+        }
+    }
+
+    fn fold_post(raw: String) -> String {
+        parse_cascade(&raw)
+            .map(|(s1, _)| s1.to_string())
+            .unwrap_or(raw)
+    }
+
+    let has_cascade = plugin_tag
+        .map(|t| t.contains("\"cascade\""))
+        .unwrap_or(false);
+    // 仅真实级联配置才取目标分辨率，避免无 cascade 的 plugin_tag 被默认成 720p
+    let target_res: Option<String> = has_cascade
+        .then(|| cascade_target_resolution(plugin_tag.unwrap_or("")))
+        .filter(|r| !r.is_empty());
+
+    let cascade_inflight = !is_completed
+        && (has_cascade
+            || post_resp.as_deref().and_then(parse_cascade).is_some()
+            || response.as_deref().and_then(parse_cascade).is_some());
+
+    if cascade_inflight {
+        let s1_ack = post_resp
+            .as_deref()
+            .and_then(|s| {
+                parse_cascade(s)
+                    .map(|(s1, _)| s1)
+                    .or_else(|| serde_json::from_str(s).ok())
+            })
+            .unwrap_or_else(|| serde_json::json!({}));
+        let tid = if !task_id.is_empty() {
+            task_id
+        } else {
+            s1_ack.get("id").and_then(|v| v.as_str()).unwrap_or("")
+        };
+        *response = Some(cascade_user_processing_response(
+            &s1_ack,
+            tid,
+            request_content,
+            target_res.as_deref(),
+        ));
+        take_map(post_resp, fold_post);
+        return;
+    }
+
+    if is_completed {
+        take_map(response, |raw| {
+            if let Some((s1, s2)) = parse_cascade(&raw) {
+                let mut merged = cascade_s1_with_s2_url(&s1, &s2, plugin_tag.unwrap_or(""));
+                if let Some(ref res) = s2_resolution(&s2).or_else(|| target_res.clone()) {
+                    patch_json_fields_by_key(&mut merged, &[("resolution", res)], &[]);
+                }
+                merged.to_string()
+            } else if let Some(ref res) = target_res {
+                apply_resolution(&raw, res)
+            } else {
+                raw
             }
-            *upstream_req = Some(s1.to_string());
-        }
+        });
     }
-
-    // response_content：cascade_s1_with_s2_url 合并，再以 s2 实际 resolution 精确覆盖
-    if let Some(ref s) = response.clone() {
-        if let Some((s1, s2)) = parse_cascade(s) {
-            let mut merged = cascade_s1_with_s2_url(&s1, &s2, plugin_tag.unwrap_or(""));
-            if let Some(res) = s2_resolution(&s2) {
-                patch_json_fields_by_key(&mut merged, &[("resolution", res.as_str())], &[]);
-            }
-            *response = Some(merged.to_string());
-        }
-    }
-
-    // post_response：只保留 stage1 的提交 ack
-    if let Some(ref s) = post_resp.clone() {
-        if let Some((s1, _)) = parse_cascade(s) {
-            *post_resp = Some(s1.to_string());
-        }
-    }
+    take_map(post_resp, fold_post);
 }
 
 /// 从 plugin_tag.cascade 还原阶段二轮询目标（渠道 + 转发配置 + 模型）
@@ -607,13 +658,86 @@ pub(crate) fn cascade_stage2_poll_target(
         .to_string();
 
     tracing::debug!(
-        "[Cascade S2] 轮询目标: stage2_id={}, ch={}, mid={:?}, final_model={}",
+        "[Cascade S2] 轮询目标: 阶段2任务ID={}, 渠道={}, 模型ID={:?}, 最终模型={}",
         stage2_task_id,
         ch.name,
         res.mid,
         final_model
     );
     (ch, res, final_model)
+}
+
+/// 用户端「处理中」响应：POST ack 骨架，补 model/resolution，硬保证无产物 URL。
+fn cascade_user_processing_response(
+    stage1_submit: &serde_json::Value,
+    task_id: &str,
+    request_content: Option<&str>,
+    target_res: Option<&str>,
+) -> String {
+    let mut s = cascade_processing_json_from_submit(stage1_submit, task_id);
+    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&s) {
+        if let Some(obj) = v.as_object_mut() {
+            if let Some(model) = request_content
+                .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+                .and_then(|r| r.get("model")?.as_str().map(|m| m.to_string()))
+            {
+                obj.insert("model".to_string(), serde_json::json!(model));
+            }
+            if let Some(res) = target_res.filter(|r| !r.is_empty()) {
+                obj.insert("resolution".to_string(), serde_json::json!(res));
+            }
+            s = serde_json::to_string(&v).unwrap_or(s);
+        }
+    }
+    if serde_json::from_str::<serde_json::Value>(&s)
+        .map(|v| !response_formatter::find_urls(&v).is_empty())
+        .unwrap_or(false)
+    {
+        return serde_json::json!({"id": task_id, "status": "running"}).to_string();
+    }
+    s
+}
+
+/// 级联阶段二进行中：将 POST 提交 ack 规范为对外「处理中」JSON（同步，供日志/任务列表复用）。
+pub(crate) fn cascade_processing_json_from_submit(
+    stage1_submit: &serde_json::Value,
+    task_id: &str,
+) -> String {
+    let mut s = stage1_submit
+        .as_object()
+        .map(|_| stage1_submit.to_string())
+        .unwrap_or_default();
+    cascade_apply_processing_status(&mut s, task_id, false);
+    let trimmed = s.trim();
+    if trimmed.is_empty() || trimmed == "{}" {
+        return serde_json::json!({"id": task_id, "status": "running"}).to_string();
+    }
+    s
+}
+
+/// 写入 id，并将终态/空 status 改为 running；去掉 content/usage 等产物字段。
+fn cascade_apply_processing_status(s: &mut String, task_id: &str, openai_compatible: bool) {
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(s) else {
+        return;
+    };
+    let Some(obj) = v.as_object_mut() else {
+        return;
+    };
+    if !task_id.is_empty() {
+        obj.insert("id".to_string(), serde_json::json!(task_id));
+    }
+    if !openai_compatible {
+        let st = obj.get("status").and_then(|x| x.as_str()).unwrap_or("");
+        if st.is_empty() || matches!(normalize_task_status(st), "succeeded" | "failed") {
+            obj.insert("status".to_string(), serde_json::json!("running"));
+        }
+    }
+    for k in ["content", "output", "usage", "results"] {
+        obj.remove(k);
+    }
+    if let Ok(out) = serde_json::to_string(&v) {
+        *s = out;
+    }
 }
 
 /// 级联阶段二进行中：对外返回阶段一 POST 提交态（处理中）。
@@ -638,20 +762,11 @@ pub(crate) async fn cascade_s2_client_processing(
     if trimmed.is_empty() || trimmed == "{}" {
         return serde_json::json!({"id": task_id, "status": "running"}).to_string();
     }
-    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&s) {
-        if let Some(obj) = v.as_object_mut() {
-            obj.insert("id".to_string(), serde_json::json!(task_id));
-            // 仅官方 /api/：POST ack 常无 status；缺省或终态补 running（OpenAI 已由 apply_format 给出 pending）
-            if !response_formatter::is_openai_compatible_path(raw_path) {
-                let st = obj.get("status").and_then(|x| x.as_str()).unwrap_or("");
-                // 复用全局状态归一化：succeeded/failed（含 success/completed/cancelled 等同义）
-                if st.is_empty() || matches!(normalize_task_status(st), "succeeded" | "failed") {
-                    obj.insert("status".to_string(), serde_json::json!("running"));
-                }
-            }
-            s = serde_json::to_string(&v).unwrap_or(s);
-        }
-    }
+    cascade_apply_processing_status(
+        &mut s,
+        task_id,
+        response_formatter::is_openai_compatible_path(raw_path),
+    );
     s
 }
 

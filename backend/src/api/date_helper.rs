@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -496,25 +496,60 @@ pub fn sql_date_bucket(ts_expr: &str, tz: chrono_tz::Tz) -> String {
     )
 }
 
-/// 仪表盘模型明细「近几日」日期列表：锚定区间末日（≤ today），向内最多取 3 天。
-/// `start`/`end` 均为 None 时表示「全部」，退回日历近 3 天。
-pub fn model_detail_days(
-    start: Option<NaiveDate>,
-    end: Option<NaiveDate>,
-    today: NaiveDate,
-) -> Vec<NaiveDate> {
+/// 仪表盘模型明细「近几日」日期列表：锚定区间末日（≤ today），向前固定取 3 个自然日。
+/// 与排行筛选区间解耦——短区间（如「今日」）仍展示末日近 3 天对照；排行/进度条仍用筛选区间。
+/// `end` 为 None（全部）时锚定今天。
+pub fn model_detail_days(end: Option<NaiveDate>, today: NaiveDate) -> Vec<NaiveDate> {
     let range_end = end.map(|d| d.min(today)).unwrap_or(today);
-    let range_start = start.unwrap_or_else(|| today - Duration::days(2));
+    (0i64..3)
+        .rev()
+        .map(|i| range_end - Duration::days(i))
+        .collect()
+}
 
-    let mut days = Vec::new();
-    let mut cursor = range_end;
-    for _ in 0..3 {
-        if cursor < range_start {
-            break;
-        }
-        days.push(cursor);
-        cursor -= Duration::days(1);
+#[cfg(test)]
+mod model_detail_days_tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
     }
-    days.reverse();
-    days
+
+    #[test]
+    fn today_filter_still_returns_three_calendar_days() {
+        let today = d(2026, 7, 31);
+        assert_eq!(
+            model_detail_days(Some(today), today),
+            vec![d(2026, 7, 29), d(2026, 7, 30), d(2026, 7, 31)]
+        );
+    }
+
+    #[test]
+    fn yesterday_anchor_ends_at_yesterday() {
+        let today = d(2026, 7, 31);
+        let yesterday = d(2026, 7, 30);
+        assert_eq!(
+            model_detail_days(Some(yesterday), today),
+            vec![d(2026, 7, 28), d(2026, 7, 29), d(2026, 7, 30)]
+        );
+    }
+
+    #[test]
+    fn all_range_anchors_today() {
+        let today = d(2026, 7, 31);
+        assert_eq!(
+            model_detail_days(None, today),
+            vec![d(2026, 7, 29), d(2026, 7, 30), d(2026, 7, 31)]
+        );
+    }
+
+    #[test]
+    fn future_end_capped_to_today() {
+        let today = d(2026, 7, 31);
+        assert_eq!(
+            model_detail_days(Some(d(2026, 8, 5)), today),
+            vec![d(2026, 7, 29), d(2026, 7, 30), d(2026, 7, 31)]
+        );
+    }
 }

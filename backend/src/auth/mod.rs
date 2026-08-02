@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -92,11 +92,4 @@ pub fn generate_api_key() -> String {
         "sk-{}",
         hex::encode(&bytes).chars().take(48).collect::<String>()
     )
-}
-
-// Simple hex encoding since we don't want to add another dep
-mod hex {
-    pub fn encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{:02x}", b)).collect()
-    }
 }

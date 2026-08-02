@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -165,8 +165,8 @@ pub async fn create_token(
             .unwrap_or_else(|_| "000".to_string());
     let kid = make_token_kid(&user_uid);
 
-    let sql = r#"INSERT INTO api_tokens (user_id, token_key, kid, name, quota_limit, allowed_models, allowed_ips, expires_at, is_active, only_playground, high_availability, daily_quota_limit, weekly_quota_limit, monthly_quota_limit, rps_limit, rpm_limit)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)"#;
+    let sql = r#"INSERT INTO api_tokens (user_id, token_key, kid, name, quota_limit, allowed_models, allowed_ips, expires_at, is_active, only_playground, only_playground_2026, high_availability, daily_quota_limit, weekly_quota_limit, monthly_quota_limit, rps_limit, rpm_limit)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)"#;
 
     let sql_pg = format!("{} RETURNING id", sql);
     let expires_at = request.expires_at.as_deref().map(DbTs::from);
@@ -180,6 +180,7 @@ pub async fn create_token(
         .bind(request.allowed_ips.unwrap_or_default())
         .bind(&expires_at)
         .bind(request.only_playground.unwrap_or(0))
+        .bind(request.only_playground_2026.unwrap_or(0))
         .bind(request.high_availability.unwrap_or(1))
         .bind(request.daily_quota_limit.unwrap_or(-1.0))
         .bind(request.weekly_quota_limit.unwrap_or(-1.0))
@@ -246,6 +247,9 @@ pub async fn update_token(
     if let Some(only_playground) = request.only_playground {
         token.only_playground = only_playground;
     }
+    if let Some(only_playground_2026) = request.only_playground_2026 {
+        token.only_playground_2026 = only_playground_2026;
+    }
     if let Some(high_availability) = request.high_availability {
         token.high_availability = high_availability;
     }
@@ -277,7 +281,7 @@ pub async fn update_token(
 
     sqlx::query(&state.db.format_query(
         r#"UPDATE api_tokens SET name = ?, quota_limit = ?, allowed_models = ?, allowed_ips = ?, 
-           expires_at = ?, is_active = ?, kid = ?, only_playground = ?, high_availability = ?, 
+           expires_at = ?, is_active = ?, kid = ?, only_playground = ?, only_playground_2026 = ?, high_availability = ?, 
            daily_quota_limit = ?, weekly_quota_limit = ?, monthly_quota_limit = ?, 
            rps_limit = ?, rpm_limit = ?, updated_at = CURRENT_TIMESTAMP
            WHERE id = ?"#,
@@ -290,6 +294,7 @@ pub async fn update_token(
     .bind(token.is_active)
     .bind(&token.kid)
     .bind(token.only_playground)
+    .bind(token.only_playground_2026)
     .bind(token.high_availability)
     .bind(token.daily_quota_limit)
     .bind(token.weekly_quota_limit)

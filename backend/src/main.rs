@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -33,7 +33,9 @@ pub struct AppState {
     pub config: AppConfig,
     pub http_client: reqwest::Client,
     pub rate_limiter: middleware::rate_limit::GlobalRateLimiter,
-    pub icon_sync_progress: api::site_icons::SyncProgress,
+    /// OAuth / 代入登录一次性兑换码：code → (jwt, expires_at)
+    pub login_codes: dashmap::DashMap<String, (String, std::time::Instant)>,
+    pub icon_sync_progress: api::plugins::site_icons::SyncProgress,
     pub dashboard_cache: dashmap::DashMap<String, DashboardCacheEntry>,
     // 高可用熔断与配置缓存
     pub failed_channels: dashmap::DashMap<String, std::time::Instant>,
@@ -56,6 +58,8 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     // timesystem：进程级锁定 UTC+0（须早于任何 Local/日志时区依赖）
     time_system::enforce_process_utc();
+    // 关于页运行时「启动时间」锚点
+    services::runtime_info::mark_process_start();
 
     // 1. 初始化控制台标准输出写入器
     let (non_blocking_stdout, _stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
@@ -109,13 +113,10 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         db: database,
         config: config_data.clone(),
-        http_client: reqwest::Client::builder()
-            .tcp_nodelay(true)
-            .pool_max_idle_per_host(100)
-            .build()
-            .unwrap_or_default(),
+        http_client: services::http_client::build_outbound_client(),
         rate_limiter: middleware::rate_limit::GlobalRateLimiter::new(),
-        icon_sync_progress: api::site_icons::SyncProgress::new(),
+        login_codes: dashmap::DashMap::new(),
+        icon_sync_progress: api::plugins::site_icons::SyncProgress::new(),
         dashboard_cache: dashmap::DashMap::new(),
         failed_channels: dashmap::DashMap::new(),
         ha_max_retries: std::sync::atomic::AtomicI64::new(3),
@@ -217,7 +218,19 @@ async fn main() -> anyhow::Result<()> {
         300,
         "PlaygroundNodesCleanup",
         |s| async move {
-            api::playground::cleanup_stale_playground_nodes(&s).await;
+            api::plugins::playground::cleanup_stale_playground_nodes(&s).await;
+        },
+    ));
+
+    // 7b. 创作中心2026画布中断节点自动恢复
+    #[cfg(feature = "commercial_plugins")]
+    bg_handles.push(spawn_cron_task(
+        state.clone(),
+        shutdown_rx.clone(),
+        300,
+        "Playground2026NodesCleanup",
+        |s| async move {
+            api::plugins::playground_2026::cleanup_stale_playground_2026_nodes(&s).await;
         },
     ));
 
@@ -225,7 +238,7 @@ async fn main() -> anyhow::Result<()> {
     bg_handles.push({
         let state_clone = state.clone();
         tokio::spawn(async move {
-            api::site_icons::auto_recover_on_startup(state_clone).await;
+            api::plugins::site_icons::auto_recover_on_startup(state_clone).await;
         })
     });
 
@@ -278,12 +291,18 @@ async fn main() -> anyhow::Result<()> {
 
     let assets_dir = config_data.assets_dir.clone();
     let portal_dir = config_data.portal_dir.clone();
+    let portal_pro_dir = config_data.portal_pro_dir.clone();
     // 确保 portal 目录存在
     std::fs::create_dir_all(&portal_dir).ok();
+    std::fs::create_dir_all(&portal_pro_dir).ok();
     // 确保 assets 目录存在
     std::fs::create_dir_all(&assets_dir).ok();
     let app = api::build_router(state.clone())
         .nest_service("/portal", tower_http::services::ServeDir::new(&portal_dir))
+        .nest_service(
+            "/portal-pro",
+            tower_http::services::ServeDir::new(&portal_pro_dir),
+        )
         .nest_service("/assets", tower_http::services::ServeDir::new(&assets_dir));
 
     let addr = format!("{}:{}", config_data.host, config_data.port);
@@ -429,35 +448,38 @@ async fn cleanup_log_content(state: &AppState) {
     }
 }
 
-/// 将超期日志行迁入 logs_archive 并从热表删除（分批，默认关闭）。
-/// 先 INSERT 再按成功行 DELETE，避免 ON CONFLICT 丢数据。
+/// 将超期日志行迁入 logs_archive 并从热表删除（分批；`log_row_retention_days<=0` 时跳过）。
+/// jsonb 按列名填充，热表加列后无需再给 archive 做列序体操。
 async fn archive_old_logs(state: &AppState) {
     let row_days = fetch_storage_settings(state).await.log_row_retention_days;
     if row_days <= 0 {
         return;
     }
 
-    // 额外留 2 天缓冲，降低「今日统计尚未落档就被迁走」的风险
+    // 配置天数 +2 缓冲，降低「今日统计未落档就被迁走」的风险
     let effective_days = (row_days as i64).saturating_add(2);
     let archive_sql = state.db.format_query(
         "WITH candidates AS (\
             SELECT id FROM logs \
             WHERE created_at < CURRENT_TIMESTAMP - (? * INTERVAL '1 day') \
-            ORDER BY created_at ASC \
-            LIMIT 5000\
+            ORDER BY created_at ASC LIMIT 5000\
          ), inserted AS (\
             INSERT INTO logs_archive \
-            SELECT l.*, NOW() FROM logs l \
-            WHERE l.id IN (SELECT id FROM candidates) \
+            SELECT p.* FROM logs l \
+            JOIN candidates c ON c.id = l.id \
+            CROSS JOIN LATERAL jsonb_populate_record(\
+                NULL::logs_archive,\
+                to_jsonb(l) || jsonb_build_object('archived_at', NOW())\
+            ) AS p \
             ON CONFLICT (id) DO NOTHING \
             RETURNING id\
-         ), done AS (\
+         ) \
+         DELETE FROM logs WHERE id IN (\
             SELECT id FROM inserted \
             UNION \
             SELECT c.id FROM candidates c \
-            INNER JOIN logs_archive a ON a.id = c.id\
-         ) \
-         DELETE FROM logs WHERE id IN (SELECT id FROM done)",
+            WHERE EXISTS (SELECT 1 FROM logs_archive a WHERE a.id = c.id)\
+         )",
     );
 
     let mut total: u64 = 0;

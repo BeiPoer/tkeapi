@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -13,7 +13,7 @@ use std::future::Future;
 use std::time::Duration;
 type HmacSha256 = Hmac<Sha256>;
 
-/// 内部 HMAC-SHA256 签名辅助函数（供 download_file / list_folder / generate_presigned_put_url 共用）
+/// 内部 HMAC-SHA256 签名辅助函数（供 list_folder / generate_presigned_put_url 共用）
 fn hmac_sign(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key error");
     mac.update(data);
@@ -266,82 +266,6 @@ pub async fn delete_file(config: &TosConfig, object_key: &str) -> Result<(), Str
     Ok(())
 }
 
-/// 从 TOS 下载文件（通过 S3 兼容 REST API）
-pub async fn download_file(config: &TosConfig, object_key: &str) -> Result<Vec<u8>, String> {
-    let ep = config.endpoint.trim_end_matches('/');
-    let ep_domain = if ep.starts_with("https://") {
-        &ep[8..]
-    } else if ep.starts_with("http://") {
-        &ep[7..]
-    } else {
-        ep
-    };
-
-    let host = if config.bucket.contains('.') {
-        ep_domain.to_string()
-    } else {
-        format!("{}.{}", config.bucket, ep_domain)
-    };
-
-    let path = if config.bucket.contains('.') {
-        format!("/{}/{}", config.bucket, object_key)
-    } else {
-        format!("/{}", object_key)
-    };
-
-    let now = chrono::Utc::now();
-    let date_str = now.format("%Y%m%dT%H%M%SZ").to_string();
-    let date_short = now.format("%Y%m%d").to_string();
-
-    let canonical_request = format!(
-        "GET\n{}\n\nhost:{}\nx-tos-date:{}\n\nhost;x-tos-date\n{}",
-        path, host, date_str, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    );
-
-    let credential_scope = format!("{}/{}/tos/request", date_short, config.region);
-    let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
-    let string_to_sign = format!(
-        "TOS4-HMAC-SHA256\n{}\n{}\n{}",
-        date_str, credential_scope, canonical_hash
-    );
-
-    let k_date = hmac_sign(config.secret_key.as_bytes(), date_short.as_bytes());
-    let k_region = hmac_sign(&k_date, config.region.as_bytes());
-    let k_service = hmac_sign(&k_region, b"tos");
-    let k_signing = hmac_sign(&k_service, b"request");
-    let signature = hex::encode(hmac_sign(&k_signing, string_to_sign.as_bytes()));
-
-    let auth_header = format!(
-        "TOS4-HMAC-SHA256 Credential={}/{},SignedHeaders=host;x-tos-date,Signature={}",
-        config.access_key, credential_scope, signature
-    );
-
-    let url = format!("https://{}{}", host, path);
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(&url)
-        .header("Host", &host)
-        .header("x-tos-date", &date_str)
-        .header("Authorization", &auth_header)
-        .timeout(Duration::from_secs(60))
-        .send()
-        .await
-        .map_err(|e| format!("TOS 下载请求失败: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("TOS 下载失败 ({}): {}", status, body));
-    }
-
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("读取文件数据失败: {}", e))?;
-    Ok(bytes.to_vec())
-}
-
 /// 生成预签名 PUT URL（前端直传 TOS 专用）
 /// - 有效期 expires_secs 秒，足够完成单次上传，降低 URL 泄露窗口
 /// - 仅签名 host header（TOS 预签名 URL 规范），Content-Type 由前端上传时携带但不参与签名
@@ -398,37 +322,7 @@ pub fn generate_presigned_put_url(
 }
 
 use ve_tos_rust_sdk::common::{Tag, TagSet};
-use ve_tos_rust_sdk::object::{GetObjectTaggingInput, PutObjectTaggingInput};
-
-/// 获取 TOS 文件标签
-pub async fn get_object_tags(
-    config: &TosConfig,
-    object_key: &str,
-) -> Result<HashMap<String, String>, String> {
-    let client = tos::builder::<TokioRuntime>()
-        .connection_timeout(5000)
-        .request_timeout(10000)
-        .max_retry_count(2)
-        .ak(&config.access_key)
-        .sk(&config.secret_key)
-        .region(&config.region)
-        .endpoint(&config.endpoint)
-        .build()
-        .map_err(|e| format!("创建 TOS 客户端失败: {:?}", e))?;
-
-    let input = GetObjectTaggingInput::new(&config.bucket, object_key);
-    let output = client
-        .get_object_tagging(&input)
-        .await
-        .map_err(|e| format!("获取标签失败: {:?}", e))?;
-
-    let mut result = HashMap::new();
-    for tag in output.tag_set().tags() {
-        result.insert(tag.key().to_string(), tag.value().to_string());
-    }
-
-    Ok(result)
-}
+use ve_tos_rust_sdk::object::PutObjectTaggingInput;
 
 /// 更新 TOS 文件标签
 pub async fn update_object_tags(

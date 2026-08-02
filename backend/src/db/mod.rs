@@ -1,15 +1,12 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
 pub mod migrations;
 
-use crate::auth;
-use crate::config::AppConfig;
-use crate::time_system::DbTs;
 use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
 
 #[derive(Debug, Clone)]
@@ -26,8 +23,11 @@ impl Database {
             attempts
         );
         let mut actual_url = database_url.to_string();
-        if actual_url.starts_with("postgres://") && !actual_url.contains("sslmode=") {
-            actual_url = format!("{}?sslmode=disable", actual_url);
+        if (actual_url.starts_with("postgres://") || actual_url.starts_with("postgresql://"))
+            && !actual_url.contains("sslmode=")
+        {
+            let sep = if actual_url.contains('?') { "&" } else { "?" };
+            actual_url = format!("{}{sep}sslmode=disable", actual_url);
         }
 
         let pool = loop {
@@ -160,44 +160,5 @@ impl Database {
         } else {
             id_or_val.to_string()
         }
-    }
-
-    pub async fn seed_admin(&self, config: &AppConfig) -> anyhow::Result<()> {
-        // Check if admin exists
-        let exists_count: i64 = sqlx::query_scalar(
-            &self.format_query("SELECT COUNT(*) FROM users WHERE role = 'admin'"),
-        )
-        .fetch_one(&self.pool)
-        .await?;
-
-        if exists_count == 0 {
-            let password_hash = auth::hash_password(&config.admin_password)?;
-            let id = uuid::Uuid::new_v4().to_string();
-            let uid = self.generate_unique_uid().await?;
-
-            let now = DbTs::now();
-
-            sqlx::query(
-                &self.format_query(r#"INSERT INTO users (id, uid, username, email, password_hash, role, balance, user_group, is_active, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, 'admin', 100.0, 'default', 1, ?, ?)"#)
-            )
-            .bind(&id)
-            .bind(&uid)
-            .bind(&config.admin_username)
-            .bind(format!("{}@tokensbyte.local", &config.admin_username))
-            .bind(&password_hash)
-            .bind(&now)
-            .bind(&now)
-            .execute(&self.pool)
-            .await?;
-
-            tracing::info!(
-                "Default admin user '{}' created with UID {}",
-                config.admin_username,
-                uid
-            );
-        }
-
-        Ok(())
     }
 }

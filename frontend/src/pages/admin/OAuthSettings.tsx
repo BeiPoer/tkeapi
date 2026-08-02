@@ -6,7 +6,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { Card, Form, Input, Button, message, Typography, Tabs, Space, Tooltip } from 'antd';
+import { Card, Form, Input, Button, message, Typography, Tabs, Space } from 'antd';
 import { CopyOutlined, LinkOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import request from '../../utils/request';
@@ -16,7 +16,7 @@ const { Text } = Typography;
 
 const OAuthSettings: React.FC = () => {
   const { t } = useTranslation();
-  const { settings, updateStoreSettings } = useSettingsStore();
+  const { updateStoreSettings } = useSettingsStore();
   const [googleForm] = Form.useForm();
   const [wechatForm] = Form.useForm();
   const [loading, setLoading] = useState(false);
@@ -28,8 +28,7 @@ const OAuthSettings: React.FC = () => {
         const res = await (request.get('/settings/full') as any);
         if (res.google_oauth) googleForm.setFieldsValue(res.google_oauth);
         if (res.wechat_oauth) wechatForm.setFieldsValue(res.wechat_oauth);
-        const base = res.site?.name ? window.location.origin : window.location.origin;
-        setSiteUrl(base);
+        setSiteUrl(window.location.origin);
       } catch { /* ignore */ }
     })();
   }, []);

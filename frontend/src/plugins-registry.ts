@@ -10,7 +10,6 @@ import React, { lazy } from 'react';
 // Safely lazy load a component, returning a dummy if the file doesn't exist
 // By using import.meta.glob, Vite will not throw build errors if the target directory is deleted.
 const pluginComponents = import.meta.glob('./pages/Plugins/**/*.tsx');
-const pageComponents = import.meta.glob('./pages/**/*.tsx');
 
 const missingModule = () =>
   React.createElement(
@@ -21,14 +20,6 @@ const missingModule = () =>
 
 const loadPluginComponent = (path: string) => {
   const importFn = pluginComponents[`./pages/Plugins/${path}`];
-  if (importFn) {
-    return lazy(importFn as any);
-  }
-  return missingModule;
-};
-
-const loadPageComponent = (path: string) => {
-  const importFn = pageComponents[`./pages/${path}`];
   if (importFn) {
     return lazy(importFn as any);
   }
@@ -47,12 +38,25 @@ export const ApiProxyAssets = loadPluginComponent('AssetManager/ApiProxyAssets.t
 export const ApiAccessConfig = loadPluginComponent('AssetManager/ApiAccessConfig.tsx');
 
 export const TeamConfig = loadPluginComponent('TeamMarketing/TeamConfig.tsx');
+export const ThemePromo = loadPluginComponent('TeamMarketing/ThemePromo.tsx');
+export const ThemePromoLanding = loadPluginComponent('TeamMarketing/ThemePromoLanding.tsx');
 export const SiteIconsManager = loadPluginComponent('SiteIcons/SiteIconsManager.tsx');
 export const PortalManager = loadPluginComponent('SitePortal/PortalManager.tsx');
 export const PortalStyleSelection = loadPluginComponent('SitePortal/PortalStyleSelection.tsx');
+export const PortalManagerPro = loadPluginComponent('SitePortalPro/PortalManager.tsx');
+export const PortalStyleSelectionPro = loadPluginComponent('SitePortalPro/PortalStyleSelection.tsx');
+export const PortalDocsViewer = loadPluginComponent('SitePortalPro/PortalDocsViewer.tsx');
+export const PortalDocsManager = loadPluginComponent('SitePortalPro/PortalDocsManager.tsx');
+export const PortalAboutManagerPro = loadPluginComponent('SitePortalPro/PortalAboutManagerPro.tsx');
+export const PortalContactManagerPro = loadPluginComponent('SitePortalPro/PortalContactManagerPro.tsx');
 export const HappyHorseManager = loadPluginComponent('HappyHorse/HappyHorseManager.tsx');
 export const DocsManager = loadPluginComponent('DocsApi/DocsManager.tsx');
 
-// Commercial-only pages (物理剥离后仍可安全编译)
-export const UserAssets = loadPageComponent('UserAssets/UserAssets.tsx');
-export const AdvancedMarketing = loadPageComponent('AdvancedMarketing/AdvancedMarketing.tsx');
+// User-facing plugin pages (all under pages/Plugins/)
+export const Playground = loadPluginComponent('Playground/Playground.tsx');
+export const PlaygroundHome = loadPluginComponent('Playground/PlaygroundHome.tsx');
+export const Playground2026 = loadPluginComponent('Playground_2026/Playground.tsx');
+export const PlaygroundHome2026 = loadPluginComponent('Playground_2026/PlaygroundHome.tsx');
+export const ModelMarketplace = loadPluginComponent('ModelMarketplace/ModelMarketplace.tsx');
+export const UserAssets = loadPluginComponent('UserAssets/UserAssets.tsx');
+export const AdvancedMarketing = loadPluginComponent('AdvancedMarketing/AdvancedMarketing.tsx');

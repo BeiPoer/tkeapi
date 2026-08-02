@@ -8,7 +8,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Row, Col, Tree, Input, Button, Switch, InputNumber,
-  Form, Space, Empty, message, Popconfirm, Tooltip, Modal
+  Form, Space, Empty, message, Popconfirm, Tooltip, Modal, Tag, Spin
 } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, SaveOutlined, ReloadOutlined,
@@ -17,6 +17,7 @@ import {
 } from '@ant-design/icons';
 import { MdEditor } from 'md-editor-rt';
 import 'md-editor-rt/lib/style.css';
+import './DocsApi.css';
 import request from '../../../utils/request';
 import { useThemeStore } from '../../../store/theme';
 import { useTranslation } from 'react-i18next';
@@ -29,6 +30,7 @@ interface DocNode {
   sort_order: number;
   is_active: boolean;
   slug?: string;
+  category_id?: number | null;
   children: DocNode[];
 }
 
@@ -44,9 +46,21 @@ interface DocDetail {
   updated_at: string;
   slug?: string;
   translations?: Record<string, { title: string; content?: string }>;
+  category_id?: number | null;
 }
 
-const DocsManager: React.FC = () => {
+interface DocCategory {
+  id: number;
+  name: string;
+  sort_order: number;
+  is_default?: number;
+}
+
+interface DocsManagerProps {
+  apiPrefix?: string;
+}
+
+const DocsManager: React.FC<DocsManagerProps> = ({ apiPrefix = '/plugins/docs-api' }) => {
   const { t } = useTranslation('docs_api');
   const { themeMode } = useThemeStore();
   const isLight = themeMode === 'light';
@@ -70,12 +84,22 @@ const DocsManager: React.FC = () => {
   const [translating, setTranslating] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedKeys, setExpandedKeys] = useState<React.Key[]>([]);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const selectReqSeqRef = useRef(0);
 
   // 模态框：创建新节点
   const [createModalVisible, setCreateModalVisible] = useState(false);
   const [createForm] = Form.useForm();
   const [createParentId, setCreateParentId] = useState<number | null>(null);
   const [createIsDir, setCreateIsDir] = useState<number>(0);
+
+  // 分类管理
+  const isSitePortalPro = false;
+  const [categories, setCategories] = useState<DocCategory[]>([]);
+  const [activeCategoryId, setActiveCategoryId] = useState<number | null>(null);
+  const [categoryModalVisible, setCategoryModalVisible] = useState(false);
+  const [categoryForm] = Form.useForm();
+  const [editingCategory, setEditingCategory] = useState<DocCategory | null>(null);
 
   // Shadcn 调色板
   const colors = {
@@ -95,10 +119,17 @@ const DocsManager: React.FC = () => {
   const styleSheet = {
     container: {
       display: 'flex',
-      gap: '24px',
+      flexDirection: 'column' as const,
+      gap: '12px',
       height: 'calc(100vh - 160px)',
       color: colors.foreground,
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+    },
+    body: {
+      display: 'flex',
+      gap: '24px',
+      flex: 1,
+      minHeight: 0,
     },
     sidebar: {
       width: '320px',
@@ -215,7 +246,96 @@ const DocsManager: React.FC = () => {
 
   useEffect(() => {
     fetchDocs();
+    if (isSitePortalPro) {
+      fetchCategories();
+    }
   }, []);
+
+  const dedupeCategories = (list: DocCategory[]) => {
+    const seen = new Set<string>();
+    return [...list]
+      .sort((a, b) => a.id - b.id)
+      .filter(c => {
+        if (seen.has(c.name)) return false;
+        seen.add(c.name);
+        return true;
+      })
+      .sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
+  };
+
+  const fetchCategories = async () => {
+    try {
+      const res = await (request.get(`${apiPrefix}/docs/categories`) as any);
+      if (res.categories) {
+        const cats = dedupeCategories(res.categories);
+        setCategories(cats);
+        setActiveCategoryId(prev => {
+          if (prev !== null && cats.some(c => c.id === prev)) {
+            return prev;
+          }
+          const def = cats.find(c => c.is_default === 1);
+          return def?.id ?? cats[0]?.id ?? null;
+        });
+      }
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  // 未设置 category_id 的旧文档，归入默认分类（优先 is_default，其次 API 参考）
+  const defaultCategoryId = useMemo(() => {
+    const def = categories.find(c => c.is_default === 1);
+    if (def) return def.id;
+    const apiRef = categories.find(c => c.name === 'API 参考' || c.name === 'API参考');
+    return apiRef?.id ?? categories[0]?.id ?? null;
+  }, [categories]);
+
+  /** 收集某节点的全部子孙 id（用于禁止挂到自身子树） */
+  const collectDescendantIds = (rootId: number): Set<number> => {
+    const result = new Set<number>();
+    const walk = (pid: number) => {
+      flatDocs.forEach(d => {
+        if (d.parent_id === pid && !result.has(d.id)) {
+          result.add(d.id);
+          walk(d.id);
+        }
+      });
+    };
+    walk(rootId);
+    return result;
+  };
+
+  /** 解析文档所属分类：自身 category_id → 沿父级向上 → 默认分类 */
+  const resolveDocCategoryId = (docId: number | null | undefined): number | null => {
+    if (docId == null) return null;
+    const visited = new Set<number>();
+    let currentId: number | null = docId;
+    while (currentId != null && !visited.has(currentId)) {
+      visited.add(currentId);
+      const doc = flatDocs.find(d => d.id === currentId);
+      if (!doc) break;
+      if (doc.category_id != null && doc.category_id !== undefined) {
+        return doc.category_id;
+      }
+      currentId = doc.parent_id ?? null;
+    }
+    return defaultCategoryId;
+  };
+
+  /** 切换顶部分类时，若当前选中文档不在该分类下则清空编辑区 */
+  const handleAdminCategoryChange = (categoryId: number) => {
+    setActiveCategoryId(categoryId);
+    if (selectedKey == null) return;
+    const selectedCat = resolveDocCategoryId(selectedKey);
+    const belongs =
+      selectedCat === categoryId ||
+      ((selectedCat == null || selectedCat === undefined) && categoryId === defaultCategoryId);
+    if (!belongs) {
+      selectReqSeqRef.current += 1;
+      setSelectedKey(null);
+      setEditingDoc(null);
+    }
+  };
 
   // 载入或切换文档时，默认开启单独预览模式
   useEffect(() => {
@@ -232,13 +352,22 @@ const DocsManager: React.FC = () => {
   const fetchDocs = async () => {
     try {
       setLoading(true);
-      const res = await (request.get('/plugins/docs-api/docs') as any);
+      const res = await (request.get(`${apiPrefix}/docs`) as any);
       if (res.tree) {
         setTreeData(res.tree);
         const flat: any[] = [];
         const traverse = (nodes: DocNode[]) => {
           nodes.forEach(n => {
-            flat.push({ id: n.id, parent_id: n.parent_id, title: n.title, is_dir: n.is_dir, sort_order: n.sort_order, is_active: n.is_active, slug: n.slug });
+            flat.push({
+              id: n.id,
+              parent_id: n.parent_id,
+              title: n.title,
+              is_dir: n.is_dir,
+              sort_order: n.sort_order,
+              is_active: n.is_active,
+              slug: n.slug,
+              category_id: n.category_id,
+            });
             if (n.children) traverse(n.children);
           });
         };
@@ -258,35 +387,64 @@ const DocsManager: React.FC = () => {
 
   const handleSelect = async (keys: any[]) => {
     if (keys.length === 0) {
+      selectReqSeqRef.current += 1;
       setSelectedKey(null);
       setEditingDoc(null);
+      setDetailLoading(false);
       return;
     }
     const docId = Number(keys[0]);
+    const reqSeq = ++selectReqSeqRef.current;
     setSelectedKey(docId);
+    // 先清空，避免切换时标题/内容残留上一篇
+    setEditingDoc(null);
+    setActiveLang('zh');
+    setDetailLoading(true);
     try {
-      const res = await (request.get(`/plugins/docs-api/docs/${docId}`) as any);
+      const res = await (request.get(`${apiPrefix}/docs/${docId}`) as any);
+      // 快速连点时丢弃过期响应，避免旧文档盖住新文档
+      if (reqSeq !== selectReqSeqRef.current) return;
       if (res.doc) {
-        setEditingDoc(res.doc);
-        setActiveLang('zh');
+        const doc = res.doc;
+        setEditingDoc({
+          ...doc,
+          category_id:
+            doc.category_id != null && doc.category_id !== undefined
+              ? doc.category_id
+              : (isSitePortalPro ? resolveDocCategoryId(doc.parent_id) : doc.category_id),
+        });
       }
     } catch (error) {
+      if (reqSeq !== selectReqSeqRef.current) return;
       message.error(t('msg_fetch_detail_failed'));
+    } finally {
+      if (reqSeq === selectReqSeqRef.current) {
+        setDetailLoading(false);
+      }
     }
   };
 
   const handleSave = async () => {
     if (!editingDoc) return;
     try {
-      await request.put(`/plugins/docs-api/docs/${editingDoc.id}`, {
+      const resolvedCategoryId = isSitePortalPro
+        ? (editingDoc.category_id ?? resolveDocCategoryId(editingDoc.parent_id) ?? null)
+        : (editingDoc.category_id || null);
+      const payload: Record<string, unknown> = {
         parent_id: editingDoc.parent_id,
         title: editingDoc.title,
         content: editingDoc.content,
         sort_order: editingDoc.sort_order,
         is_active: editingDoc.is_active,
         slug: editingDoc.slug || '',
-        translations: editingDoc.translations || {},
-      });
+        // 顶级节点写入分类；有父级时跟随父级所属分类
+        category_id: editingDoc.parent_id ? null : resolvedCategoryId,
+      };
+      // 仅在已加载到翻译时提交，避免传 {} 触发后端清空 intl
+      if (editingDoc.translations) {
+        payload.translations = editingDoc.translations;
+      }
+      await request.put(`${apiPrefix}/docs/${editingDoc.id}`, payload);
       message.success(t('msg_save_success'));
       fetchDocs();
     } catch (error) {
@@ -296,8 +454,10 @@ const DocsManager: React.FC = () => {
 
   const handleAiTranslateAll = async () => {
     if (!editingDoc) return;
+    const sourceDocId = editingDoc.id;
     const sourceTitle = editingDoc.title;
     const sourceContent = editingDoc.content;
+    const isArticle = editingDoc.is_dir === 0;
 
     if (!sourceTitle && !sourceContent) {
       message.warning(t('translate_warning'));
@@ -309,22 +469,24 @@ const DocsManager: React.FC = () => {
 
     try {
       const targetLangs = ['en', 'ja', 'ko', 'vi'];
-      const newTranslations = { ...(editingDoc.translations || {}) };
+      const newTranslations: Record<string, { title: string; content?: string }> = {
+        ...(editingDoc.translations || {}),
+      };
 
       for (const lang of targetLangs) {
         let translatedTitle = '';
         let translatedContent = '';
 
         if (sourceTitle) {
-          const resTitle = await request.post('/plugins/docs-api/docs/translate', {
+          const resTitle = await request.post(`${apiPrefix}/docs/translate`, {
             text: sourceTitle,
             to_lang: lang,
           }) as any;
           translatedTitle = resTitle.translated || '';
         }
 
-        if (sourceContent && editingDoc.is_dir === 0) {
-          const resContent = await request.post('/plugins/docs-api/docs/translate', {
+        if (sourceContent && isArticle) {
+          const resContent = await request.post(`${apiPrefix}/docs/translate`, {
             text: sourceContent,
             to_lang: lang,
           }) as any;
@@ -337,9 +499,16 @@ const DocsManager: React.FC = () => {
         };
       }
 
-      setEditingDoc({
-        ...editingDoc,
-        translations: newTranslations,
+      setEditingDoc(prev => {
+        if (!prev || prev.id !== sourceDocId) return prev;
+        // 合并写入，保留翻译期间用户对其他语言的手动修改
+        return {
+          ...prev,
+          translations: {
+            ...(prev.translations || {}),
+            ...newTranslations,
+          },
+        };
       });
 
       message.success({ content: t('translate_success'), key: 'translate-status', duration: 3 });
@@ -352,7 +521,7 @@ const DocsManager: React.FC = () => {
 
   const handleDelete = async (id: number) => {
     try {
-      await request.delete(`/plugins/docs-api/docs/${id}`);
+      await request.delete(`${apiPrefix}/docs/${id}`);
       message.success(t('msg_delete_success'));
       if (selectedKey === id) {
         setSelectedKey(null);
@@ -364,16 +533,45 @@ const DocsManager: React.FC = () => {
     }
   };
 
-  const handleResetDefault = async () => {
+  const handleResetInitializeDocs = async () => {
     try {
       setLoading(true);
-      await request.post('/plugins/docs-api/docs/import-default');
+      await request.post(`${apiPrefix}/docs/import-default`);
       message.success(t('msg_reset_success'));
       setSelectedKey(null);
       setEditingDoc(null);
-      fetchDocs();
+      setSearchQuery('');
+      await fetchDocs();
+      if (isSitePortalPro) {
+        await fetchCategories();
+      }
     } catch (error) {
       message.error(t('msg_reset_failed'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleClearAllDocs = async () => {
+    try {
+      setLoading(true);
+      await request.post(`${apiPrefix}/docs/clear-all`);
+      message.success(t('clear_success', '已成功清空所有数据'));
+      setSelectedKey(null);
+      setEditingDoc(null);
+      setSearchQuery('');
+      await fetchDocs();
+      if (isSitePortalPro) {
+        await fetchCategories();
+      }
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const serverMsg = error?.response?.data?.error?.message || error?.response?.data?.message;
+      if (status === 404 || status === 405 || status === 400) {
+        message.error('清空接口不可用，请重启后端后再试');
+      } else {
+        message.error(serverMsg || t('clear_failed', '清空数据失败'));
+      }
     } finally {
       setLoading(false);
     }
@@ -383,10 +581,14 @@ const DocsManager: React.FC = () => {
     setCreateParentId(parentId);
     setCreateIsDir(isDir);
     createForm.resetFields();
+    const inheritedCat = parentId != null
+      ? resolveDocCategoryId(parentId)
+      : (activeCategoryId || undefined);
     createForm.setFieldsValue({
       is_dir: isDir,
       sort_order: 10,
-      is_active: 1
+      is_active: true,
+      category_id: inheritedCat ?? activeCategoryId ?? undefined,
     });
     setCreateModalVisible(true);
   };
@@ -394,7 +596,13 @@ const DocsManager: React.FC = () => {
   const handleCreateSubmit = async () => {
     try {
       const values = await createForm.validateFields();
-      await request.post('/plugins/docs-api/docs', {
+      // 未选分类时保持 null，不再静默回落到当前 Tab
+      const categoryId = createParentId
+        ? null
+        : (values.category_id != null && values.category_id !== ''
+          ? Number(values.category_id)
+          : null);
+      await request.post(`${apiPrefix}/docs`, {
         parent_id: createParentId,
         title: values.title,
         content: values.content || '',
@@ -402,11 +610,13 @@ const DocsManager: React.FC = () => {
         sort_order: values.sort_order,
         is_active: values.is_active ? 1 : 0,
         slug: values.slug || '',
+        category_id: categoryId,
       });
       message.success(t('msg_add_success'));
       setCreateModalVisible(false);
       fetchDocs();
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.errorFields) return; // 表单校验失败，不提示「添加失败」
       message.error(t('msg_add_failed'));
     }
   };
@@ -422,53 +632,116 @@ const DocsManager: React.FC = () => {
 
     if (!dragNode || !dropNode) return;
 
-    let nextParentId: number | null = dragNode.parent_id;
-    let nextSortOrder = dragNode.sort_order;
+    // 禁止拖入自身子孙节点，避免目录环
+    const descendants = collectDescendantIds(dragId);
+    if (dropId === dragId || descendants.has(dropId)) {
+      message.warning('不能将节点移动到自身或其子节点下');
+      return;
+    }
 
+    let nextParentId: number | null = dragNode.parent_id;
     if (dropPosition === 0) {
       if (!dropNode.is_dir) {
         message.warning(t('msg_drag_not_dir'));
         return;
       }
       nextParentId = dropId;
-      const sibs = flatDocs.filter(d => d.parent_id === dropId);
-      const maxSort = sibs.reduce((max, s) => Math.max(max, s.sort_order), 0);
-      nextSortOrder = maxSort + 10;
     } else {
       nextParentId = dropNode.parent_id;
-      const sibs = flatDocs.filter(d => d.parent_id === dropNode.parent_id).sort((a, b) => a.sort_order - b.sort_order);
-      const idx = sibs.findIndex(s => s.id === dropId);
-      if (idx !== -1) {
-        if (dropPosition < 0) {
-          if (idx === 0) {
-            nextSortOrder = sibs[0].sort_order - 10;
-          } else {
-            nextSortOrder = Math.round((sibs[idx - 1].sort_order + sibs[idx].sort_order) / 2);
-          }
-        } else {
-          if (idx === sibs.length - 1) {
-            nextSortOrder = sibs[idx].sort_order + 10;
-          } else {
-            nextSortOrder = Math.round((sibs[idx].sort_order + sibs[idx + 1].sort_order) / 2);
-          }
-        }
+    }
+
+    const siblings = flatDocs
+      .filter(d => d.parent_id === nextParentId && d.id !== dragId)
+      .sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
+
+    let insertAt = siblings.findIndex(s => s.id === dropId);
+    if (insertAt < 0) insertAt = siblings.length;
+    if (dropPosition === 0) {
+      insertAt = siblings.length;
+    } else if (dropPosition > 0) {
+      insertAt += 1;
+    }
+
+    let nextSortOrder = (insertAt + 1) * 10;
+    if (siblings.length > 0) {
+      if (insertAt <= 0) {
+        nextSortOrder = siblings[0].sort_order - 10;
+      } else if (insertAt >= siblings.length) {
+        nextSortOrder = siblings[siblings.length - 1].sort_order + 10;
+      } else {
+        const low = siblings[insertAt - 1].sort_order;
+        const high = siblings[insertAt].sort_order;
+        nextSortOrder = high - low > 1 ? Math.floor((low + high) / 2) : low + 1;
       }
     }
 
     try {
-      const detailRes = await (request.get(`/plugins/docs-api/docs/${dragId}`) as any);
-      const content = detailRes.doc?.content || '';
-      const slug = detailRes.doc?.slug || '';
+      const detailRes = await (request.get(`${apiPrefix}/docs/${dragId}`) as any);
+      const detail = detailRes.doc;
+      const content = detail?.content || '';
+      const slug = detail?.slug || '';
+      const nextCategoryId = nextParentId == null
+        ? (detail?.category_id ?? dragNode.category_id ?? resolveDocCategoryId(dragId) ?? activeCategoryId ?? null)
+        : null;
 
-      await request.put(`/plugins/docs-api/docs/${dragId}`, {
+      await request.put(`${apiPrefix}/docs/${dragId}`, {
         parent_id: nextParentId,
         title: dragNode.title,
-        content: content,
+        content,
         sort_order: nextSortOrder,
         is_active: dragNode.is_active ? 1 : 0,
-        slug: slug,
+        slug,
+        category_id: nextCategoryId,
       });
+
+      // 排序间隙不足时，把同级重排为 10/20/30…（仅写 sort_order+原字段）
+      if (siblings.length > 0 && insertAt > 0 && insertAt < siblings.length) {
+        const low = siblings[insertAt - 1].sort_order;
+        const high = siblings[insertAt].sort_order;
+        if (high - low <= 1) {
+          const ordered = [
+            ...siblings.slice(0, insertAt),
+            { ...dragNode, id: dragId },
+            ...siblings.slice(insertAt),
+          ];
+          for (let i = 0; i < ordered.length; i++) {
+            const node = ordered[i];
+            const isDragged = node.id === dragId;
+            if (isDragged) {
+              await request.put(`${apiPrefix}/docs/${node.id}`, {
+                parent_id: nextParentId,
+                title: dragNode.title,
+                content,
+                sort_order: (i + 1) * 10,
+                is_active: dragNode.is_active ? 1 : 0,
+                slug,
+                category_id: nextCategoryId,
+              });
+              continue;
+            }
+            const sibDetail = await (request.get(`${apiPrefix}/docs/${node.id}`) as any);
+            await request.put(`${apiPrefix}/docs/${node.id}`, {
+              parent_id: sibDetail.doc?.parent_id ?? node.parent_id,
+              title: node.title,
+              content: sibDetail.doc?.content || '',
+              sort_order: (i + 1) * 10,
+              is_active: node.is_active ? 1 : 0,
+              slug: sibDetail.doc?.slug || node.slug || '',
+              category_id: sibDetail.doc?.category_id ?? node.category_id ?? null,
+            });
+          }
+        }
+      }
+
       message.success(t('msg_drag_success'));
+      if (editingDoc?.id === dragId) {
+        setEditingDoc(prev => prev ? {
+          ...prev,
+          parent_id: nextParentId,
+          sort_order: nextSortOrder,
+          category_id: nextCategoryId,
+        } : prev);
+      }
       fetchDocs();
     } catch (error) {
       message.error(t('msg_drag_failed'));
@@ -552,318 +825,170 @@ const DocsManager: React.FC = () => {
       .filter(item => item !== null);
   };
 
-  const formattedTreeData = renderTreeNodes(treeData);
+  const displayTreeData = useMemo(() => {
+    if (!isSitePortalPro || activeCategoryId === null) return treeData;
+    return treeData.filter(node =>
+      node.category_id === activeCategoryId ||
+      ((node.category_id == null || node.category_id === undefined) &&
+        activeCategoryId === defaultCategoryId)
+    );
+  }, [treeData, isSitePortalPro, activeCategoryId, defaultCategoryId]);
+
+  /** 上级目录候选项：排除自身子孙；门户增强下再按当前分类过滤 */
+  const parentDirOptions = useMemo(() => {
+    if (!editingDoc) return [];
+    const blocked = collectDescendantIds(editingDoc.id);
+    blocked.add(editingDoc.id);
+    let dirs = flatDocs.filter(d => d.is_dir && !blocked.has(d.id));
+    if (!isSitePortalPro) return dirs;
+
+    const selectedCat =
+      editingDoc.category_id != null && editingDoc.category_id !== undefined
+        ? editingDoc.category_id
+        : (editingDoc.parent_id != null ? resolveDocCategoryId(editingDoc.parent_id) : defaultCategoryId);
+
+    if (selectedCat == null) return dirs;
+
+    return dirs.filter(d => {
+      const cat =
+        d.category_id != null && d.category_id !== undefined
+          ? d.category_id
+          : resolveDocCategoryId(d.parent_id);
+      return cat === selectedCat || (cat == null && selectedCat === defaultCategoryId);
+    });
+  }, [editingDoc, flatDocs, isSitePortalPro, defaultCategoryId, categories]);
+
+  const formattedTreeData = renderTreeNodes(displayTreeData);
+
+  const systemClass = 'docs-api-system';
 
   return (
-    <div style={styleSheet.container}>
-      {/* 样式微调，注入 Shadcn 精髓 */}
-      <style>{`
-        /* 强力修复 Antd Tree 折行错位问题，使图标与文字横向在一行对齐，减少留空 */
-        .ant-tree .ant-tree-treenode {
-          display: flex !important;
-          align-items: center !important;
-          padding: 2px 0 !important; /* 极致紧凑排列 */
-          border-radius: 6px;
-          min-height: 28px !important;
-          transition: background 0.15s, border-left 0.15s;
-          position: relative;
-        }
-        .ant-tree .ant-tree-treenode:hover {
-          background: ${colors.accent} !important;
-        }
-        
-        /* 缩减层级之间的左右缩进宽度 (原生 24px) */
-        .ant-tree .ant-tree-indent-unit {
-          width: 12px !important;
-        }
-        
-        /* 拖拽指示点 :: 样式调整 */
-        .ant-tree .ant-tree-draggable-icon {
-          display: inline-flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-          opacity: 0.35;
-          width: 14px !important;
-          height: 24px !important;
-          margin: 0 1px 0 0 !important;
-          padding: 0 !important;
-          font-size: 13px !important; /* 放大 6 个点图标 */
-          color: ${colors.foreground} !important;
-          cursor: grab !important;
-          transition: opacity 0.15s;
-        }
-        .ant-tree .ant-tree-treenode:hover .ant-tree-draggable-icon {
-          opacity: 0.7;
-        }
-        
-        /* 折叠展开小箭头 */
-        .ant-tree .ant-tree-switcher {
-          display: inline-flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-          width: 16px !important;
-          height: 24px !important;
-          margin: 0 !important;
-          padding: 0 !important;
-          color: ${colors.muted} !important;
-          transition: color 0.15s;
-        }
-        .ant-tree .ant-tree-switcher .ant-tree-switcher-icon {
-          font-size: 11px !important; /* 稍微放大展开小箭头，默认是 10px 左右 */
-          display: inline-flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-        }
-        .ant-tree .ant-tree-switcher:hover {
-          color: ${colors.foreground} !important;
-        }
-        
-        /* 节点内容外包裹器 */
-        .ant-tree .ant-tree-node-content-wrapper {
-          display: flex !important;
-          align-items: center !important;
-          flex: 1 !important;
-          min-width: 0 !important; /* 允许 flex 子项缩减以防止溢出 */
-          padding: 0 2px !important; /* 左右间距缩小 */
-          height: 24px !important;
-          background: transparent !important;
-          border-radius: 4px;
-          transition: background 0.15s;
-        }
-        
-        /* 选中状态 */
-        .ant-tree .ant-tree-node-content-wrapper.ant-tree-node-selected {
-          background: ${colors.accent} !important;
-          font-weight: 500;
-        }
-        
-        /* 标题容器 */
-        .ant-tree .ant-tree-title {
-          flex: 1 !important;
-          display: flex !important;
-          align-items: center !important;
-          min-width: 0 !important;
-          padding: 0 !important;
-        }
-        
-        .tree-node-row {
-          display: flex !important;
-          align-items: center !important;
-          justify-content: space-between !important;
-          width: 100% !important;
-          min-width: 0 !important;
-        }
-        
-        /* 悬浮才显示操作按钮 */
-        .tree-actions-btn {
-          opacity: 0;
-          transition: opacity 0.15s, transform 0.15s;
-          transform: translateX(4px);
-        }
-        .tree-node-row:hover .tree-actions-btn {
-          opacity: 1;
-          transform: translateX(0);
-        }
-        
-        /* 统一的滚动条美化 */
-        .docs-sidebar-scroll::-webkit-scrollbar {
-          width: 4px;
-          height: 4px;
-        }
-        .docs-sidebar-scroll::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        .docs-sidebar-scroll::-webkit-scrollbar-thumb {
-          background: ${isLight ? '#cbd5e1' : '#3f3f46'};
-          border-radius: 10px;
-        }
-        .docs-sidebar-scroll::-webkit-scrollbar-thumb:hover {
-          background: ${colors.muted};
-        }
-        /* 深度定制 md-editor-rt 使之符合 Shadcn 极简灰框风格 */
-        .md-editor {
-          --md-bk-color: transparent !important;
-          border: none !important;
-        }
-        .md-editor-toolbar-wrapper {
-          border-bottom: 1px solid ${colors.border} !important;
-          background: ${colors.card} !important;
-        }
-        .md-editor-content {
-          background: ${colors.background} !important;
-        }
-        .md-editor-preview-wrapper {
-          border-left: 1px solid ${colors.border} !important;
-          background: ${colors.background} !important;
-        }
-        .md-editor-catalog-editor {
-          border-left: 1px solid ${colors.border} !important;
-          background: ${colors.background} !important;
-        }
-        /* 优化工具栏按钮的 Hover 态 */
-        .md-editor-toolbar-item:hover {
-          background: ${colors.accent} !important;
-          border-radius: 4px;
-        }
-        /* 使编辑器内部的预览完美符合 GitHub 规范，同时限制文字排版 */
-        /* 使编辑器内部的预览完美符合 Fumadocs / Vercel 规范，与用户端 /docs 100% 统一 */
-        .github-theme {
-          font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
-          font-size: 14px !important;
-          line-height: 1.7 !important;
-          color: ${colors.foreground} !important;
-          background: ${colors.background} !important;
-        }
-        .github-theme h1 {
-          font-size: 2.2rem !important;
-          font-weight: 800 !important;
-          letter-spacing: -0.03em !important;
-          margin-top: 0 !important;
-          margin-bottom: 1.5rem !important;
-          padding-bottom: 0.5rem !important;
-          border-bottom: 1px solid ${colors.border} !important;
-          color: ${colors.foreground} !important;
-        }
-        .github-theme h2 {
-          font-size: 1.5rem !important;
-          font-weight: 700 !important;
-          letter-spacing: -0.02em !important;
-          margin-top: 2.5rem !important;
-          margin-bottom: 1rem !important;
-          border-bottom: none !important;
-          color: ${colors.foreground} !important;
-        }
-        .github-theme h3 {
-          font-size: 1.15rem !important;
-          font-weight: 600 !important;
-          letter-spacing: -0.01em !important;
-          margin-top: 1.8rem !important;
-          margin-bottom: 0.75rem !important;
-          color: ${colors.foreground} !important;
-        }
-        .github-theme p {
-          margin-top: 0 !important;
-          margin-bottom: 1.25rem !important;
-          line-height: 1.7 !important;
-          color: ${colors.foreground} !important;
-          opacity: 0.85 !important;
-        }
-        .github-theme pre {
-          background: ${isLight ? '#f4f4f5' : '#18181b'} !important;
-          border: 1px solid ${colors.border} !important;
-          border-radius: 8px !important;
-          padding: 1.25rem !important;
-          margin-top: 1.5rem !important;
-          margin-bottom: 1.5rem !important;
-          overflow-x: auto !important;
-        }
-        .github-theme code {
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
-          font-size: 0.85em !important;
-          padding: 0.2rem 0.4rem !important;
-          border-radius: 4px !important;
-          background: ${isLight ? 'rgba(0, 0, 0, 0.05)' : 'rgba(255, 255, 255, 0.08)'} !important;
-          border: 1px solid ${colors.border} !important;
-          color: ${colors.foreground} !important;
-        }
-        .github-theme pre code {
-          background: transparent !important;
-          border: none !important;
-          color: inherit !important;
-          padding: 0 !important;
-          font-size: 0.9em !important;
-        }
-        .github-theme table {
-          width: 100% !important;
-          border-collapse: collapse !important;
-          margin-top: 1.5rem !important;
-          margin-bottom: 1.5rem !important;
-          font-size: 13px !important;
-        }
-        .github-theme th {
-          background: ${colors.accent} !important;
-          border: 1px solid ${colors.border} !important;
-          padding: 8px 12px !important;
-          font-weight: 600 !important;
-          text-align: left !important;
-        }
-        .github-theme td {
-          border: 1px solid ${colors.border} !important;
-          padding: 8px 12px !important;
-          color: ${colors.foreground} !important;
-        }
-        .github-theme blockquote {
-          border-left: 3px solid ${colors.primary} !important;
-          background: ${colors.accent} !important;
-          padding: 10px 16px !important;
-          margin: 1.5rem 0 !important;
-          border-radius: 0 6px 6px 0 !important;
-        }
-        .github-theme blockquote p {
-          margin: 0 !important;
-          font-style: italic !important;
-          opacity: 0.8 !important;
-        }
-        .github-theme a {
-          color: #3b82f6 !important;
-          text-decoration: none !important;
-        }
-        .github-theme a:hover {
-          text-decoration: underline !important;
-        }
-        .github-theme ul, .github-theme ol {
-          margin-bottom: 16px !important;
-          padding-left: 20px !important;
-        }
-        .github-theme li {
-          margin-bottom: 6px !important;
-          line-height: 1.6 !important;
-        }
-        /* Shadcn Input focus style */
-        .shadcn-input:focus {
-          border-color: ${colors.ring} !important;
-          box-shadow: 0 0 0 2px ${colors.accent} !important;
-        }
-        /* 美化 antd 模态框样式 */
-        .ant-modal-content {
-          background: ${colors.card} !important;
-          border: 1px solid ${colors.border} !important;
-          border-radius: 8px !important;
-          box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1) !important;
-        }
-        .ant-modal-header {
-          background: transparent !important;
-          border-bottom: none !important;
-        }
-        .ant-modal-title {
-          color: ${colors.foreground} !important;
-          font-weight: 600 !important;
-        }
-        .ant-modal-close {
-          color: ${colors.muted} !important;
-        }
-      `}</style>
+    <div style={styleSheet.container} className={systemClass}>
 
+      {/* 二级分类：紧挨插件 Tab 下方，不放在左侧大纲内 */}
+      {isSitePortalPro && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', flex: 1, minWidth: 0 }}>
+            {categories.map(c => (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => handleAdminCategoryChange(c.id)}
+                style={{
+                  border: `1px solid ${activeCategoryId === c.id ? colors.primary : colors.border}`,
+                  background: activeCategoryId === c.id ? colors.primary : 'transparent',
+                  color: activeCategoryId === c.id ? colors.primaryText : colors.muted,
+                  borderRadius: '6px',
+                  padding: '4px 12px',
+                  fontSize: '13px',
+                  cursor: 'pointer',
+                  lineHeight: '22px',
+                }}
+              >
+                {c.name}
+              </button>
+            ))}
+          </div>
+          <Space size={4}>
+            <Popconfirm
+              title={t('reset_confirm_title')}
+              description={t('reset_confirm_desc')}
+              onConfirm={handleResetInitializeDocs}
+              okText={t('reset_btn')}
+              cancelText={t('cancel_btn')}
+              okButtonProps={{ danger: true }}
+            >
+              <Tooltip title={t('reset_tooltip')}>
+                <Button
+                  type="text"
+                  size="small"
+                  danger
+                  loading={loading}
+                  icon={<ReloadOutlined style={{ fontSize: '14px' }} />}
+                  aria-label={t('reset_tooltip')}
+                />
+              </Tooltip>
+            </Popconfirm>
+            <Popconfirm
+              title={t('clear_confirm_title')}
+              description={t('clear_confirm_desc')}
+              onConfirm={handleClearAllDocs}
+              okText={t('delete_btn')}
+              cancelText={t('cancel_btn')}
+              okButtonProps={{ danger: true }}
+            >
+              <Tooltip title={t('clear_tooltip')}>
+                <Button
+                  type="text"
+                  size="small"
+                  danger
+                  loading={loading}
+                  icon={<DeleteOutlined style={{ fontSize: '14px' }} />}
+                  aria-label={t('clear_tooltip')}
+                />
+              </Tooltip>
+            </Popconfirm>
+            <Tooltip title="管理分类">
+              <Button
+                type="text"
+                size="small"
+                icon={<SettingOutlined style={{ fontSize: '14px', color: colors.muted }} />}
+                onClick={() => setCategoryModalVisible(true)}
+                aria-label="管理分类"
+              />
+            </Tooltip>
+          </Space>
+        </div>
+      )}
+
+      <div style={styleSheet.body}>
       {/* 左侧侧边栏 - 文档大纲 */}
       <div style={styleSheet.sidebar}>
         {/* 大纲标题 */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
           <span style={{ fontSize: '14px', fontWeight: 600, letterSpacing: '-0.01em' }}>{t('doc_outline')}</span>
-          <Popconfirm
-            title={t('reset_confirm_title')}
-            onConfirm={handleResetDefault}
-            okText={t('reset_btn')}
-            cancelText={t('cancel_btn')}
-          >
-            <Tooltip title={t('reset_tooltip')}>
-              <Button
-                type="text"
-                size="small"
-                icon={<ReloadOutlined style={{ fontSize: '12.5px', color: '#ef4444' }} />}
-                style={{ width: '24px', height: '24px' }}
-              />
-            </Tooltip>
-          </Popconfirm>
+          {!isSitePortalPro && (
+            <Space size={4}>
+              <Popconfirm
+                title={t('reset_confirm_title')}
+                description={t('reset_confirm_desc')}
+                onConfirm={handleResetInitializeDocs}
+                okText={t('reset_btn')}
+                cancelText={t('cancel_btn')}
+                okButtonProps={{ danger: true }}
+              >
+                <Tooltip title={t('reset_tooltip')}>
+                  <Button
+                    type="text"
+                    size="small"
+                    danger
+                    loading={loading}
+                    icon={<ReloadOutlined style={{ fontSize: '14px' }} />}
+                    aria-label={t('reset_tooltip')}
+                  />
+                </Tooltip>
+              </Popconfirm>
+              <Popconfirm
+                title={t('clear_confirm_title')}
+                description={t('clear_confirm_desc')}
+                onConfirm={handleClearAllDocs}
+                okText={t('delete_btn')}
+                cancelText={t('cancel_btn')}
+                okButtonProps={{ danger: true }}
+              >
+                <Tooltip title={t('clear_tooltip')}>
+                  <Button
+                    type="text"
+                    size="small"
+                    danger
+                    loading={loading}
+                    icon={<DeleteOutlined style={{ fontSize: '14px' }} />}
+                    aria-label={t('clear_tooltip')}
+                  />
+                </Tooltip>
+              </Popconfirm>
+            </Space>
+          )}
         </div>
 
         {/* 搜索框 */}
@@ -880,13 +1005,19 @@ const DocsManager: React.FC = () => {
 
         {/* 树控件 */}
         <div className="docs-sidebar-scroll" style={{ flex: 1, overflowY: 'auto', marginBottom: '14px' }}>
-          {treeData.length === 0 ? (
+          {formattedTreeData.length === 0 ? (
             <Empty description={t('no_docs')} image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: '20px' }} />
           ) : (
             <Tree
               draggable
               blockNode
               selectable
+              allowDrop={({ dropNode, dropPosition }) => {
+                const target = flatDocs.find(d => d.id === Number(dropNode.key));
+                // 仅允许放入目录节点内部
+                if (dropPosition === 0 && target && !target.is_dir) return false;
+                return true;
+              }}
               onSelect={handleSelect}
               selectedKeys={selectedKey ? [String(selectedKey)] : []}
               onDrop={onDrop}
@@ -917,34 +1048,42 @@ const DocsManager: React.FC = () => {
 
       {/* 右侧主编辑工作区 */}
       <div style={styleSheet.main}>
-        {editingDoc ? (
-          <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+        {detailLoading && !editingDoc ? (
+          <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+            <Spin tip="加载文档中..." />
+          </div>
+        ) : editingDoc ? (
+          <div key={`doc-workspace-${editingDoc.id}`} style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
             {/* 工作区 Header */}
             <div style={styleSheet.header}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
                 {editingDoc.is_dir ? (
                   <FolderOutlined style={{ color: colors.muted, fontSize: '18px' }} />
                 ) : (
                   <FileTextOutlined style={{ color: colors.muted, fontSize: '18px' }} />
                 )}
                 <input
+                  key={`doc-title-${editingDoc.id}-${activeLang}`}
                   value={activeLang === 'zh' ? editingDoc.title : (editingDoc.translations?.[activeLang]?.title || '')}
                   onChange={(e) => {
-                    if (activeLang === 'zh') {
-                      setEditingDoc({ ...editingDoc, title: e.target.value });
-                    } else {
-                      setEditingDoc({
-                        ...editingDoc,
+                    const nextTitle = e.target.value;
+                    setEditingDoc(prev => {
+                      if (!prev) return prev;
+                      if (activeLang === 'zh') {
+                        return { ...prev, title: nextTitle };
+                      }
+                      return {
+                        ...prev,
                         translations: {
-                          ...editingDoc.translations,
+                          ...prev.translations,
                           [activeLang]: {
-                            ...editingDoc.translations?.[activeLang],
-                            title: e.target.value,
-                            content: editingDoc.translations?.[activeLang]?.content || '',
+                            ...prev.translations?.[activeLang],
+                            title: nextTitle,
+                            content: prev.translations?.[activeLang]?.content || '',
                           }
                         }
-                      });
-                    }
+                      };
+                    });
                   }}
                   style={{
                     border: 'none',
@@ -953,7 +1092,8 @@ const DocsManager: React.FC = () => {
                     fontWeight: 600,
                     color: colors.foreground,
                     outline: 'none',
-                    width: '320px',
+                    width: '100%',
+                    maxWidth: '520px',
                   }}
                   placeholder={t('title_placeholder')}
                 />
@@ -968,24 +1108,66 @@ const DocsManager: React.FC = () => {
 
             {/* 精简属性行 */}
             <div style={styleSheet.metaRow}>
-              {/* 父级目录 */}
+              {/* 文档分类（门户增强）：先选分类，再选该分类下的上级目录 */}
+              {isSitePortalPro && (
+                <div style={styleSheet.metaItem}>
+                  <span style={styleSheet.label}>文档分类:</span>
+                  <select
+                    style={{ ...styleSheet.select, minWidth: '140px' }}
+                    value={
+                      editingDoc.category_id != null && editingDoc.category_id !== undefined
+                        ? editingDoc.category_id
+                        : (resolveDocCategoryId(editingDoc.parent_id) ?? '')
+                    }
+                    onChange={(e) => {
+                      const nextCat = e.target.value ? Number(e.target.value) : null;
+                      setEditingDoc(prev => {
+                        if (!prev) return prev;
+                        let nextParent = prev.parent_id;
+                        if (nextParent != null) {
+                          const parentCat = resolveDocCategoryId(nextParent);
+                          if (parentCat !== nextCat) nextParent = null;
+                        }
+                        return { ...prev, category_id: nextCat, parent_id: nextParent };
+                      });
+                    }}
+                  >
+                    <option value="">未分类</option>
+                    {categories.map(c => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* 上级目录：门户增强下仅列出当前分类对应的目录 */}
               <div style={styleSheet.metaItem}>
                 <span style={styleSheet.label}>{t('parent_dir')}:</span>
                 <select
-                  style={styleSheet.select}
+                  style={{ ...styleSheet.select, minWidth: '180px' }}
                   value={editingDoc.parent_id || ''}
                   onChange={(e) => {
                     const val = e.target.value ? Number(e.target.value) : null;
-                    setEditingDoc({ ...editingDoc, parent_id: val });
+                    setEditingDoc(prev => {
+                      if (!prev) return prev;
+                      if (!isSitePortalPro || val == null) {
+                        return { ...prev, parent_id: val };
+                      }
+                      const inheritedCat = resolveDocCategoryId(val);
+                      return {
+                        ...prev,
+                        parent_id: val,
+                        category_id: inheritedCat ?? prev.category_id ?? null,
+                      };
+                    });
                   }}
                 >
-                  <option value="">{t('parent_root')}</option>
-                  {flatDocs
-                    .filter(d => d.is_dir && d.id !== editingDoc.id)
-                    .map(d => (
-                      <option key={d.id} value={d.id}>{d.title}</option>
-                    ))
-                  }
+                  <option value="">
+                    {isSitePortalPro ? '顶级目录（当前分类）' : t('parent_root')}
+                  </option>
+                  {parentDirOptions.map(d => (
+                    <option key={d.id} value={d.id}>{d.title}</option>
+                  ))}
                 </select>
               </div>
 
@@ -996,7 +1178,7 @@ const DocsManager: React.FC = () => {
                   min={0}
                   size="small"
                   value={editingDoc.sort_order}
-                  onChange={(val) => setEditingDoc({ ...editingDoc, sort_order: val || 0 })}
+                  onChange={(val) => setEditingDoc(prev => prev ? { ...prev, sort_order: val || 0 } : prev)}
                   style={{ width: '70px', borderRadius: '4px', border: `1px solid ${colors.border}`, background: colors.input, color: colors.foreground }}
                 />
               </div>
@@ -1007,7 +1189,10 @@ const DocsManager: React.FC = () => {
                 <Input
                   size="small"
                   value={editingDoc.slug || ''}
-                  onChange={(e) => setEditingDoc({ ...editingDoc, slug: e.target.value })}
+                  onChange={(e) => {
+                    const slug = e.target.value;
+                    setEditingDoc(prev => prev ? { ...prev, slug } : prev);
+                  }}
                   placeholder={t('slug_placeholder')}
                   style={{ width: '130px', borderRadius: '4px', border: `1px solid ${colors.border}`, background: colors.input, color: colors.foreground }}
                 />
@@ -1019,7 +1204,7 @@ const DocsManager: React.FC = () => {
                 <Switch
                   size="small"
                   checked={editingDoc.is_active === 1}
-                  onChange={(checked) => setEditingDoc({ ...editingDoc, is_active: checked ? 1 : 0 })}
+                  onChange={(checked) => setEditingDoc(prev => prev ? { ...prev, is_active: checked ? 1 : 0 } : prev)}
                 />
               </div>
             </div>
@@ -1079,24 +1264,30 @@ const DocsManager: React.FC = () => {
             {editingDoc.is_dir === 0 ? (
               <div style={styleSheet.editorWrapper}>
                 <MdEditor
+                  key={`doc-editor-${editingDoc.id}-${activeLang}`}
                   ref={editorRef}
                   modelValue={activeLang === 'zh' ? editingDoc.content : (editingDoc.translations?.[activeLang]?.content || '')}
                   onChange={(val) => {
-                    if (activeLang === 'zh') {
-                      setEditingDoc({ ...editingDoc, content: val });
-                    } else {
-                      setEditingDoc({
-                        ...editingDoc,
+                    const docId = editingDoc.id;
+                    const lang = activeLang;
+                    setEditingDoc(prev => {
+                      // 切换文档时忽略旧编辑器实例的迟到 onChange，避免标题被上一篇覆盖
+                      if (!prev || prev.id !== docId) return prev;
+                      if (lang === 'zh') {
+                        return { ...prev, content: val };
+                      }
+                      return {
+                        ...prev,
                         translations: {
-                          ...editingDoc.translations,
-                          [activeLang]: {
-                            ...editingDoc.translations?.[activeLang],
-                            title: editingDoc.translations?.[activeLang]?.title || '',
+                          ...prev.translations,
+                          [lang]: {
+                            ...prev.translations?.[lang],
+                            title: prev.translations?.[lang]?.title || '',
                             content: val,
                           }
                         }
-                      });
-                    }
+                      };
+                    });
                   }}
                   theme={themeMode === 'dark' ? 'dark' : 'light'}
                   previewTheme="github"
@@ -1236,6 +1427,7 @@ const DocsManager: React.FC = () => {
           </div>
         )}
       </div>
+      </div>
 
       {/* 模态框：新建分类/文档 */}
       <Modal
@@ -1270,6 +1462,27 @@ const DocsManager: React.FC = () => {
               style={{ height: '36px', borderRadius: '6px' }}
             />
           </Form.Item>
+          {isSitePortalPro && (
+            <Form.Item
+              name="category_id"
+              label="文档分类"
+              extra={createParentId ? '已选择上级目录时，将自动归属到该目录所在分类' : '选择后，新建节点会出现在对应分类下'}
+              getValueFromEvent={(e: React.ChangeEvent<HTMLSelectElement>) => {
+                const v = e.target.value;
+                return v ? Number(v) : undefined;
+              }}
+            >
+              <select
+                style={{ ...styleSheet.select, width: '100%' }}
+                disabled={!!createParentId}
+              >
+                <option value="">未分类</option>
+                {categories.map(c => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </Form.Item>
+          )}
           <Row gutter={16}>
             <Col span={12}>
               <Form.Item
@@ -1287,14 +1500,114 @@ const DocsManager: React.FC = () => {
                 valuePropName="checked"
                 initialValue={true}
               >
-                <div style={{ display: 'flex', alignItems: 'center', height: '32px' }}>
-                  <Switch defaultChecked />
-                  <span style={{ marginLeft: '8px', fontSize: '13px', color: colors.muted }}>{t('form_status_help')}</span>
-                </div>
+                <Switch />
               </Form.Item>
+              <span style={{ fontSize: '13px', color: colors.muted, marginTop: '-8px', display: 'block' }}>
+                {t('form_status_help')}
+              </span>
             </Col>
           </Row>
         </Form>
+      </Modal>
+
+      {/* 模态框：管理分类 (Site Portal Pro) */}
+      <Modal
+        title="管理文档分类"
+        open={categoryModalVisible}
+        onCancel={() => {
+          setCategoryModalVisible(false);
+          setEditingCategory(null);
+          categoryForm.resetFields();
+        }}
+        footer={null}
+        width={500}
+      >
+        <div style={{ marginBottom: '16px' }}>
+          <Form
+            form={categoryForm}
+            layout="inline"
+            onFinish={async (values) => {
+              try {
+                const payload = {
+                  name: values.name,
+                  sort_order: Number(values.sort_order ?? 10),
+                };
+                if (editingCategory) {
+                  await request.put(`${apiPrefix}/docs/categories/${editingCategory.id}`, payload);
+                  message.success('更新成功');
+                } else {
+                  await request.post(`${apiPrefix}/docs/categories`, payload);
+                  message.success('创建成功');
+                }
+                setEditingCategory(null);
+                categoryForm.resetFields();
+                fetchCategories();
+              } catch (e) {
+                message.error('操作失败');
+              }
+            }}
+          >
+            <Form.Item name="name" rules={[{ required: true, message: '请输入分类名称' }]}>
+              <Input placeholder="分类名称，如：API 参考" style={{ width: '180px' }} />
+            </Form.Item>
+            <Form.Item name="sort_order" initialValue={10}>
+              <InputNumber min={0} placeholder="排序(小在前)" style={{ width: '120px' }} />
+            </Form.Item>
+            <Form.Item>
+              <Button type="primary" htmlType="submit">
+                {editingCategory ? '保存修改' : '添加新分类'}
+              </Button>
+              {editingCategory && (
+                <Button type="link" onClick={() => { setEditingCategory(null); categoryForm.resetFields(); }}>取消</Button>
+              )}
+            </Form.Item>
+          </Form>
+        </div>
+        <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+          {categories.length === 0 ? (
+            <Empty description="暂无分类" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          ) : (
+            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+              {categories.map(c => (
+                <li key={c.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px', borderBottom: `1px solid ${colors.border}` }}>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    {c.name}
+                    {c.is_default === 1 && <Tag color="green" style={{ margin: 0 }}>默认</Tag>}
+                    <small style={{ color: colors.muted }}>(排序: {c.sort_order})</small>
+                  </span>
+                  <Space>
+                    {c.is_default !== 1 && (
+                      <Button type="link" size="small" onClick={async () => {
+                        try {
+                          await request.post(`${apiPrefix}/docs/categories/${c.id}/set-default`);
+                          message.success('已设为默认分类');
+                          fetchCategories();
+                        } catch {
+                          message.error('设置失败');
+                        }
+                      }}>设为默认</Button>
+                    )}
+                    <Button type="link" size="small" onClick={() => {
+                      setEditingCategory(c);
+                      categoryForm.setFieldsValue({ name: c.name, sort_order: c.sort_order });
+                    }}>编辑</Button>
+                    <Popconfirm title="确定删除该分类吗？其下文档将变为未分类。" onConfirm={async () => {
+                      try {
+                        await request.delete(`${apiPrefix}/docs/categories/${c.id}`);
+                        message.success('删除成功');
+                        fetchCategories();
+                      } catch (e) {
+                        message.error('删除失败');
+                      }
+                    }}>
+                      <Button type="link" size="small" danger>删除</Button>
+                    </Popconfirm>
+                  </Space>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </Modal>
     </div>
   );

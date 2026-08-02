@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -109,13 +109,14 @@ fn main() {
     }
 
     // 自动检测插件文件/目录的存在性，实现代码级别的解耦和优雅降级
+    // Paths may be a single `.rs` file or a plugin directory (`mod.rs` inside).
     let optional_plugins = vec![
-        ("src/api/redemptions.rs", "plugin_redemptions"),
+        ("src/api/plugins/redemptions", "plugin_redemptions"),
         ("src/models/redemption.rs", "plugin_redemptions_model"),
-        ("src/api/finance.rs", "plugin_finance"),
-        ("src/api/team_marketing.rs", "plugin_team_marketing"),
+        ("src/api/plugins/finance", "plugin_finance"),
+        ("src/api/plugins/team_marketing", "plugin_team_marketing"),
         ("src/services/payment", "plugin_payment"),
-        ("src/api/pay.rs", "plugin_pay"),
+        ("src/api/plugins/pay", "plugin_pay"),
     ];
 
     for (path_str, cfg_name) in optional_plugins {

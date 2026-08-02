@@ -24,19 +24,13 @@ pub mod channel_configs;
 pub mod channels;
 pub mod dashboard;
 pub mod date_helper;
-pub mod default_docs;
-pub mod docs_api;
-#[cfg(plugin_finance)]
-pub mod finance;
 pub mod forward_rules;
 pub mod logs;
 pub mod metrics;
 pub mod model_classifications;
 pub mod models;
-#[cfg(all(plugin_pay, plugin_payment))]
-pub mod pay;
-#[cfg(plugin_redemptions)]
-pub mod redemptions;
+/// All backend plugins (Playground / Docs / Site / Commercial / …)
+pub mod plugins;
 pub mod settings;
 pub mod task_logs;
 pub mod tokens;
@@ -44,8 +38,6 @@ pub mod upstreams;
 pub mod user;
 pub mod user_levels;
 pub mod users;
-#[cfg(feature = "commercial_plugins")]
-pub mod volc_ark_monitor;
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     // 1. Management APIs (Admin/User UI)
@@ -148,9 +140,22 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         admin_routes = admin_routes
             .route(
                 "/redemptions",
-                get(redemptions::list_redemptions).post(redemptions::generate_redemptions),
+                get(plugins::redemptions::list_redemptions)
+                    .post(plugins::redemptions::generate_redemptions),
             )
-            .route("/redemptions/{id}", delete(redemptions::delete_redemption));
+            .route(
+                "/redemptions/groups",
+                get(plugins::redemptions::list_redemption_groups)
+                    .delete(plugins::redemptions::delete_redemption_group),
+            )
+            .route(
+                "/redemptions/{id}",
+                delete(plugins::redemptions::delete_redemption),
+            )
+            .route(
+                "/redemptions/{id}/status",
+                put(plugins::redemptions::update_redemption_status),
+            );
     }
 
     admin_routes = admin_routes
@@ -190,14 +195,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     #[cfg(plugin_finance)]
     {
         admin_routes = admin_routes
-            .route("/finance/orders", get(finance::list_orders))
-            .route("/finance/recharges", get(finance::list_recharges))
+            .route("/finance/orders", get(plugins::finance::list_orders))
+            .route("/finance/recharges", get(plugins::finance::list_recharges))
             .route(
                 "/finance/recharges/stats_batch",
-                post(finance::get_wallet_stats_batch),
+                post(plugins::finance::get_wallet_stats_batch),
             )
-            .route("/finance/recharge_types", get(finance::list_recharge_types))
-            .route("/finance/daily-stats", get(finance::get_daily_stats));
+            .route(
+                "/finance/recharge_types",
+                get(plugins::finance::list_recharge_types),
+            )
+            .route(
+                "/finance/daily-stats",
+                get(plugins::finance::get_daily_stats),
+            );
     }
 
     let admin_routes = admin_routes
@@ -266,8 +277,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     #[cfg(plugin_redemptions)]
     {
-        management_routes =
-            management_routes.route("/redemptions/redeem", post(redemptions::redeem_code));
+        management_routes = management_routes.route(
+            "/redemptions/redeem",
+            post(plugins::redemptions::redeem_code),
+        );
     }
 
     management_routes = management_routes
@@ -295,8 +308,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     #[cfg(all(plugin_pay, plugin_payment))]
     {
         management_routes = management_routes
-            .route("/finance/pay/create", post(pay::create_order))
-            .route("/finance/pay/status/{out_trade_no}", get(pay::check_status));
+            .route("/finance/pay/create", post(plugins::pay::create_order))
+            .route(
+                "/finance/pay/status/{out_trade_no}",
+                get(plugins::pay::check_status),
+            );
     }
 
     management_routes = management_routes
@@ -308,37 +324,53 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     }
     #[cfg(feature = "commercial_plugins")]
     {
-        management_routes = management_routes.nest("/assets", assets::router());
+        management_routes = management_routes.nest("/assets", plugins::assets::router());
     }
 
     #[cfg(feature = "commercial_plugins")]
     #[cfg(plugin_team_marketing)]
     {
-        management_routes = management_routes.nest("/team-marketing", team_marketing::router());
+        management_routes =
+            management_routes.nest("/team-marketing", plugins::team_marketing::router());
     }
 
-    let management_routes = management_routes.nest("/playground", playground::router());
+    let management_routes = management_routes.nest("/playground", plugins::playground::router());
+    #[cfg(feature = "commercial_plugins")]
+    let management_routes =
+        management_routes.nest("/playground-2026", plugins::playground_2026::router());
 
     #[cfg(feature = "plugin_site_icons")]
-    let management_routes = management_routes.nest("/plugins/site-icons", site_icons::router());
+    let management_routes =
+        management_routes.nest("/plugins/site-icons", plugins::site_icons::router());
 
     #[cfg(feature = "plugin_site_portal")]
     let management_routes =
-        management_routes.nest("/plugins/site-portal", site_portal::admin_router());
+        management_routes.nest("/plugins/site-portal", plugins::site_portal::admin_router());
+    #[cfg(feature = "commercial_plugins")]
+    let management_routes = management_routes.nest(
+        "/plugins/site-portal-pro",
+        plugins::site_portal_pro::admin_router(),
+    );
     #[cfg(feature = "plugin_happyhorse")]
+    let management_routes = management_routes.nest(
+        "/plugins/happyhorse_router",
+        plugins::happyhorse_router::router(),
+    );
     let management_routes =
-        management_routes.nest("/plugins/happyhorse_router", happyhorse_router::router());
-    let management_routes = management_routes.nest("/plugins/docs-api", docs_api::router());
+        management_routes.nest("/plugins/docs-api", plugins::docs_api::router());
     #[cfg(feature = "commercial_plugins")]
     let management_routes = management_routes.nest(
         "/plugins/volcengine_ark_monitor",
-        volc_ark_monitor::router(),
+        plugins::volc_ark_monitor::router(),
     );
     #[cfg(feature = "commercial_plugins")]
     let management_routes = management_routes.nest(
         "/plugins/upstream_asset_relay",
-        upstream_asset_relay::router(),
+        plugins::upstream_asset_relay::router(),
     );
+    #[cfg(feature = "plugin_data_sync")]
+    let management_routes =
+        management_routes.nest("/plugins/data_sync", plugins::data_sync::router());
     let management_routes = management_routes.route_layer(axum_middleware::from_fn_with_state(
         state.clone(),
         auth_middleware,
@@ -348,12 +380,30 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     #[cfg(all(plugin_pay, plugin_payment))]
     {
         payment_public_routes = payment_public_routes
-            .route("/finance/pay/notify/wechat", post(pay::wechat_notify))
-            .route("/finance/pay/notify/alipay", post(pay::alipay_notify))
-            .route("/finance/pay/notify/stripe", post(pay::stripe_notify))
-            .route("/finance/pay/notify/bonuspay", post(pay::bonuspay_notify))
-            .route("/finance/pay/notify/hyperbc", post(pay::hyperbc_notify))
-            .route("/finance/pay/notify/allinpay", post(pay::allinpay_notify));
+            .route(
+                "/finance/pay/notify/wechat",
+                post(plugins::pay::wechat_notify),
+            )
+            .route(
+                "/finance/pay/notify/alipay",
+                post(plugins::pay::alipay_notify),
+            )
+            .route(
+                "/finance/pay/notify/stripe",
+                post(plugins::pay::stripe_notify),
+            )
+            .route(
+                "/finance/pay/notify/bonuspay",
+                post(plugins::pay::bonuspay_notify),
+            )
+            .route(
+                "/finance/pay/notify/hyperbc",
+                post(plugins::pay::hyperbc_notify),
+            )
+            .route(
+                "/finance/pay/notify/allinpay",
+                post(plugins::pay::allinpay_notify),
+            );
     }
 
     let payment_public_routes = payment_public_routes.with_state(state.clone());
@@ -362,6 +412,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let auth_routes: Router<Arc<AppState>> = Router::new()
         .route("/login", post(auth::login))
         .route("/admin/login", post(auth::admin_login))
+        .route("/exchange-login-code", post(auth::exchange_login_code))
         .route("/admin/init-status", get(auth::admin_init_status))
         .route("/admin/init", post(auth::init_admin))
         .route("/register", post(auth::register))
@@ -386,11 +437,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/plugins/active", get(plugins::get_active_plugins_public))
         .route(
             "/plugins/docs-api/public/tree",
-            get(docs_api::list_docs_public),
+            get(plugins::docs_api::list_docs_public),
         )
         .route(
             "/plugins/docs-api/public/docs/{id}",
-            get(docs_api::get_doc_detail),
+            get(plugins::docs_api::get_doc_detail),
         )
         // OAuth 绑定回调（浏览器重定向，无 JWT，通过 state 参数识别用户）
         .route(
@@ -406,8 +457,40 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         public_v1_routes =
             public_v1_routes.route("/marketplace/public", get(plugins::get_marketplace_public));
     }
-    #[cfg(feature = "plugin_site_portal")]
-    let public_v1_routes = public_v1_routes.nest("/portal", site_portal::public_api_router());
+    #[cfg(feature = "commercial_plugins")]
+    {
+        public_v1_routes = public_v1_routes
+            .route(
+                "/plugins/site-portal-pro/public/tree",
+                get(plugins::site_portal_pro_docs::list_docs_public),
+            )
+            .route(
+                "/plugins/site-portal-pro/public/docs/categories",
+                get(plugins::site_portal_pro_docs::list_categories_public),
+            )
+            .route(
+                "/plugins/site-portal-pro/public/docs/{id}",
+                get(plugins::site_portal_pro_docs::get_doc_detail_public),
+            );
+    }
+    #[cfg(feature = "commercial_plugins")]
+    #[cfg(plugin_team_marketing)]
+    {
+        public_v1_routes = public_v1_routes
+            .route(
+                "/team-marketing/theme-promos/public/{slug}",
+                get(plugins::team_marketing::theme_promo::get_theme_promo_public),
+            )
+            .route(
+                "/team-marketing/link-clicks",
+                post(plugins::team_marketing::link_click::record_link_click),
+            );
+    }
+    #[cfg(feature = "plugin_data_sync")]
+    {
+        public_v1_routes =
+            public_v1_routes.nest("/plugins/data_sync", plugins::data_sync::public_router());
+    }
     let public_v1_routes = public_v1_routes.with_state(state.clone());
 
     // 3. Relay APIs (OpenAI Compatible + 可灵原生)
@@ -626,7 +709,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     let app = Router::new().merge(public_router);
     #[cfg(feature = "plugin_site_portal")]
-    let app = app.nest("/home", site_portal::portal_pages_router());
+    let app = app.nest("/home", plugins::site_portal::portal_pages_router());
+    #[cfg(feature = "commercial_plugins")]
+    let app = app.nest("/home-pro", plugins::site_portal_pro::portal_pages_router());
     let app = app
         .nest("/api/v1/auth", auth_routes)
         .nest("/api/v1", public_v1_routes)
@@ -637,37 +722,40 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(google_native_routes)
         .merge(volcengine_native_routes)
         .with_state(state)
-        // CORS 配置：设置 CORS_ORIGINS 环境变量（逗号分隔）限制跨域来源，未设置则允许所有来源（兼容开发环境）
-        .layer(if let Ok(origins) = std::env::var("CORS_ORIGINS") {
-            let allowed: Vec<axum::http::HeaderValue> = origins
-                .split(',')
-                .filter_map(|o| o.trim().parse().ok())
-                .collect();
-            tower_http::cors::CorsLayer::new()
-                .allow_origin(allowed)
-                .allow_methods(tower_http::cors::Any)
-                .allow_headers(tower_http::cors::Any)
-        } else {
-            tower_http::cors::CorsLayer::permissive()
+        // CORS：生产环境必须设置 CORS_ORIGINS；开发环境（APP_ENV=development|dev）未设置时允许所有来源
+        .layer({
+            let origins_env = std::env::var("CORS_ORIGINS").ok();
+            let app_env = std::env::var("APP_ENV").unwrap_or_default().to_lowercase();
+            let is_dev = matches!(app_env.as_str(), "development" | "dev");
+            match origins_env {
+                Some(origins) if !origins.trim().is_empty() => {
+                    let allowed: Vec<axum::http::HeaderValue> = origins
+                        .split(',')
+                        .filter_map(|o| o.trim().parse().ok())
+                        .collect();
+                    tower_http::cors::CorsLayer::new()
+                        .allow_origin(allowed)
+                        .allow_methods(tower_http::cors::Any)
+                        .allow_headers(tower_http::cors::Any)
+                }
+                _ if is_dev => {
+                    tracing::warn!(
+                        "CORS_ORIGINS unset with APP_ENV={}; using permissive CORS (dev only)",
+                        app_env
+                    );
+                    tower_http::cors::CorsLayer::permissive()
+                }
+                _ => {
+                    tracing::warn!(
+                        "CORS_ORIGINS unset outside development — denying cross-origin browser access. Set CORS_ORIGINS to your frontend origin(s)."
+                    );
+                    // 不调用 allow_origin：默认拒绝跨域
+                    tower_http::cors::CorsLayer::new()
+                        .allow_methods(tower_http::cors::Any)
+                        .allow_headers(tower_http::cors::Any)
+                }
+            }
         })
         .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024));
     app
 }
-
-#[cfg(feature = "commercial_plugins")]
-pub mod assets;
-pub mod playground;
-pub mod plugins;
-#[cfg(feature = "commercial_plugins")]
-pub mod team_marketing;
-#[cfg(feature = "commercial_plugins")]
-pub mod upstream_asset_relay;
-// ── 插件模块声明（各插件均通过 feature flag 控制，移除对应 feature 后模块不编译） ──
-
-#[cfg(feature = "plugin_site_icons")]
-pub mod site_icons; // Plugin: 站点图标管理
-
-#[cfg(feature = "plugin_happyhorse")]
-pub mod happyhorse_router;
-#[cfg(feature = "plugin_site_portal")]
-pub mod site_portal; // Plugin: 站点门户 // Plugin: 快乐小马智能路由

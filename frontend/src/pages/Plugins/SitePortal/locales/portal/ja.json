@@ -61,7 +61,7 @@
   "contact_phone": "電話番号",
   "contact_address": "住所",
   "contact_tip": "ヒント",
-  "contact_tip_desc": "管理バックエンドの「ポータル管理 → カラム管理」で連絡先情報を入力してください",
+  "contact_tip_desc": "管理バックエンド「サイトポータル → ポータル管理」で連絡先を設定してください",
   "contact_social": "ソーシャルメディア",
   "models_filter_tasks": "機能タイプ",
   "models_filter_providers": "プロバイダー",

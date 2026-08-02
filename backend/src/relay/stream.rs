@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -22,8 +22,7 @@ async fn settle_after_stream(
     model: &str,
     db_model: Option<&Model>,
     db_rule: &mut Option<BillingRule>,
-    discount: f64,
-    model_discounts: &Option<String>,
+    ctx: &crate::relay::proxy::UserContext,
     usage: &crate::relay::usage_extractor::UsageTokens,
     features: &crate::relay::usage_extractor::ExtractedFeatures,
     detail_extra: Option<String>,
@@ -45,8 +44,7 @@ async fn settle_after_stream(
         db_model,
         db_rule.as_mut(),
         channel,
-        discount,
-        model_discounts,
+        ctx,
         usage,
         features,
         mapping_source,
@@ -96,8 +94,7 @@ pub async fn handle_chat_stream(
     channel: Channel,
     model: String,
     response: ReqwestResponse,
-    discount: f64,
-    model_discounts: Option<String>,
+    ctx: crate::relay::proxy::UserContext,
     prompt_tokens: i32,
     request_content_str: String,
     start_time: std::time::Instant,
@@ -117,9 +114,7 @@ pub async fn handle_chat_stream(
 
     // Spawn a worker to process the stream
     tokio::spawn(async move {
-        let mut total_prompt_tokens = prompt_tokens;
-        let mut total_completion_tokens = 0;
-        let mut total_cached_tokens = 0;
+        let total_prompt_tokens = prompt_tokens;
 
         let mut buffer = String::new();
         let mut raw_response_text = String::new();
@@ -155,12 +150,6 @@ pub async fn handle_chat_stream(
                                 line,
                                 &model,
                             ) {
-                                if target_type != "openai"
-                                    && target_type != "volcengine_chat"
-                                    && target_type != "volcengine"
-                                {
-                                    total_completion_tokens += 1;
-                                }
                                 if tx
                                     .send(Ok::<_, axum::Error>(format!(
                                         "data: {}\n\n",
@@ -183,51 +172,26 @@ pub async fn handle_chat_stream(
             let _ = tx.send(Ok("data: [DONE]\n\n".to_string())).await;
         }
 
-        // 以响应中返回的真实 token 为准进行计费核算
-        let mut total_cache_creation = 0;
-        let mut total_audio_tokens = 0;
-        let mut total_audio_cached_tokens = 0;
-        let mut total_image_tokens = 0;
-        let mut total_total_tokens = 0;
+        // 优先用上游 usage（含 cached / cache_write）；否则回退流中估算
+        let mut cost_usage = crate::relay::usage_extractor::UsageTokens {
+            prompt: total_prompt_tokens,
+            completion: 0,
+            ..Default::default()
+        };
         if !raw_response_text.is_empty() {
-            let actual_usage = crate::relay::usage_extractor::parse_usage(&raw_response_text);
-            if actual_usage.prompt > 0 || actual_usage.completion > 0 {
-                total_prompt_tokens = actual_usage.prompt;
-                total_completion_tokens = actual_usage.completion;
-                total_cached_tokens = actual_usage.cached;
-                total_cache_creation = actual_usage.cache_creation;
-                total_audio_tokens = actual_usage.audio_tokens;
-                total_audio_cached_tokens = actual_usage.audio_cached_tokens;
-                total_image_tokens = actual_usage.image_tokens;
-                total_total_tokens = actual_usage.total;
+            let actual = crate::relay::usage_extractor::parse_usage(&raw_response_text);
+            if actual.prompt > 0 || actual.completion > 0 {
+                cost_usage = actual;
             }
         }
-
-        // 避免出现空计费
-        if total_prompt_tokens == 0 && total_completion_tokens == 0 {
-            total_completion_tokens = 1; // 至少为 1 以防异常
+        if cost_usage.prompt == 0 && cost_usage.completion == 0 {
+            cost_usage.completion = 1;
         }
 
         let req_json = serde_json::from_str::<serde_json::Value>(&request_content_str)
             .unwrap_or(serde_json::json!({}));
         let mut features = crate::relay::usage_extractor::extract_request_features(&req_json);
-        features.cache_creation = if total_cache_creation > 0 {
-            Some(total_cache_creation)
-        } else {
-            None
-        };
-        // 折扣策略: MIN(用户模型折扣, 全站折扣, 等级折扣), 受折扣限价约束
-        let cost_usage = crate::relay::usage_extractor::UsageTokens {
-            prompt: total_prompt_tokens,
-            completion: total_completion_tokens,
-            total: total_total_tokens,
-            cached: total_cached_tokens,
-            cache_creation: total_cache_creation,
-            audio_tokens: total_audio_tokens,
-            audio_cached_tokens: total_audio_cached_tokens,
-            image_tokens: total_image_tokens,
-            web_search: 0,
-        };
+        crate::relay::usage_extractor::enrich_features_from_usage(&mut features, &cost_usage);
         settle_after_stream(
             &state,
             &token,
@@ -235,8 +199,7 @@ pub async fn handle_chat_stream(
             &model,
             db_model.as_ref(),
             &mut db_rule,
-            discount,
-            &model_discounts,
+            &ctx,
             &cost_usage,
             &features,
             smart_router_ep
@@ -274,8 +237,7 @@ pub async fn handle_responses_stream(
     channel: Channel,
     model: String,
     response: ReqwestResponse,
-    discount: f64,
-    model_discounts: Option<String>,
+    ctx: crate::relay::proxy::UserContext,
     request_content_str: String,
     start_time: std::time::Instant,
     upstream_path: String,
@@ -312,58 +274,22 @@ pub async fn handle_responses_stream(
             }
         }
 
-        // 流结束后提取 usage 计费（parse_usage 已兼容 input_tokens/output_tokens）
-        let mut total_prompt_tokens = 0;
-        let mut total_completion_tokens = 0;
-        let mut total_cached_tokens = 0;
-        let mut total_audio_tokens = 0;
-        let mut total_audio_cached_tokens = 0;
-        let mut total_image_tokens = 0;
-        let mut total_total_tokens = 0;
-        let mut actual_usage = crate::relay::usage_extractor::UsageTokens {
-            prompt: 0,
-            completion: 0,
-            total: 0,
-            cached: 0,
-            cache_creation: 0,
-            audio_tokens: 0,
-            audio_cached_tokens: 0,
-            image_tokens: 0,
-            web_search: 0,
-        };
+        // 流结束后提取 usage 计费（parse_usage 已兼容 input_tokens/output_tokens 与 cache_write）
+        let mut actual_usage = crate::relay::usage_extractor::UsageTokens::default();
         if !raw_response_text.is_empty() {
             actual_usage = crate::relay::usage_extractor::parse_usage(&raw_response_text);
-            total_prompt_tokens = actual_usage.prompt;
-            total_completion_tokens = actual_usage.completion;
-            total_cached_tokens = actual_usage.cached;
-            total_audio_tokens = actual_usage.audio_tokens;
-            total_audio_cached_tokens = actual_usage.audio_cached_tokens;
-            total_image_tokens = actual_usage.image_tokens;
-            total_total_tokens = actual_usage.total;
         }
 
         // 避免空计费
-        if total_prompt_tokens == 0 && total_completion_tokens == 0 {
-            total_completion_tokens = 1;
+        if actual_usage.prompt == 0 && actual_usage.completion == 0 {
+            actual_usage.completion = 1;
         }
 
         let req_json = serde_json::from_str::<serde_json::Value>(&request_content_str)
             .unwrap_or(serde_json::json!({}));
         let mut features = crate::relay::usage_extractor::extract_request_features(&req_json);
-        if actual_usage.web_search > 0 {
-            features.web_search = Some(actual_usage.web_search);
-        }
-        let cost_usage = crate::relay::usage_extractor::UsageTokens {
-            prompt: total_prompt_tokens,
-            completion: total_completion_tokens,
-            total: total_total_tokens,
-            cached: total_cached_tokens,
-            cache_creation: 0,
-            audio_tokens: total_audio_tokens,
-            audio_cached_tokens: total_audio_cached_tokens,
-            image_tokens: total_image_tokens,
-            web_search: actual_usage.web_search,
-        };
+        crate::relay::usage_extractor::enrich_features_from_usage(&mut features, &actual_usage);
+        let cost_usage = actual_usage;
         settle_after_stream(
             &state,
             &token,
@@ -371,8 +297,7 @@ pub async fn handle_responses_stream(
             &model,
             db_model.as_ref(),
             &mut db_rule,
-            discount,
-            &model_discounts,
+            &ctx,
             &cost_usage,
             &features,
             None,
@@ -410,8 +335,7 @@ pub async fn handle_image_stream(
     channel: Channel,
     model: String,
     response: ReqwestResponse,
-    discount: f64,
-    model_discounts: Option<String>,
+    ctx: crate::relay::proxy::UserContext,
     request_content_str: String,
     start_time: std::time::Instant,
     upstream_path: String,
@@ -455,11 +379,7 @@ pub async fn handle_image_stream(
         {
             features.image_count = Some(resp_count);
         }
-        features.cache_creation = if usage.cache_creation > 0 {
-            Some(usage.cache_creation)
-        } else {
-            None
-        };
+        crate::relay::usage_extractor::enrich_features_from_usage(&mut features, &usage);
         settle_after_stream(
             &state,
             &token,
@@ -467,8 +387,7 @@ pub async fn handle_image_stream(
             &model,
             db_model.as_ref(),
             &mut db_rule,
-            discount,
-            &model_discounts,
+            &ctx,
             &usage,
             &features,
             smart_router_ep
@@ -507,8 +426,7 @@ pub async fn handle_native_stream(
     channel: Channel,
     model: String,
     response: ReqwestResponse,
-    discount: f64,
-    model_discounts: Option<String>,
+    ctx: crate::relay::proxy::UserContext,
     request_content_str: String,
     start_time: std::time::Instant,
     upstream_path: String,
@@ -547,7 +465,6 @@ pub async fn handle_native_stream(
         let fallback = crate::relay::usage_extractor::parse_usage(&full_response_text);
         let mut prompt_tokens = fallback.prompt;
         let mut completion_tokens = fallback.completion;
-        let cache_creation_tokens = fallback.cache_creation;
 
         // 仍为 0 则估算（兜底：上游未返回任何可识别的 usage 结构）
         if prompt_tokens == 0 && completion_tokens == 0 {
@@ -578,16 +495,12 @@ pub async fn handle_native_stream(
         {
             features.image_count = Some(resp_count);
         }
-        features.cache_creation = if cache_creation_tokens > 0 {
-            Some(cache_creation_tokens)
-        } else {
-            None
-        };
         let cost_usage = crate::relay::usage_extractor::UsageTokens {
             prompt: prompt_tokens,
             completion: completion_tokens,
             ..fallback
         };
+        crate::relay::usage_extractor::enrich_features_from_usage(&mut features, &cost_usage);
         settle_after_stream(
             &state,
             &token,
@@ -595,8 +508,7 @@ pub async fn handle_native_stream(
             &model,
             db_model.as_ref(),
             &mut db_rule,
-            discount,
-            &model_discounts,
+            &ctx,
             &cost_usage,
             &features,
             smart_router_ep

@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -76,13 +76,31 @@ pub async fn consume_async_or_sync(
     {
         Ok(v) => v,
         Err(e) => {
+            // 在途结算：中间件已放行，强制记入以免钱包已扣而令牌未计
             tracing::warn!(
-                "[TokenQuota] 内存限额拒绝 token_id={} amount={:.6}: {}",
+                "[TokenQuota] 限额已满仍强制落账 令牌ID={} 金额={:.6}: {}",
                 token.id,
                 amount,
                 e
             );
-            return Ok(0.0);
+            match state
+                .quota_memory
+                .force_incr_ensured(&state.db, token.id, amount, timedisplay, &limits)
+                .await
+            {
+                Ok(v) => v,
+                Err(e2) => {
+                    tracing::error!(
+                        "[TokenQuota] 强制落账失败 令牌ID={}: {}，回退同步写库",
+                        token.id,
+                        e2
+                    );
+                    let (day, week, month) = crate::models::quota_period_keys(timedisplay);
+                    consume_db_with_keys(&state.db, tx, token.id, amount, &day, &week, &month)
+                        .await?;
+                    return Ok(amount);
+                }
+            }
         }
     };
     if incr.amount <= 0.0 {
@@ -101,7 +119,7 @@ pub async fn consume_async_or_sync(
     }
 
     tracing::warn!(
-        "[TokenQuota] BillingPipeline 已满，回退同步落库 token_id={} amount={:.6}",
+        "[TokenQuota] BillingPipeline 已满，回退同步落库 令牌ID={} 金额={:.6}",
         token.id,
         incr.amount
     );
@@ -183,7 +201,7 @@ pub async fn consume(
     let add = allowed_consume_amount(&token, amount, &now_day, &now_week, &now_month);
     if add <= 0.0 {
         tracing::warn!(
-            "[TokenQuota] 跳过累加：令牌额度已耗尽 token_id={}, amount={:.6}",
+            "[TokenQuota] 跳过累加：令牌额度已耗尽 令牌ID={}, 金额={:.6}",
             token_id,
             amount
         );
@@ -233,8 +251,17 @@ pub async fn apply_delta_with_memory(
         if added > 0.0 {
             let day = crate::time_system::local_period_keys(tz_name).day;
             state.quota_memory.apply_incr(token_id, &day, added);
+            return Ok(added);
         }
-        Ok(added)
+        // 限额已满仍强制写库；丢弃内存 slot，下次请求从 DB hydrate，避免漏加或双加
+        tracing::warn!(
+            "[TokenQuota] 结算追加限额已满仍强制落账 令牌ID={} 金额={:.6}",
+            token_id,
+            delta
+        );
+        consume_db_only(&state.db, tx, token_id, delta, tz_name).await?;
+        state.quota_memory.invalidate_token(token_id);
+        Ok(delta)
     } else if delta < 0.0 {
         let amount = -delta;
         refund(&state.db, tx, token_id, amount, tz_name).await?;

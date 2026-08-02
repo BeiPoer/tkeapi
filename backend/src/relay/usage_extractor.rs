@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -45,15 +45,97 @@ pub struct ExtractedFeatures {
     pub web_search: Option<i32>,
 }
 
+/// content[].type 是否包含指定关键字
+#[inline]
+fn type_contains(item: &Value, needle: &str) -> bool {
+    item.get("type")
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| t.contains(needle))
+}
+
+/// 腾讯云 FileInfos Usage：首帧/末帧/参考图
+#[inline]
+fn is_tencent_ref_usage(usage: &str) -> bool {
+    usage.eq_ignore_ascii_case("FirstFrame")
+        || usage.eq_ignore_ascii_case("LastFrame")
+        || usage.eq_ignore_ascii_case("Reference")
+}
+
+#[inline]
+fn nonempty_str_field(obj: &Value, key: &str) -> bool {
+    obj.get(key)
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+}
+
+#[inline]
+fn nonempty_array_field(obj: &Value, key: &str) -> bool {
+    obj.get(key)
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| !a.is_empty())
+}
+
+fn set_str_if_none(dst: &mut Option<String>, val: Option<&str>) {
+    if dst.is_none() {
+        if let Some(s) = val.filter(|s| !s.is_empty()) {
+            *dst = Some(s.to_string());
+        }
+    }
+}
+
+fn set_f64_if_none(dst: &mut Option<f64>, val: Option<f64>) {
+    if dst.is_none() {
+        if let Some(v) = val {
+            *dst = Some(v);
+        }
+    }
+}
+
+/// 扫描 content 数组：可分别开关 video/audio（Responses input 仅检 audio）
+fn scan_typed_content(
+    arr: Option<&Vec<Value>>,
+    video: bool,
+    audio: bool,
+    has_video: &mut bool,
+    has_audio: &mut bool,
+) {
+    let Some(arr) = arr else { return };
+    for item in arr {
+        if video && type_contains(item, "video") {
+            *has_video = true;
+        }
+        if audio && type_contains(item, "audio") {
+            *has_audio = true;
+        }
+    }
+}
+
+/// 腾讯云参考图数量：FileInfos 匹配项 + 非空 LastFrameUrl
+fn count_tencent_image_refs(body: &Value) -> i32 {
+    let mut n = body
+        .get("FileInfos")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|item| {
+                    is_tencent_ref_usage(item.get("Usage").and_then(|u| u.as_str()).unwrap_or(""))
+                })
+                .count() as i32
+        })
+        .unwrap_or(0);
+    if nonempty_str_field(body, "LastFrameUrl") {
+        n += 1;
+    }
+    n
+}
+
 pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
     let mut has_video = false;
     let mut has_audio = false;
     let mut duration_seconds = None;
     let mut resolution = None;
-    let mut prompt_extend = false;
 
-    // Check service tier (支持火山等在根或者parameters内)
-    // 腾讯云 OutputConfig.OffPeak=Enabled 映射为 flex
+    // service_tier：根 / parameters；腾讯云 OffPeak=Enabled → flex
     let service_tier = body
         .get("service_tier")
         .or_else(|| body.get("parameters").and_then(|p| p.get("service_tier")))
@@ -66,139 +148,109 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
                 .map(|_| "flex".to_string())
         });
 
-    // Check OpenAI modalities: ["audio", ...]
-    if let Some(mods) = body.get("modalities").and_then(|m| m.as_array()) {
-        for m in mods {
-            if m.as_str() == Some("audio") {
-                has_audio = true;
-            }
-        }
-    }
+    has_audio |= body
+        .get("modalities")
+        .and_then(|m| m.as_array())
+        .is_some_and(|mods| mods.iter().any(|m| m.as_str() == Some("audio")));
+    has_audio |= body.get("generate_audio").and_then(|v| v.as_bool()) == Some(true);
 
-    // Volcengine generate_audio flag
-    if let Some(b) = body.get("generate_audio").and_then(|v| v.as_bool()) {
-        if b {
-            has_audio = true;
-        }
-    }
-
-    // Check "content" array for Volcengine/OpenAI multimodal requests (chat 接口)
     if let Some(msgs) = body.get("messages").and_then(|m| m.as_array()) {
         for msg in msgs {
-            if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
-                for item in content {
-                    if let Some(t) = item.get("type").and_then(|v| v.as_str()) {
-                        if t == "video_url" || t == "video" || t.contains("video") {
-                            has_video = true;
-                        }
-                        if t == "input_audio" || t == "audio_url" || t.contains("audio") {
-                            has_audio = true;
-                        }
-                    }
-                }
-            }
+            scan_typed_content(
+                msg.get("content").and_then(|c| c.as_array()),
+                true,
+                true,
+                &mut has_video,
+                &mut has_audio,
+            );
         }
     }
-
-    // 顶层 videos 数组（OpenAI 风格扁平请求格式，如视频生成）
-    if body
-        .get("videos")
-        .and_then(|v| v.as_array())
-        .map_or(false, |a| !a.is_empty())
-    {
-        has_video = true;
-    }
-
-    // 顶层 content 数组（火山方舟格式）
-    if let Some(content) = body.get("content").and_then(|c| c.as_array()) {
-        for item in content {
-            if let Some(t) = item.get("type").and_then(|v| v.as_str()) {
-                if t.contains("video") {
-                    has_video = true;
-                }
-                if t.contains("audio") {
-                    has_audio = true;
-                }
-            }
-        }
-    }
-
-    // OpenAI Responses API / 火山方舟 response 接口: input[].content[].type 检测音频输入
+    has_video |= nonempty_array_field(body, "videos");
+    scan_typed_content(
+        body.get("content").and_then(|c| c.as_array()),
+        true,
+        true,
+        &mut has_video,
+        &mut has_audio,
+    );
+    // Responses / 方舟 response：input[].content 仅检 audio（保持原语义）
     if let Some(input_arr) = body.get("input").and_then(|i| i.as_array()) {
         for item in input_arr {
-            if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
-                for ci in content {
-                    if let Some(t) = ci.get("type").and_then(|v| v.as_str()) {
-                        if t == "input_audio" || t.contains("audio") {
-                            has_audio = true;
-                        }
-                    }
-                }
-            }
+            scan_typed_content(
+                item.get("content").and_then(|c| c.as_array()),
+                false,
+                true,
+                &mut has_video,
+                &mut has_audio,
+            );
         }
     }
+    // DashScope input.media：仅检 video
+    scan_typed_content(
+        body.get("input")
+            .and_then(|i| i.get("media"))
+            .and_then(|m| m.as_array()),
+        true,
+        false,
+        &mut has_video,
+        &mut has_audio,
+    );
 
-    // Top-level or final_result nested parameters (兼容视频 GET 两种响应格式)
-    let sources = [body as &Value, body.get("final_result").unwrap_or(body)];
-    for src in &sources {
-        if resolution.is_none() {
-            if let Some(res) = src
-                .get("resolution")
-                .and_then(|r| r.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                resolution = Some(res.to_string());
-            }
-        }
-        if duration_seconds.is_none() {
-            if let Some(dur) = src.get("duration").and_then(|d| d.as_f64()) {
-                duration_seconds = Some(dur);
-            }
-        }
+    // resolution / duration：根、final_result、task、parameters、OutputConfig
+    for src in [
+        body,
+        body.get("final_result").unwrap_or(body),
+        body.get("task").unwrap_or(body),
+    ] {
+        set_str_if_none(
+            &mut resolution,
+            src.get("resolution").and_then(|r| r.as_str()),
+        );
+        set_f64_if_none(
+            &mut duration_seconds,
+            src.get("duration").and_then(parse_json_f64),
+        );
     }
-
-    // DashScope 格式：从 parameters 内提取 resolution/duration
     if let Some(params) = body.get("parameters") {
-        if resolution.is_none() {
-            if let Some(res) = params
-                .get("resolution")
-                .and_then(|r| r.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                resolution = Some(res.to_string());
-            }
-        }
-        if duration_seconds.is_none() {
-            if let Some(dur) = params.get("duration").and_then(|d| d.as_f64()) {
-                duration_seconds = Some(dur);
-            }
-        }
-        if params
-            .get("prompt_extend")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            prompt_extend = true;
-        }
+        set_str_if_none(
+            &mut resolution,
+            params.get("resolution").and_then(|r| r.as_str()),
+        );
+        set_f64_if_none(
+            &mut duration_seconds,
+            params.get("duration").and_then(|d| d.as_f64()),
+        );
     }
+    let output_config = body.get("OutputConfig");
+    set_str_if_none(
+        &mut resolution,
+        output_config
+            .and_then(|oc| oc.get("Resolution"))
+            .and_then(|r| r.as_str()),
+    );
+    set_f64_if_none(
+        &mut duration_seconds,
+        output_config
+            .and_then(|oc| oc.get("Duration"))
+            .and_then(|d| d.as_f64()),
+    );
 
-    // 根节点的 prompt_extend (OpenAI 兼容扩展)
-    if body
+    let prompt_extend = body
         .get("prompt_extend")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
-    {
-        prompt_extend = true;
-    }
+        || body
+            .get("parameters")
+            .and_then(|p| p.get("prompt_extend"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-    // 视频参数：mode（生成模式）和 sound（有声/无声）
     let mode = body
         .get("mode")
         .and_then(|v| v.as_str())
         .map(|s| s.to_lowercase());
-    // 声音优先级：generate_audio（火山方舟布尔开关）> sound（可灵字符串参数）
+    // generate_audio 优先于 sound
     let sound = if let Some(ga) = body.get("generate_audio") {
-        // generate_audio 优先级最高：布尔值或字符串 "true"/"false" → 覆盖 sound
         let enabled = ga.as_bool().unwrap_or(false) || ga.as_str() == Some("true");
         Some(if enabled {
             "on".to_string()
@@ -211,43 +263,18 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
             .map(|s| s.to_lowercase())
     };
 
-    // 检测参考图（用于区分文生图/图生图计费）
-    // 支持可灵（image/image_list/subject_image_list/image_reference）、OpenAI 兼容格式（image_urls）及腾讯云（FileInfos）
-    let has_image_ref = body.get("image").map_or(false, |v| {
-        v.as_str().map_or(false, |s| !s.is_empty())
+    let tencent_refs = count_tencent_image_refs(body);
+    let mut has_image_ref = body.get("image").is_some_and(|v| {
+        v.as_str().is_some_and(|s| !s.is_empty())
             || v.is_object()
-            || v.as_array().map_or(false, |a| !a.is_empty())
-    }) || body
-        .get("image_urls")
-        .and_then(|v| v.as_array())
-        .map_or(false, |a| !a.is_empty())
-        || body
-            .get("image_list")
-            .and_then(|v| v.as_array())
-            .map_or(false, |a| !a.is_empty())
-        || body
-            .get("subject_image_list")
-            .and_then(|v| v.as_array())
-            .map_or(false, |a| !a.is_empty())
-        || body.get("image_reference").map_or(false, |v| !v.is_null())
-        || body
-            .get("LastFrameUrl")
-            .map_or(false, |v| v.as_str().map_or(false, |s| !s.is_empty()))
-        || body
-            .get("FileInfos")
-            .and_then(|v| v.as_array())
-            .map_or(false, |a| {
-                a.iter().any(|item| {
-                    let usage = item.get("Usage").and_then(|u| u.as_str()).unwrap_or("");
-                    usage.eq_ignore_ascii_case("FirstFrame")
-                        || usage.eq_ignore_ascii_case("LastFrame")
-                        || usage.eq_ignore_ascii_case("Reference")
-                })
-            });
+            || v.as_array().is_some_and(|a| !a.is_empty())
+    }) || nonempty_array_field(body, "image_urls")
+        || nonempty_array_field(body, "image_list")
+        || nonempty_array_field(body, "subject_image_list")
+        || body.get("image_reference").is_some_and(|v| !v.is_null())
+        || tencent_refs > 0;
 
-    // 参考图数量（用于腾讯云 Vidu 图片计费维度区分）
-    let image_ref_count: Option<i32> = {
-        // image 可能是字符串（1张）或数组
+    let mut image_ref_count = {
         let from_image = body
             .get("image")
             .map(|v| {
@@ -260,56 +287,38 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
                 }
             })
             .unwrap_or(0);
-        let mut count = if from_image > 0 {
+        let count = if from_image > 0 {
             from_image
         } else {
-            body.get("images")
+            let from_lists = body
+                .get("images")
                 .or(body.get("image_urls"))
                 .or(body.get("image_list"))
                 .and_then(|v| v.as_array())
                 .map(|a| a.len() as i32)
-                .unwrap_or(0)
-        };
-        if count == 0 {
-            let mut file_infos_count = body
-                .get("FileInfos")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter(|item| {
-                            let usage = item.get("Usage").and_then(|u| u.as_str()).unwrap_or("");
-                            usage.eq_ignore_ascii_case("FirstFrame")
-                                || usage.eq_ignore_ascii_case("LastFrame")
-                                || usage.eq_ignore_ascii_case("Reference")
-                        })
-                        .count() as i32
-                })
                 .unwrap_or(0);
-
-            if body
-                .get("LastFrameUrl")
-                .map_or(false, |v| v.as_str().map_or(false, |s| !s.is_empty()))
-            {
-                file_infos_count += 1;
+            if from_lists > 0 {
+                from_lists
+            } else {
+                tencent_refs
             }
-            count = file_infos_count;
-        }
-        if count > 0 {
-            Some(count)
-        } else {
-            None
-        }
+        };
+        (count > 0).then_some(count)
     };
 
-    // DashScope 格式：从 usage 中提取 duration 和 SR（异步任务结果响应）
-    // 注意：usage 代表真实的后台消耗，必须无条件覆盖从 input 或 parameters 提取的可能不精确的值
+    // usage / task.usage 覆盖时长、分辨率、输入图数
     let mut input_images = None;
-    if let Some(usage) = body.get("usage") {
-        if let Some(dur) = usage.get("duration").and_then(|d| d.as_f64()) {
+    if let Some(usage) = body
+        .get("usage")
+        .or_else(|| body.get("task").and_then(|t| t.get("usage")))
+    {
+        if let Some(dur) = usage
+            .get("total_seconds")
+            .and_then(parse_json_f64)
+            .or_else(|| usage.get("duration").and_then(parse_json_f64))
+        {
             duration_seconds = Some(dur);
         }
-
-        // SR 可能是纯数字（如 720）或字符串（如 "720P"）
         if let Some(sr) = usage.get("SR") {
             if let Some(n) = sr.as_i64() {
                 resolution = Some(format!("{}p", n));
@@ -317,96 +326,54 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
                 resolution = Some(s.to_string());
             }
         }
-
-        // 提取火山图像新模型的 input_images 特征
-        if let Some(ii) = usage.get("input_images").and_then(|v| v.as_i64()) {
-            input_images = Some(ii as i32);
-        }
-    }
-
-    // 备用提取：如果根节点或 parameters 里面有 input_images 也可以作为备用提取
-    if input_images.is_none() {
-        if let Some(ii) = body.get("input_images").and_then(|v| v.as_i64()) {
-            input_images = Some(ii as i32);
-        } else if let Some(ii) = body
-            .get("parameters")
-            .and_then(|p| p.get("input_images"))
+        if let Some(ii) = usage
+            .get("input_images")
+            .or_else(|| usage.get("image_count"))
             .and_then(|v| v.as_i64())
         {
             input_images = Some(ii as i32);
         }
     }
-
-    // DashScope 格式：从 input.media / input.image_url 检测视频/图片输入
-    if let Some(input) = body.get("input") {
-        if let Some(media) = input.get("media").and_then(|m| m.as_array()) {
-            for item in media {
-                if let Some(t) = item.get("type").and_then(|v| v.as_str()) {
-                    if t == "video" {
-                        has_video = true;
-                    }
-                }
-            }
-        }
+    if input_images.is_none() {
+        input_images = body
+            .get("input_images")
+            .or_else(|| body.get("parameters").and_then(|p| p.get("input_images")))
+            .and_then(|v| v.as_i64())
+            .map(|ii| ii as i32);
     }
 
-    // 腾讯云 OutputConfig.Resolution 提取（PascalCase 参数）
-    if resolution.is_none() {
-        if let Some(res) = body
-            .get("OutputConfig")
-            .and_then(|oc| oc.get("Resolution"))
-            .and_then(|r| r.as_str())
-        {
-            resolution = Some(res.to_string());
-        }
-    }
-    // 腾讯云 OutputConfig.Duration 提取
-    if duration_seconds.is_none() {
-        if let Some(dur) = body
-            .get("OutputConfig")
-            .and_then(|oc| oc.get("Duration"))
-            .and_then(|d| d.as_f64())
-        {
-            duration_seconds = Some(dur);
-        }
-    }
-    // 兼容即梦等火山引擎视频生成：从真实上游出参中的 frames 精准换算为时长
+    // 即梦等：frames → 时长
     if duration_seconds.is_none() {
         if let Some(frames) = body
             .get("frames")
             .and_then(|f| f.as_f64().or_else(|| f.as_i64().map(|i| i as f64)))
         {
             if frames > 0.0 {
-                let dur = if (frames - 121.0).abs() < 1e-3 {
+                duration_seconds = Some(if (frames - 121.0).abs() < 1e-3 {
                     5.0
                 } else if (frames - 241.0).abs() < 1e-3 {
                     10.0
                 } else {
                     (frames - 1.0) / 24.0
-                };
-                duration_seconds = Some(dur);
+                });
             }
         }
     }
-    // 腾讯云 FileInfos 中包含 Category=Video 且 Usage 是 Reference 的项视为视频输入
     if let Some(fi_arr) = body.get("FileInfos").and_then(|v| v.as_array()) {
-        for fi in fi_arr {
-            let category = fi.get("Category").and_then(|c| c.as_str());
-            let usage = fi.get("Usage").and_then(|u| u.as_str()).unwrap_or("");
-            if category == Some("Video") && usage.eq_ignore_ascii_case("Reference") {
-                has_video = true;
-                break;
-            }
-        }
+        has_video |= fi_arr.iter().any(|fi| {
+            fi.get("Category").and_then(|c| c.as_str()) == Some("Video")
+                && fi
+                    .get("Usage")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .eq_ignore_ascii_case("Reference")
+        });
     }
 
-    // 分辨率统一规范化，确保与后台计费阶梯匹配一致
     if let Some(ref mut res) = resolution {
         *res = normalize_resolution_label(res);
     }
 
-    // 图片 size 参数提取（用于按分辨率像素计费）
-    // 兼容普通格式以及火山/OpenAI data[0].size 结构
     let size = body
         .get("size")
         .and_then(|v| v.as_str())
@@ -418,8 +385,6 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
                 .and_then(|s| s.as_str())
         })
         .map(|s| s.to_string());
-
-    // 画质等级提取（用于画质倍率计费）
     let quality = body
         .get("quality")
         .and_then(|v| v.as_str())
@@ -429,8 +394,6 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
                 .and_then(|v| v.as_str())
         })
         .map(|s| s.to_lowercase());
-
-    // 语音合成文本字符数提取：OpenAI input / 火山 req_params.text / 火山旧版 request.text
     let text_characters = body
         .get("input")
         .and_then(|v| v.as_str())
@@ -445,8 +408,6 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
                 .and_then(|v| v.as_str())
         })
         .map(|s| s.chars().count() as i32);
-
-    // 图片生成数量: 从请求体的 n 参数 或腾讯云 OutputConfig.OutputImageCount 提取
     let image_count = body
         .get("n")
         .and_then(|v| v.as_i64())
@@ -456,26 +417,17 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
                 .and_then(|v| v.as_i64())
         })
         .map(|v| v.max(1) as i32);
-
-    // 帧率提取：从请求体直接提取 fps 帧率值，用于火山引擎画质增强视频生成等计费场景
     let fps = body.get("fps").and_then(|v| v.as_f64());
-
     let version = body
         .get("version")
         .and_then(|v| v.as_str())
         .map(|s| s.to_lowercase());
 
-    // 严谨修复：若 resolution 依然是 None，且 size 存在，则自适应从 size 中解析出分辨率等级作为兜底（例如将 "2048x1152" 转换为 "2k"），确保同步/流式计费和异步结算保持完全一致的精度
-    let mut resolution = resolution;
     if resolution.is_none() {
         if let Some(ref s) = size {
             resolution = parse_pixel_resolution(s);
         }
     }
-
-    // 火山特征规范化：将 input_images 赋值给 image_ref_count
-    let mut image_ref_count = image_ref_count;
-    let mut has_image_ref = has_image_ref;
     if let Some(ii) = input_images {
         image_ref_count = Some(ii);
         if ii > 0 {
@@ -543,6 +495,48 @@ impl ExtractedFeatures {
         }
         if other.image_count.is_some() {
             self.image_count = other.image_count;
+        }
+    }
+
+    /// 轮询结算：叠加终态响应特征，并应用厂商覆盖（顺序与历史一致，不可打乱）
+    pub fn merge_settlement_response(
+        &mut self,
+        resp_json: &Value,
+        store_body: &str,
+        category: &str,
+    ) {
+        // 火山 MediaKit 终态 result（时长/分辨率/帧率）；fps 不经 merge，需先写入
+        if let Some(result) = resp_json.get("result") {
+            if let Some(duration) = result.get("duration").and_then(|v| v.as_f64()) {
+                self.duration_seconds = Some(duration);
+            }
+            if let Some(res) = result.get("resolution").and_then(|v| v.as_str()) {
+                self.resolution = Some(res.to_string());
+            }
+            if let Some(fps) = result.get("fps").and_then(|v| v.as_f64()) {
+                self.fps = Some(fps);
+            } else if let Some(fps) = result.get("fps").and_then(|v| v.as_i64()) {
+                self.fps = Some(fps as f64);
+            }
+        }
+        // 合并终态通用特征（如 input_images / size）；已有 resolution 不被覆盖
+        self.merge(extract_request_features(resp_json));
+        // 厂商终态覆盖放在 merge 之后，确保不被冲掉
+        if let Some(d) = extract_kling_video_duration(resp_json) {
+            self.duration_seconds = Some(d);
+        }
+        let (tc_dur, tc_res) = extract_tencent_vod_video_settlement(resp_json);
+        if let Some(d) = tc_dur {
+            self.duration_seconds = Some(d);
+        }
+        if let Some(r) = tc_res {
+            self.resolution = Some(r);
+        }
+        if category.contains("视频") && self.duration_seconds.is_none() {
+            self.duration_seconds = Some(5.0);
+        }
+        if let Some(n) = count_response_images(store_body) {
+            self.image_count = Some(n);
         }
     }
 }
@@ -774,12 +768,17 @@ fn count_images_from_arrays(v: &Value) -> Option<i32> {
     }
 }
 
+#[derive(Debug, Clone, Default)]
 pub struct UsageTokens {
     pub prompt: i32,
     pub completion: i32,
     pub total: i32,
-    /// 缓存命中的 Token 数量（属于 prompt 的子集）
+    /// 上游是否显式返回了 total_tokens（parse_usage 回填的不算；供 is_openai_format 判定）
+    pub has_total_tokens: bool,
+    /// 缓存命中 Token（OpenAI：prompt 子集；Anthropic：独立于 input_tokens）
     pub cached: i32,
+    /// 缓存写入 Token（OpenAI GPT-5.6+；Chat: prompt_tokens_details / Responses: input_tokens_details）
+    pub cache_write: i32,
     /// Claude 缓存创建 Token 数量（5m+1h 合并，不属于 prompt 子集）
     pub cache_creation: i32,
     /// 音频输入 Token 数量（属于 prompt 的子集，用于豆包聊天分离计价）
@@ -790,6 +789,44 @@ pub struct UsageTokens {
     pub image_tokens: i32,
     /// 联网搜索次数
     pub web_search: i32,
+}
+
+/// Chat Completions 与 Responses 的 input/prompt details 双路径取较大值
+fn max_usage_detail_i32(usage: &Value, key: &str) -> i32 {
+    let from = |obj: &str| {
+        usage
+            .get(obj)
+            .and_then(|d| d.get(key))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32
+    };
+    from("prompt_tokens_details").max(from("input_tokens_details"))
+}
+
+#[inline]
+fn assign_max(dst: &mut i32, v: i32) {
+    if v > *dst {
+        *dst = v;
+    }
+}
+
+/// 记录上游显式 total（回填不算）；供计费 is_openai_format 判定
+#[inline]
+fn assign_upstream_total(u: &mut UsageTokens, total: i32) {
+    if total > 0 {
+        assign_max(&mut u.total, total);
+        u.has_total_tokens = true;
+    }
+}
+
+/// 将 usage 中的计费特征写回 ExtractedFeatures（流式/非流式共用）
+pub fn enrich_features_from_usage(features: &mut ExtractedFeatures, usage: &UsageTokens) {
+    if usage.cache_creation > 0 {
+        features.cache_creation = Some(usage.cache_creation);
+    }
+    if usage.web_search > 0 {
+        features.web_search = Some(usage.web_search);
+    }
 }
 
 /// 从 usage JSON 对象提取 token 字段，取大值写入 UsageTokens（初始 0 时等同赋值，
@@ -806,22 +843,11 @@ fn apply_usage_max(u: &mut UsageTokens, usage: &Value) {
         .get("input_tokens")
         .and_then(|v| v.as_i64())
         .unwrap_or(0) as i32;
-    let img_tokens = usage
+    let img_tokens = (usage
         .get("image_tokens")
         .and_then(|v| v.as_i64())
-        .or_else(|| {
-            usage
-                .get("prompt_tokens_details")
-                .and_then(|d| d.get("image_tokens"))
-                .and_then(|v| v.as_i64())
-        })
-        .or_else(|| {
-            usage
-                .get("input_tokens_details")
-                .and_then(|d| d.get("image_tokens"))
-                .and_then(|v| v.as_i64())
-        })
-        .unwrap_or(0) as i32;
+        .unwrap_or(0) as i32)
+        .max(max_usage_detail_i32(usage, "image_tokens"));
     let p = p_std.max(p_alt);
 
     let c_std = usage
@@ -833,68 +859,30 @@ fn apply_usage_max(u: &mut UsageTokens, usage: &Value) {
         .and_then(|v| v.as_i64())
         .unwrap_or(0) as i32;
     let c = c_std.max(c_alt);
-    if p > u.prompt {
-        u.prompt = p;
-    }
-    if c > u.completion {
-        u.completion = c;
-    }
-    if img_tokens > u.image_tokens {
-        u.image_tokens = img_tokens;
-    }
-    let t = usage
-        .get("total_tokens")
-        .and_then(|val| val.as_i64())
-        .unwrap_or(0) as i32;
-    if t > u.total {
-        u.total = t;
-    }
-    // 独立提取两组详情中的缓存 token 后取较大值，避免 prompt_tokens_details 存在但不含
-    // cached_tokens 时 or_else 不回退到 input_tokens_details 的问题（与 prompt/input 同理）
-    let cached_std = usage
-        .get("prompt_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|val| val.as_i64())
-        .unwrap_or(0) as i32;
-    let cached_alt = usage
-        .get("input_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|val| val.as_i64())
-        .unwrap_or(0) as i32;
-    let cached = cached_std.max(cached_alt);
-    if cached > u.cached {
-        u.cached = cached;
-    }
-    // 提取音频输入 token（兼容 prompt_tokens_details / input_tokens_details 两种命名）
-    let audio_std = usage
-        .get("prompt_tokens_details")
-        .and_then(|d| d.get("audio_tokens"))
-        .and_then(|val| val.as_i64())
-        .unwrap_or(0) as i32;
-    let audio_alt = usage
-        .get("input_tokens_details")
-        .and_then(|d| d.get("audio_tokens"))
-        .and_then(|val| val.as_i64())
-        .unwrap_or(0) as i32;
-    let audio = audio_std.max(audio_alt);
-    if audio > u.audio_tokens {
-        u.audio_tokens = audio;
-    }
-    // 提取音频缓存命中 token
-    let audio_cached_std = usage
-        .get("prompt_tokens_details")
-        .and_then(|d| d.get("audio_cached_tokens"))
-        .and_then(|val| val.as_i64())
-        .unwrap_or(0) as i32;
-    let audio_cached_alt = usage
-        .get("input_tokens_details")
-        .and_then(|d| d.get("audio_cached_tokens"))
-        .and_then(|val| val.as_i64())
-        .unwrap_or(0) as i32;
-    let audio_cached = audio_cached_std.max(audio_cached_alt);
-    if audio_cached > u.audio_cached_tokens {
-        u.audio_cached_tokens = audio_cached;
-    }
+    assign_max(&mut u.prompt, p);
+    assign_max(&mut u.completion, c);
+    assign_max(&mut u.image_tokens, img_tokens);
+    assign_upstream_total(
+        u,
+        usage
+            .get("total_tokens")
+            .and_then(|val| val.as_i64())
+            .unwrap_or(0) as i32,
+    );
+    // Chat Completions: prompt_tokens_details；Responses: input_tokens_details
+    assign_max(&mut u.cached, max_usage_detail_i32(usage, "cached_tokens"));
+    assign_max(
+        &mut u.cache_write,
+        max_usage_detail_i32(usage, "cache_write_tokens"),
+    );
+    assign_max(
+        &mut u.audio_tokens,
+        max_usage_detail_i32(usage, "audio_tokens"),
+    );
+    assign_max(
+        &mut u.audio_cached_tokens,
+        max_usage_detail_i32(usage, "audio_cached_tokens"),
+    );
     // Claude 缓存创建（APImart: 5m+1h 合并，兜底: Claude 原生 cache_creation_input_tokens）
     let cc_5m = usage
         .get("claude_cache_creation_5_m_tokens")
@@ -912,39 +900,32 @@ fn apply_usage_max(u: &mut UsageTokens, usage: &Value) {
             .and_then(|v| v.as_i64())
             .unwrap_or(0) as i32
     };
-    if cc > u.cache_creation {
-        u.cache_creation = cc;
-    }
-    // Claude 缓存读取兜底（Claude 原生 cache_read_input_tokens）
+    assign_max(&mut u.cache_creation, cc);
+    // 根级缓存命中兜底：Claude cache_read_input_tokens / DeepSeek prompt_cache_hit_tokens
     if u.cached == 0 {
-        u.cached = usage
+        let claude_hit = usage
             .get("cache_read_input_tokens")
             .and_then(|v| v.as_i64())
             .unwrap_or(0) as i32;
+        let deepseek_hit = usage
+            .get("prompt_cache_hit_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
+        u.cached = claude_hit.max(deepseek_hit);
     }
     // 联网搜索次数提取（Responses API 等）
-    let ws = usage
-        .get("tool_usage")
-        .and_then(|t| t.get("web_search"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0) as i32;
-    if ws > u.web_search {
-        u.web_search = ws;
-    }
+    assign_max(
+        &mut u.web_search,
+        usage
+            .get("tool_usage")
+            .and_then(|t| t.get("web_search"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32,
+    );
 }
 
 pub fn parse_usage(response: &str) -> UsageTokens {
-    let mut u = UsageTokens {
-        prompt: 0,
-        completion: 0,
-        total: 0,
-        cached: 0,
-        cache_creation: 0,
-        audio_tokens: 0,
-        audio_cached_tokens: 0,
-        image_tokens: 0,
-        web_search: 0,
-    };
+    let mut u = UsageTokens::default();
 
     let mut extract_from_value = |v: &Value| -> bool {
         let mut found = false;
@@ -973,7 +954,7 @@ pub fn parse_usage(response: &str) -> UsageTokens {
                 .get("totalTokenCount")
                 .and_then(|val| val.as_i64())
                 .unwrap_or(0) as i32;
-            u.total = total;
+            assign_upstream_total(&mut u, total);
             u.completion = if total >= u.prompt {
                 total - u.prompt
             } else {
@@ -1026,6 +1007,7 @@ pub fn parse_usage(response: &str) -> UsageTokens {
         }
     }
 
+    // 下游仍依赖 total；缺省时回填。has_total_tokens 保持 false，避免误判 OpenAI 子集语义
     if u.total == 0 {
         u.total = u.prompt + u.completion;
     }
@@ -1090,7 +1072,7 @@ pub fn extract_usage_json_string(response: &str) -> Option<String> {
 
 /// 从可灵视频终态响应中提取实际生成时长（秒）。
 /// 路径: data.task_result.videos[0].duration（字符串，如 "5.1"）
-pub fn extract_kling_video_duration(resp: &Value) -> Option<f64> {
+fn extract_kling_video_duration(resp: &Value) -> Option<f64> {
     resp.pointer("/data/task_result/videos/0/duration")
         .and_then(parse_json_f64)
         .filter(|&d| d > 0.0)
@@ -1111,7 +1093,7 @@ fn tencent_vod_aigc_video_task(resp: &Value) -> Option<&Value> {
 
 /// 腾讯 VOD 生视频终态结算：仅用产出 `MetaData.Duration/Width/Height`（短边定档）。
 /// 不读 `Resolution`（终态常为空，且请求侧可能非法）。
-pub fn extract_tencent_vod_video_settlement(resp: &Value) -> (Option<f64>, Option<String>) {
+fn extract_tencent_vod_video_settlement(resp: &Value) -> (Option<f64>, Option<String>) {
     let Some(meta) =
         tencent_vod_aigc_video_task(resp).and_then(|t| t.pointer("/Output/FileInfos/0/MetaData"))
     else {

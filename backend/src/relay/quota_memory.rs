@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -42,12 +42,6 @@ fn limit_opt(limit: f64) -> Option<f64> {
 
 #[derive(Debug)]
 struct QuotaSlot {
-    #[allow(dead_code)]
-    day: String,
-    #[allow(dead_code)]
-    week: String,
-    #[allow(dead_code)]
-    month: String,
     daily_used: AtomicU64,
     weekly_used: AtomicU64,
     monthly_used: AtomicU64,
@@ -65,10 +59,6 @@ pub struct QuotaLimits {
     pub monthly_quota_limit: f64,
     pub quota_limit: f64,
     pub quota_used: f64,
-    pub weekly_quota_used: f64,
-    pub monthly_quota_used: f64,
-    pub last_reset_week: Option<String>,
-    pub last_reset_month: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -254,6 +244,37 @@ impl MemoryQuotaGuard {
         }
     }
 
+    /// 结算强制记入：跳过限额校验（中间件已放行的在途请求），保证与钱包扣费对齐。
+    pub async fn force_incr_ensured(
+        &self,
+        db: &Database,
+        token_id: i64,
+        amount: f64,
+        timedisplay: &str,
+        limits: &QuotaLimits,
+    ) -> Result<IncrResult, QuotaMemoryError> {
+        if amount <= 0.0 || token_id <= 0 {
+            return Ok(IncrResult {
+                amount: 0.0,
+                day: String::new(),
+                week: String::new(),
+                month: String::new(),
+            });
+        }
+        let keys = local_period_keys(timedisplay);
+        let key = Self::slot_key(token_id, &keys.day);
+        if !self.slots.contains_key(&key) {
+            self.hydrate_slot(db, token_id, &keys, limits).await?;
+        }
+        self.apply_incr(token_id, &keys.day, amount);
+        Ok(IncrResult {
+            amount,
+            day: keys.day,
+            week: keys.week,
+            month: keys.month,
+        })
+    }
+
     pub fn apply_refund(&self, token_id: i64, local_day: &str, amount: f64) {
         if amount <= 0.0 {
             return;
@@ -267,7 +288,7 @@ impl MemoryQuotaGuard {
             Self::saturating_sub(&slot.total_used, sub);
         } else {
             tracing::warn!(
-                "[QuotaMemory] apply_refund miss token_id={} day={} amount={:.6}（未 hydrate，已跳过）",
+                "[QuotaMemory] apply_refund 未命中 令牌ID={} 日期={} 金额={:.6}（未水合，已跳过）",
                 token_id,
                 local_day,
                 amount
@@ -304,14 +325,10 @@ impl MemoryQuotaGuard {
                 monthly_quota_limit: -1.0,
                 quota_limit: -1.0,
                 quota_used: 0.0,
-                weekly_quota_used: 0.0,
-                monthly_quota_used: 0.0,
-                last_reset_week: None,
-                last_reset_month: None,
             };
             if let Err(e) = self.hydrate_slot(db, token_id, &keys, &limits).await {
                 tracing::warn!(
-                    "[QuotaMemory] apply_refund_ensured hydrate 失败 token_id={}: {}",
+                    "[QuotaMemory] apply_refund_ensured 水合失败 令牌ID={}: {}",
                     token_id,
                     e
                 );
@@ -386,9 +403,6 @@ impl MemoryQuotaGuard {
                     0.0
                 };
                 QuotaSlot {
-                    day: keys.day.clone(),
-                    week: keys.week.clone(),
-                    month: keys.month.clone(),
                     daily_used: AtomicU64::new(to_micros(daily)),
                     weekly_used: AtomicU64::new(to_micros(weekly)),
                     monthly_used: AtomicU64::new(to_micros(monthly)),
@@ -400,9 +414,6 @@ impl MemoryQuotaGuard {
                 }
             }
             None => QuotaSlot {
-                day: keys.day.clone(),
-                week: keys.week.clone(),
-                month: keys.month.clone(),
                 daily_used: AtomicU64::new(0),
                 weekly_used: AtomicU64::new(0),
                 monthly_used: AtomicU64::new(0),
@@ -418,7 +429,7 @@ impl MemoryQuotaGuard {
         self.slots.entry(map_key).or_insert(slot);
 
         tracing::debug!(
-            "[QuotaMemory] hydrated token_id={} day={}",
+            "[QuotaMemory] 水合成功 令牌ID={} 日期={}",
             token_id,
             keys.day
         );
@@ -426,7 +437,7 @@ impl MemoryQuotaGuard {
     }
 }
 
-/// 从 ApiToken 构造限额快照（周/月重置键用于 hydration 回退）
+/// 从 ApiToken 构造限额快照（hydration 优先读库；此处供 miss 回退）
 pub fn limits_from_token(token: &crate::models::ApiToken) -> QuotaLimits {
     QuotaLimits {
         daily_quota_limit: token.daily_quota_limit,
@@ -434,9 +445,5 @@ pub fn limits_from_token(token: &crate::models::ApiToken) -> QuotaLimits {
         monthly_quota_limit: token.monthly_quota_limit,
         quota_limit: token.quota_limit,
         quota_used: token.quota_used,
-        weekly_quota_used: token.weekly_quota_used,
-        monthly_quota_used: token.monthly_quota_used,
-        last_reset_week: token.last_reset_week.clone(),
-        last_reset_month: token.last_reset_month.clone(),
     }
 }

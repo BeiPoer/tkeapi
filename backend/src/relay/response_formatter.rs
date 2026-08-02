@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -54,10 +54,9 @@ pub fn format_openai(
         Err(_) => return raw.to_string(),
     };
 
-    // 严谨修复与极简重构：检测并捕获上游业务级 API 错误，统一转换为标准 OpenAI 错误格式返回（保障同步、异步和流式计费的安全退款）
-    if is_upstream_error_response(&v) {
-        // 已是 OpenAI error 格式 → 原样透传；其余厂商错误（含 ErrorCode/ErrorMessage）→ 统一转换
-        return format_as_openai_error(&v).unwrap_or_else(|| raw.to_string());
+    // 上游业务错误 → 标准 OpenAI（门禁仅在 format_as_openai_error 内判一次）
+    if let Some(formatted) = format_as_openai_error(&v) {
+        return formatted;
     }
 
     // 上游已是 OpenAI 格式（有 created + data 数组且无 APIMart code 字段）→ 透传
@@ -100,11 +99,12 @@ pub fn format_openai(
 // ── ID 提取（公共方法，供 task.rs / image.rs / proxy.rs 复用） ──
 
 /// 从任意厂商响应 JSON 中提取任务 ID（兼容 task_id / id / data.task_id 等多种路径）
-/// 搜索路径覆盖：根节点、data 对象/数组、output、data.task.id、腾讯云 Response.TaskId
+/// 搜索路径覆盖：根节点、task、data 对象/数组、output、data.task.id、腾讯云 Response.TaskId
 pub fn find_id(v: &Value) -> String {
     let mut id = v
         .get("task_id")
         .or_else(|| v.get("id"))
+        .or_else(|| v.pointer("/task/id")) // MiniMax H3: { task: { id, status } }
         .or_else(|| v.pointer("/data/taskCode"))
         .or_else(|| v.pointer("/data/task_id"))
         .or_else(|| v.pointer("/data/id"))
@@ -155,6 +155,7 @@ fn has_task_fields(v: &Value) -> bool {
     v.get("status").is_some()
         || v.get("task_status").is_some()
         || v.get("task_id").is_some()
+        || v.pointer("/task/status").is_some() // MiniMax H3: 状态嵌套在 task 下
         || v.pointer("/data/status").is_some()
         || v.pointer("/data/task_status").is_some()
         || v.pointer("/data/0/status").is_some()
@@ -215,6 +216,7 @@ pub fn extract_raw_status(v: &Value) -> String {
 
     v.get("status")
         .or_else(|| v.get("task_status"))
+        .or_else(|| v.pointer("/task/status")) // MiniMax H3 v2: { task: { status, content } }
         .or_else(|| v.pointer("/data/status"))
         .or_else(|| v.pointer("/data/task_status"))
         .or_else(|| v.pointer("/data/0/status"))
@@ -236,7 +238,7 @@ pub fn parse_raw_status_to_standard(raw: &str) -> &'static str {
         "processing" | "running" | "active" | "generating" | "waiting" | "in_queue" => {
             "in_progress"
         }
-        "submitted" | "pending" | "queueing" => "pending",
+        "submitted" | "pending" | "queueing" | "queued" => "pending",
         _ => "unknown",
     }
 }
@@ -305,7 +307,12 @@ pub fn find_urls(v: &Value) -> Vec<String> {
     }
 
     // 3. 火山方舟: content.video_url / final_result.video_url / video_url
-    for path in &["/content/video_url", "/final_result/video_url"] {
+    //    MiniMax H3 v2: task.content.url
+    for path in &[
+        "/content/video_url",
+        "/final_result/video_url",
+        "/task/content/url",
+    ] {
         if let Some(u) = v.pointer(path).and_then(|u| u.as_str()) {
             push_unique(&mut urls, u);
         }
@@ -547,6 +554,7 @@ fn find_ts(v: &Value, keys: &[&str]) -> i64 {
     for key in keys {
         let val = v
             .get(*key)
+            .or_else(|| v.pointer(&format!("/task/{}", key))) // MiniMax H3
             .or_else(|| v.pointer(&format!("/data/{}", key)))
             .or_else(|| v.pointer(&format!("/output/{}", key)));
         if let Some(t) = val {
@@ -588,7 +596,11 @@ fn openai_status(v: &Value) -> String {
 }
 
 fn extract_usage(v: &Value) -> Value {
-    if let Some(u) = v.get("usage").or_else(|| v.pointer("/data/usage")) {
+    if let Some(u) = v
+        .get("usage")
+        .or_else(|| v.pointer("/task/usage")) // MiniMax H3
+        .or_else(|| v.pointer("/data/usage"))
+    {
         return u.clone();
     }
     if let Some(u) = v
@@ -719,6 +731,7 @@ pub fn extract_error_message_from_value(v: &Value) -> Option<String> {
         .or_else(|| v.pointer("/data/error"))
         .or_else(|| v.pointer("/error/message"))
         .or_else(|| v.pointer("/error"))
+        .or_else(|| v.pointer("/task/error/message")) // MiniMax H3: { task: { error: { message } } }
         .or_else(|| v.pointer("/data/task/task_status_msg"))
         .or_else(|| v.pointer("/data/errorMsg"))
         .or_else(|| v.get("message"))
@@ -776,6 +789,7 @@ pub fn extract_error_message(v: &Value) -> String {
 pub fn extract_error_code_from_value(v: &Value) -> Option<String> {
     v.pointer("/error/code")
         .or_else(|| v.pointer("/data/error/code"))
+        .or_else(|| v.pointer("/task/error/code")) // MiniMax H3
         .or_else(|| v.pointer("/Response/Error/Code"))
         .or_else(|| v.pointer("/ResponseMetadata/Error/Code"))
         // 方舟/智算等扁平错误：{"ErrorCode":"PERMISSION_ERROR","ErrorMessage":"..."}
@@ -875,20 +889,45 @@ pub fn is_upstream_error_response(v: &Value) -> bool {
     false
 }
 
-/// 将已识别的上游业务错误 Value 转为标准 OpenAI error JSON 字符串。
-/// 若已是 OpenAI error 格式（含 error.message）则返回 None，由调用方原样透传。
+/// 将上游错误 Value 转为标准 OpenAI error JSON：`{"error":{"message","type","code"}}`。
+/// - 厂商扁平错误（ErrorCode 等）→ 转换
+/// - 已有 `error.message` 但夹带 `success` / 数字 type 等 → 规范化
+/// - 非错误体 → `None`（调用方透传原文）
 pub fn format_as_openai_error(v: &Value) -> Option<String> {
-    if v.pointer("/error/message").is_some() || !is_upstream_error_response(v) {
+    if !is_upstream_error_response(v) {
         return None;
     }
-    let msg = extract_error_message(v);
-    let code = extract_error_code_from_value(v).unwrap_or_else(|| "upstream_error".to_string());
-    // 仅对 permission 类给出 OpenAI 标准 type；其余保持既有 upstream_error，避免改变旧行为
+
+    // 优先 OpenAI 路径 message，避免 extract 抢先命中 /data/error/message
+    let msg = v
+        .pointer("/error/message")
+        .and_then(|m| m.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| extract_error_message(v));
+
+    let raw_type = v
+        .pointer("/error/type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    let code = extract_error_code_from_value(v)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if raw_type.is_empty() {
+                "upstream_error".to_string()
+            } else {
+                raw_type.to_string()
+            }
+        });
+
     let err_type = if code.to_lowercase().contains("permission") {
         "permission_error"
-    } else {
+    } else if raw_type.is_empty() || raw_type.chars().all(|c| c.is_ascii_digit()) {
         "upstream_error"
+    } else {
+        raw_type
     };
+
     Some(to_json(&json!({
         "error": {
             "message": crate::relay::proxy::sanitize_error_message(&msg),

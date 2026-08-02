@@ -20,6 +20,7 @@ import {
   KeyRound
 } from 'lucide-react';
 import request from '../../utils/request';
+import { resolveInviteParams, trackMarketingLinkClick } from '../../utils/inviteTracking';
 import { useTranslation } from 'react-i18next';
 import useAuthStore from '../../store/auth';
 import useSettingsStore from '../../store/settings';
@@ -65,27 +66,26 @@ const Register: React.FC = () => {
   const { setToken, setUser } = useAuthStore();
   const { settings, fetchSettings } = useSettingsStore();
   const [searchParams] = useSearchParams();
-  
-  const getStoredValue = (key: string): string => {
-    const stored = localStorage.getItem(key);
-    if (stored) {
-      try {
-        const data = JSON.parse(stored);
-        if (Date.now() <= data.expiry) return data.value;
-        localStorage.removeItem(key);
-      } catch { /* ignore */ }
-    }
-    const match = document.cookie.match(new RegExp(`(?:^|;\\s*)${key}=([^;]*)`));
-    if (match) return decodeURIComponent(match[1]);
-    return '';
-  };
 
-  const aff = searchParams.get('aff') || getStoredValue('tokensbyte_affiliate_code');
-  const team = searchParams.get('team') || getStoredValue('tokensbyte_team_invite');
+  // URL 优先，否则读 3 天内未清缓存的邀请参数（localStorage + cookie）
+  const { aff, team } = resolveInviteParams(searchParams.toString() ? `?${searchParams.toString()}` : '');
 
   useEffect(() => { 
     if (!settings) fetchSettings(); 
   }, []);
+
+  // 统计邀请链接点击：仅当 URL 带 aff（真实点开邀请链接）；主题页回退 from=promo 不计邀请
+  useEffect(() => {
+    const urlAff = searchParams.get('aff')?.trim() || '';
+    if (!urlAff) return;
+    if (searchParams.get('from') === 'promo') return;
+    const urlTeam = searchParams.get('team')?.trim() || '';
+    if (urlTeam) {
+      void trackMarketingLinkClick({ linkType: 'team_invite', aff: urlAff, linkKey: urlTeam });
+    } else {
+      void trackMarketingLinkClick({ linkType: 'invite', aff: urlAff });
+    }
+  }, [searchParams]);
 
   const getAgreementUrl = (type: 'tos' | 'privacy') => {
     const agreement = settings?.agreement;
@@ -272,7 +272,11 @@ const Register: React.FC = () => {
 
     try {
       let res: any;
-      const commonPayload = { password: passwordVal, aff, team: team || undefined };
+      const commonPayload = {
+        password: passwordVal,
+        ...(aff ? { aff } : {}),
+        ...(team ? { team } : {}),
+      };
       
       if (activeTab === 'username') {
         res = await request.post('/auth/register', { username: usernameVal.trim(), ...commonPayload }, { skipErrorHandler: true } as any);
@@ -297,22 +301,26 @@ const Register: React.FC = () => {
   const showGoogle = settings?.login?.enable_google_login;
 
   const wechatAppId = settings?.wechat_oauth_app_id || '';
-  const wechatRedirectUri = `${window.location.origin}/api/v1/auth/oauth/wechat/callback` + 
-    (aff || team ? `?${new URLSearchParams({ ...(aff ? { aff } : {}), ...(team ? { team } : {}) }).toString()}` : '');
+  // 邀请参数走浏览器 3 天 cookie，勿塞进 redirect_uri（微信要求与后台登记完全一致）
+  const wechatRedirectUri = `${window.location.origin}/api/v1/auth/oauth/wechat/callback`;
 
   useEffect(() => {
     if (!showWechat) return;
     let cancelled = false;
+    const params: Record<string, string> = { provider: 'wechat' };
+    if (aff) params.aff = aff;
+    if (team) params.team = team;
     request
-      .get('/auth/oauth/state', { params: { provider: 'wechat' }, skipErrorHandler: true } as any)
+      .get('/auth/oauth/state', { params, skipErrorHandler: true } as any)
       .then((res: any) => {
         if (!cancelled && res?.state) setWechatState(res.state);
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [showWechat]);
+  }, [showWechat, aff, team]);
 
   const handleGoogleLogin = () => {
+    // 发起时带上 aff/team，后端写入 OAuth state；cookie 作兜底
     const params = new URLSearchParams();
     if (aff) params.set('aff', aff);
     if (team) params.set('team', team);

@@ -6,8 +6,8 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Typography, Button, Spin, App, Alert } from 'antd';
-import { SaveOutlined, CheckCircleFilled, LayoutOutlined } from '@ant-design/icons';
+import { Typography, Button, Spin, App, Alert, Switch, Space } from 'antd';
+import { SaveOutlined, CheckCircleFilled, LayoutOutlined, EyeOutlined } from '@ant-design/icons';
 import request from '../../../utils/request';
 import { useThemeStore } from '../../../store/theme';
 
@@ -65,6 +65,8 @@ const PortalStyleSelection: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [selectedStyle, setSelectedStyle] = useState('classic');
+  const [customHomepageEnabled, setCustomHomepageEnabled] = useState(false);
+  const [manualMode, setManualMode] = useState(false);
 
   useEffect(() => {
     fetchConfig();
@@ -74,10 +76,12 @@ const PortalStyleSelection: React.FC = () => {
     try {
       setLoading(true);
       const res = await (request.get('/plugins/site-portal/portal-config') as Promise<any>);
-      if (res.style_config && res.style_config.current_style) {
+      if (res.style_config?.current_style) {
         setSelectedStyle(res.style_config.current_style);
       }
-    } catch (e) {
+      setCustomHomepageEnabled(res.custom_homepage?.enabled === true);
+      setManualMode(res.static_gen_config?.manual_mode === true);
+    } catch {
       message.error('加载风格配置失败');
     } finally {
       setLoading(false);
@@ -89,10 +93,17 @@ const PortalStyleSelection: React.FC = () => {
       setSaving(true);
       await request.post('/plugins/site-portal/portal-config', {
         section: 'style',
-        data: { current_style: selectedStyle },
+        data: {
+          current_style: selectedStyle,
+          apply_to_homepage: !customHomepageEnabled,
+        },
       });
-      message.success('风格配置保存成功');
-    } catch (e) {
+      message.success(
+        manualMode
+          ? '风格已保存，请到「门户管理 → 静态生成」执行全站生成'
+          : '风格配置已保存，静态页将自动更新'
+      );
+    } catch {
       message.error('保存失败');
     } finally {
       setSaving(false);
@@ -336,47 +347,49 @@ const PortalStyleSelection: React.FC = () => {
           <LayoutOutlined style={{ fontSize: 20, color: _isLight ? '#09090b' : '#fafafa' }} />
           <div>
             <Title level={5} style={{ margin: 0, color: _isLight ? '#09090b' : '#fafafa', fontWeight: 600 }}>门户排版风格选择</Title>
-            <Text type="secondary" style={{ fontSize: 13 }}>选择完全不同的首页和模型列表页排版布局</Text>
+            <Text type="secondary" style={{ fontSize: 13 }}>
+              作用于 SEO 静态页（/portal/*）与栏目页；可选接管 /home 风格化首页
+            </Text>
           </div>
         </div>
-        
-        <Button
-          type="primary"
-          icon={<SaveOutlined />}
-          loading={saving}
-          onClick={handleSave}
-          style={{
-            background: _isLight ? '#09090b' : '#fafafa',
-            borderColor: _isLight ? '#09090b' : '#fafafa',
-            color: _isLight ? '#fff' : '#09090b',
-            borderRadius: 6,
-            fontWeight: 500,
-            fontSize: 13,
-            boxShadow: 'none',
-            height: 36
-          }}
-        >
-          保存配置
-        </Button>
+
+        <Space>
+
+          <Button
+            type="primary"
+            icon={<SaveOutlined />}
+            loading={saving}
+            onClick={handleSave}
+            style={{
+              background: _isLight ? '#09090b' : '#fafafa',
+              borderColor: _isLight ? '#09090b' : '#fafafa',
+              color: _isLight ? '#fff' : '#09090b',
+              borderRadius: 6,
+              fontWeight: 500,
+              fontSize: 13,
+              boxShadow: 'none',
+              height: 36
+            }}
+          >
+            保存配置
+          </Button>
+        </Space>
       </div>
 
       <Alert
         type="info"
         showIcon
-        message={<Text style={{ fontWeight: 500, fontSize: 13.5, color: '#27272a' }}>更新提示</Text>}
+        message="生效范围"
         description={
-          <span style={{ fontSize: 13, color: '#71717a' }}>
-            修改风格并保存后，由于门户使用静态生成以获取最佳 SEO 体验，您需要前往
-            <strong style={{ margin: '0 4px', color: _isLight ? '#09090b' : '#fafafa' }}>「门户管理 -&gt; 静态生成」</strong>
-            重新生成全站 HTML 页面，样式与排版更改才会正式发布生效。
+          <span style={{ fontSize: 13 }}>
+            风格始终影响 <Text code>/home/contact</Text>、<Text code>/home/about</Text>、<Text code>/portal/models</Text> 等 Tera 页。
+            互动模型广场 <Text code>/home/models</Text> 为独立 React 页，不受此处风格控制。
+            {manualMode
+              ? ' 当前为手动静态生成：保存后请到「门户管理 → 静态生成」执行全站生成。'
+              : ' 当前为自动更新：保存后会后台刷新静态页。'}
           </span>
         }
-        style={{
-          marginBottom: 24,
-          borderRadius: 6,
-          border: _isLight ? '1px solid rgba(0,0,0,0.08)' : '1px solid rgba(255,255,255,0.08)',
-          background: _isLight ? '#f4f4f5' : '#18181b'
-        }}
+        style={{ marginBottom: 24, borderRadius: 6 }}
       />
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(270px, 1fr))', gap: 20, marginBottom: 24 }}>

@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -18,21 +18,40 @@ use std::sync::Arc;
 
 // ── User Context ────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct UserContext {
     pub user_group: String,
     pub level_id: String,
     pub balance: f64,
     pub discount: f64,
+    pub discount_type: i32,
     /// 用户模型单独折扣(JSON: {"mid": discount})，优先于等级折扣
     pub model_discounts: Option<String>,
-    pub role: String,
 }
 
-pub async fn get_user_context(state: &Arc<AppState>, user_id: &str) -> AppResult<UserContext> {
-    // 查询用户信息、等级折扣、模型单独折扣（用于计费时优先匹配用户模型折扣）、角色
-    let (g, l_id, b, gb, cl, d, md, r): (String, i64, f64, f64, f64, f64, Option<String>, String) = sqlx::query_as(
+impl UserContext {
+    /// 仅折扣字段参与计费时的轻量上下文（异步任务结算等）
+    pub fn from_discounts(
+        discount: f64,
+        discount_type: i32,
+        model_discounts: Option<String>,
+    ) -> Self {
+        Self {
+            user_group: String::new(),
+            level_id: String::new(),
+            balance: 0.0,
+            discount,
+            discount_type,
+            model_discounts,
+        }
+    }
+}
+
+pub async fn get_user_context(state: &AppState, user_id: &str) -> AppResult<UserContext> {
+    // 查询用户信息、等级折扣、折扣模式、模型单独折扣（用于计费时优先匹配用户模型折扣）
+    let (g, l_id, b, gb, cl, d, dt, md): (String, i64, f64, f64, f64, f64, i32, Option<String>) = sqlx::query_as(
         &state.db.format_query(
-            "SELECT u.user_group, COALESCE(ul.id, 0), u.balance, u.gift_balance, u.credit_limit, COALESCE(ul.discount, 1.0), u.model_discounts, u.role \
+            "SELECT u.user_group, COALESCE(ul.id, 0), u.balance, u.gift_balance, u.credit_limit, COALESCE(ul.discount, 1.0), COALESCE(ul.discount_type, 0), u.model_discounts \
              FROM users u LEFT JOIN user_levels ul ON u.user_group = ul.group_key \
              WHERE u.id = ?"
         )
@@ -43,40 +62,57 @@ pub async fn get_user_context(state: &Arc<AppState>, user_id: &str) -> AppResult
     Ok(UserContext {
         user_group: g,
         level_id: l_id.to_string(),
-        balance: b + gb + cl,
+        // 可用额 = 系统 + 赠送 + 信控；统一 6 位，避免浮点残渣误判为「有余额」
+        balance: crate::money::round_money(b + gb + cl),
         discount: d,
+        discount_type: dt,
         model_discounts: md,
-        role: r,
     })
 }
 
 /// 统一折扣策略（MIN + MAX 两步）：
-/// 1. 取所有已启用折扣来源的最小值：MIN(用户模型单独折扣, 全站折扣, 用户等级折扣)
+/// 1. 根据等级 discount_type 取对应折扣来源的最小值：
+///    - discount_type = 1 (全站折扣): MIN(用户模型单独折扣, 全站折扣)
+///    - discount_type = 2 (等级折扣): MIN(用户模型单独折扣, 用户等级折扣)
+///    - discount_type = 0 (不选择/默认): MIN(用户模型单独折扣, 全站折扣, 用户等级折扣)
 /// 2. 折扣限价约束：MAX(最低折扣, 模型限价)，保证折扣不低于限价
 pub fn resolve_discount(
     db_model: Option<&crate::models::Model>,
     level_discount: f64,
     user_model_discount: Option<f64>,
+    discount_type: i32,
 ) -> (f64, &'static str) {
-    // 第一步：取所有已启用折扣来源的最小值
-    let mut min_discount = level_discount;
+    let mut min_discount = f64::MAX;
     let mut source = "等级折扣";
 
+    // 1. 用户模型单独折扣
     if let Some(umd) = user_model_discount {
-        if umd < min_discount {
-            min_discount = umd;
-            source = "用户模型折扣";
+        min_discount = umd;
+        source = "用户模型折扣";
+    }
+
+    // 2. 按 discount_type 比对等级折扣或全站折扣 (0=全取, 1=仅全站, 2=仅等级)
+    if discount_type != 1 && level_discount < min_discount {
+        min_discount = level_discount;
+        source = "等级折扣";
+    }
+
+    if discount_type != 2 {
+        if let Some(m) = db_model {
+            if m.global_discount_enabled == 1 && m.global_discount < min_discount {
+                min_discount = m.global_discount;
+                source = "全站折扣";
+            }
         }
     }
 
-    if let Some(m) = db_model {
-        if m.global_discount_enabled == 1 && m.global_discount < min_discount {
-            min_discount = m.global_discount;
-            source = "全站折扣";
-        }
+    // 兜底保护：若全站折扣未开启且无其他可用折扣，回退等级折扣
+    if min_discount == f64::MAX {
+        min_discount = level_discount;
+        source = "等级折扣";
     }
 
-    // 第二步：折扣限价约束 MAX(最低折扣, 模型限价)
+    // 3. 模型折扣限价约束 MAX(最低折扣, 模型限价)
     if let Some(m) = db_model {
         if m.site_discount_enabled == 1 && min_discount < m.site_discount {
             return (m.site_discount, "折扣限价");
@@ -354,54 +390,38 @@ pub async fn check_access_with_model(
         }
     }
 
-    let pre_deduction = db_model.as_ref().map(|m| m.pre_deduction).unwrap_or(0.0);
-
-    // 管理员用户免除余额和预扣费检测，直接放行
-    let is_admin = ctx.role == "admin";
-
-    if is_admin {
-        return Ok((pre_deduction, db_model, resolved_cat));
-    }
-
-    if pre_deduction > 0.0 {
-        if ctx.balance < pre_deduction {
+    let pre_deduction =
+        crate::money::round_money(db_model.as_ref().map(|m| m.pre_deduction).unwrap_or(0.0));
+    // ctx.balance = 系统+赠送+信控（get_user_context 已 round）
+    let avail = ctx.balance;
+    let insufficient = if pre_deduction > 0.0 {
+        avail < pre_deduction
+    } else {
+        avail <= 0.0
+    };
+    if insufficient {
+        let msg = if pre_deduction > 0.0 {
             let currency_unit = crate::api::settings::get_currency_settings(state)
                 .await
                 .currency_unit;
-            let msg = format!("账户余额不足{}{}", pre_deduction, currency_unit);
-            record_error_log(
-                state,
-                &token.user_id,
-                ch_id,
-                Some(token.id),
-                model,
-                403,
-                ep,
-                &msg,
-                up_url,
-                Some(&resolved_cat),
-            )
-            .await;
-            return Err(AppError::Forbidden(msg));
-        }
-    } else {
-        if token.quota_limit < 0.0 && ctx.balance <= 0.0 {
-            let msg = "余额不足";
-            record_error_log(
-                state,
-                &token.user_id,
-                ch_id,
-                Some(token.id),
-                model,
-                403,
-                ep,
-                &msg,
-                up_url,
-                Some(&resolved_cat),
-            )
-            .await;
-            return Err(AppError::Forbidden(msg.into()));
-        }
+            format!("账户余额不足{}{}", pre_deduction, currency_unit)
+        } else {
+            "余额不足".to_string()
+        };
+        record_error_log(
+            state,
+            &token.user_id,
+            ch_id,
+            Some(token.id),
+            model,
+            402,
+            ep,
+            &msg,
+            up_url,
+            Some(&resolved_cat),
+        )
+        .await;
+        return Err(AppError::PaymentRequired(msg));
     }
 
     Ok((pre_deduction, db_model, resolved_cat))
@@ -490,99 +510,23 @@ pub async fn select_channel_with_db(
     }
 }
 
-/// 触发高可用子渠道熔断冷却
-pub fn trigger_ha_meltdown(
-    state: &Arc<AppState>,
-    group_aid: &str,
-    status_code: u16,
-    error_message: &str,
-) {
-    // 正常渠道（非 HA 子渠道）不具备全局熔断功能
-    if !group_aid.starts_with("ha_group_") {
-        return;
-    }
-
-    use std::sync::atomic::Ordering;
-    use std::time::{Duration, Instant};
-
-    // 检查报错信息是否命中不熔断白名单（子字符串包含匹配，不区分大小写）
-    if !error_message.is_empty() {
-        if let Ok(whitelist) = state.ha_meltdown_whitelist.read() {
-            let err_lower = error_message.to_lowercase();
-            for pattern in whitelist.iter() {
-                if !pattern.is_empty() && err_lower.contains(pattern.as_str()) {
-                    tracing::info!(
-                        "[HA Whitelist] 子渠道 {} 错误信息命中不熔断白名单 (关键词: {}), 跳过熔断",
-                        group_aid,
-                        pattern
-                    );
-                    return;
-                }
-            }
-        }
-    }
-
-    let cooldown = match status_code {
-        429 => state.ha_cooldown_429.load(Ordering::Relaxed),
-        401 | 402 => state.ha_cooldown_auth.load(Ordering::Relaxed),
-        404 => state.ha_cooldown_404.load(Ordering::Relaxed),
-        _ => state.ha_cooldown_network.load(Ordering::Relaxed),
-    };
-
-    if cooldown > 0 {
-        let block_until = Instant::now() + Duration::from_secs(cooldown.max(0) as u64);
-        state
-            .failed_channels
-            .insert(group_aid.to_string(), block_until);
-        tracing::warn!(
-            "[HA Failover] 子渠道 {} 发生错误(HTTP {}), 自动熔断冷却 {} 秒",
-            group_aid,
-            status_code,
-            cooldown
-        );
-    }
-
-    // 定期 + 超阈值时清理过期熔断，防止 DashMap 无限增长
-    static CLEANUP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = CLEANUP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    if n % 32 == 0 || state.failed_channels.len() > 2048 {
-        crate::relay::ha::scrub_failed_channels(state);
-    }
-}
-
 // ── Record Usage & Billing ──────────────────────────────────────
 
 use super::url_utils::join_url;
 
-/// 预扣费钱包拆分记录
-#[allow(dead_code)]
-pub struct PreDeductSplit {
-    pub gift: f64,    // 从赠送余额扣除的金额
-    pub balance: f64, // 从系统余额扣除的金额
-}
-
-#[allow(dead_code)]
-impl PreDeductSplit {
-    pub fn zero() -> Self {
-        Self {
-            gift: 0.0,
-            balance: 0.0,
-        }
-    }
-    pub fn total(&self) -> f64 {
-        self.gift + self.balance
-    }
-}
-
-/// 事务化预扣费：FOR UPDATE 锁行防并发，精确记录双钱包扣除比例
+/// 事务化预扣费：FOR UPDATE 锁行防并发；有 pending 日志时同事务写入 cost/pre_deduct_gift，
+/// 保证崩溃后孤儿清理/启动恢复可按日志退款（避免「钱包已扣、日志 cost=0」）。
+/// 返回赠送钱包实扣金额（供 `pre_deduct_gift` 落库）。
 pub async fn pre_deduct(
     state: &Arc<AppState>,
     user_id: &str,
     amount: f64,
-) -> Result<PreDeductSplit, sqlx::Error> {
+    pending_log_id: Option<i64>,
+) -> Result<f64, sqlx::Error> {
     if amount <= 0.0 {
-        return Ok(PreDeductSplit::zero());
+        return Ok(0.0);
     }
+    let amount = crate::money::round_money(amount);
     let mut tx = state.db.pool.begin().await?;
     let (bal, gift, credit): (f64, f64, f64) = sqlx::query_as(&state.db.format_query(
         "SELECT balance, gift_balance, credit_limit FROM users WHERE id = ? FOR UPDATE",
@@ -591,13 +535,11 @@ pub async fn pre_deduct(
     .fetch_one(&mut *tx)
     .await?;
 
-    if bal + gift + credit < amount {
+    if crate::money::round_money(bal + gift + credit) < amount {
         tx.rollback().await?;
         return Err(sqlx::Error::RowNotFound);
     }
-    // 对齐精度（避免浮点运算产生 0.19999999999999996 之类的值）
-    let gift_deducted = crate::money::round_money(amount.min(gift));
-    let balance_deducted = crate::money::round_money(amount - gift_deducted);
+    let (gift_deducted, balance_deducted) = crate::money::split_gift_first(amount, gift);
 
     sqlx::query(&state.db.format_query(
         "UPDATE users SET balance = balance - ?, gift_balance = gift_balance - ? WHERE id = ?",
@@ -607,15 +549,44 @@ pub async fn pre_deduct(
     .bind(user_id)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
 
-    Ok(PreDeductSplit {
-        gift: gift_deducted,
-        balance: balance_deducted,
-    })
+    // 写入预扣凭证；HA 失败复用同一 pending 时重置为处理中，供崩溃补偿/孤儿清理命中。
+    // 冻结成功后不会再 pre_deduct，无需对冻结态做分支防护。
+    if let Some(log_id) = pending_log_id {
+        let touched = sqlx::query(&state.db.format_query(
+            "UPDATE logs SET cost = ?, pre_deduct_gift = ?, status_code = 0, is_completed = 0, \
+             error_message = NULL, billing_detail = '请求处理中' WHERE id = ?",
+        ))
+        .bind(amount)
+        .bind(gift_deducted)
+        .bind(log_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if touched == 0 {
+            tx.rollback().await?;
+            tracing::error!(
+                "[PreDeduct] pending log {} 不存在，回滚预扣 user={}",
+                log_id,
+                user_id
+            );
+            return Err(sqlx::Error::Protocol(
+                "pre_deduct: pending log missing".into(),
+            ));
+        }
+    } else {
+        tracing::warn!(
+            "[PreDeduct] 无 pending_log_id，仅扣钱包无法崩溃退款 user={} amount={:.6}",
+            user_id,
+            amount
+        );
+    }
+
+    tx.commit().await?;
+    Ok(gift_deducted)
 }
 
-/// 预扣费；失败时写 403 日志并返回 AppError（admin / 金额≤0 跳过）
+/// 预扣费；余额不足时写 402 日志并返回 PaymentRequired（金额≤0 跳过；角色无豁免）
 pub async fn pre_deduct_or_intercept(
     state: &Arc<AppState>,
     token: &ApiToken,
@@ -630,50 +601,50 @@ pub async fn pre_deduct_or_intercept(
     ep_tag: Option<String>,
     pending_log_id: Option<i64>,
     db_model: Option<&crate::models::Model>,
-    role: &str,
     category: Option<&str>,
 ) -> AppResult<f64> {
-    if pre_deduction <= 0.0 || role == "admin" {
+    if pre_deduction <= 0.0 {
         return Ok(0.0);
     }
-    match pre_deduct(state, &token.user_id, pre_deduction).await {
-        Ok(split) => Ok(split.gift),
+    match pre_deduct(state, &token.user_id, pre_deduction, pending_log_id).await {
+        Ok(gift) => Ok(gift),
         Err(e) => {
-            let err_msg = match e {
+            let err_msg = match &e {
                 sqlx::Error::RowNotFound => "余额不足".to_string(),
+                sqlx::Error::Protocol(msg) if msg.contains("pending log missing") => {
+                    "预扣记账失败，请重试".to_string()
+                }
                 _ => format!("预扣费失败: {:?}", e),
             };
-            tracing::error!("Pre deduction failed for {}: {:?}", token.user_id, e);
+            tracing::error!("[PreDeduct] 预扣费失败 用户ID={}: {:?}", token.user_id, e);
             let latency_ms = start_time.elapsed().as_millis() as u32;
-            record_and_bill_inner(BillRecord {
+            let is_balance = matches!(e, sqlx::Error::RowNotFound);
+            let status_code = if is_balance { 402 } else { 500 };
+            let _ = record_zero_cost_fail(ZeroCostUpstreamFail {
                 state,
                 token,
                 channel,
                 model,
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                cached_tokens: 0,
-                cost: 0.0,
-                pre_deducted: 0.0,
-                pre_deduct_gift: 0.0,
-                status_code: 403,
+                prefer_http_status: Some(status_code),
                 endpoint: ep,
-                error_msg: Some(&err_msg),
                 latency_ms,
                 is_stream,
-                request_content: Some(request_content_str.to_string()),
+                request_content: request_content_str.to_string(),
+                response_body: err_msg.clone(),
                 response_content: Some(err_msg.clone()),
                 upstream_req_content: Some(upstream_body_str.to_string()),
                 billing_detail: ep_tag,
                 hint_category: category,
                 pending_log_id,
                 billing_model_hint: None,
-                plugin_tag: None,
                 db_model,
+                client_msg: Some(&err_msg),
+                pre_deducted: 0.0,
+                pre_deduct_gift: 0.0,
             })
             .await;
-            Err(if matches!(e, sqlx::Error::RowNotFound) {
-                AppError::Forbidden("余额不足".to_string())
+            Err(if is_balance {
+                AppError::PaymentRequired("余额不足".to_string())
             } else {
                 AppError::Internal(err_msg)
             })
@@ -769,6 +740,7 @@ pub async fn record_pending_log(p: PendingLog<'_>) -> Option<i64> {
     let forward_eid: Option<String> = forward_eid.filter(|s| !s.is_empty()).map(|s| s.to_string());
 
     let channel_config_id = super::ha::resolve_log_config_id(state, channel).await;
+    let is_ha = super::ha::channel_is_ha_flag(channel);
     let masked_url: Option<String> =
         upstream_url.map(|u| super::forward::mask_key_in_string(u, &channel.api_key));
 
@@ -782,9 +754,9 @@ pub async fn record_pending_log(p: PendingLog<'_>) -> Option<i64> {
         "INSERT INTO logs (log_id, user_id, channel_id, token_id, model, prompt_tokens, completion_tokens, \
          cached_tokens, cost, status_code, endpoint, error_message, latency_ms, \
          request_content, response_content, is_stream, upstream_url, \
-         billing_detail, task_id, action_type, billing_pid, forward_eid, plugin_tag, channel_config_id) \
+         billing_detail, task_id, action_type, billing_pid, forward_eid, plugin_tag, channel_config_id, is_ha) \
          VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0.0, 0, ?, NULL, 0, ?, NULL, ?, ?, \
-                 '请求处理中', '', ?, ?, ?, ?, ?) RETURNING id"
+                 '请求处理中', '', ?, ?, ?, ?, ?, ?) RETURNING id"
     );
 
     let (sys_ep, _upstream_ep) = if endpoint.contains('|') {
@@ -809,13 +781,14 @@ pub async fn record_pending_log(p: PendingLog<'_>) -> Option<i64> {
         .bind(&forward_eid)
         .bind(plugin_tag.unwrap_or(""))
         .bind(channel_config_id)
+        .bind(is_ha)
         .fetch_one(&state.db.pool)
         .await;
 
     match res {
         Ok(id) => {
             tracing::info!(
-                "[PendingLog] id={}, log_id={}, model={}, ep={}",
+                "[PendingLog] ID={} 日志号={} 模型={} 端点={}",
                 id,
                 generated_log_id,
                 model,
@@ -944,7 +917,7 @@ async fn resolve_model_meta(
     enable_log = row.try_get("enable_log_content").unwrap_or(0);
 
     tracing::info!(
-        "[ModelMeta] model={}, category={}, billing_pid={}, enable_log={}, source={}",
+        "[ModelMeta] 模型={} 类别={} PID={} 日志内容开关={} 来源={}",
         model_name,
         action_type,
         billing_pid.as_deref().unwrap_or("-"),
@@ -1006,7 +979,7 @@ pub async fn record_error_log(
         .await;
 
     if let Err(e) = res {
-        tracing::error!("Failed to record error log: {:?}", e);
+        tracing::error!("[ErrorLog] 记录错误日志失败: {:?}", e);
     }
 }
 
@@ -1071,6 +1044,8 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
         plugin_tag,
         db_model,
     } = p;
+    let pre_deducted = crate::money::round_money(pre_deducted);
+    let pre_deduct_gift = crate::money::round_money(pre_deduct_gift);
     // 实时 TPM 观测（与计费路径同点，零写库）
     let live_total_tokens =
         (prompt_tokens.max(0) as u64).saturating_add(completion_tokens.max(0) as u64);
@@ -1086,6 +1061,7 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
 
     // HA: group_aid；物理: preset_id；内存 yid 补全 config_id
     let channel_config_id = super::ha::resolve_log_config_id(state, channel).await;
+    let is_ha = super::ha::channel_is_ha_flag(channel);
 
     let filter_content = |content: Option<String>, respect_log_flag: bool| -> Option<String> {
         let text = content?;
@@ -1122,9 +1098,10 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
                 }
             }
             let usage = crate::relay::usage_extractor::parse_usage(resp);
-            if usage.web_search > 0 {
-                feat.get_or_insert_with(Default::default).web_search = Some(usage.web_search);
-            }
+            crate::relay::usage_extractor::enrich_features_from_usage(
+                feat.get_or_insert_with(Default::default),
+                &usage,
+            );
         }
         // 级联：从 plugin_tag.cascade 补 version/resolution 到计费特征（不改用户入参）
         if let Some(tag) = plugin_tag {
@@ -1215,7 +1192,8 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
         .execute(&mut *tx)
         .await?;
 
-        if cost > 0.0 || pre_deducted > 0.0 {
+        let (settled_cost, apply_balance) = crate::money::settlement_delta(cost, pre_deducted);
+        if settled_cost > 0.0 || pre_deducted > 0.0 {
             let (site_tz, _) = crate::relay::get_cached_config(state).await;
             let tz = crate::api::date_helper::resolve_user_timedisplay_name(
                 &state.db,
@@ -1223,19 +1201,18 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
                 &site_tz,
             )
             .await;
-            // 令牌额度异步切流：内存 check_and_incr → MPSC 刷库；管道满则同步 fallback
-            if cost > 0.0 {
+
+            if settled_cost > 0.0 {
                 let _added = super::token_quota::consume_async_or_sync(
                     state,
                     &mut tx,
                     token,
-                    cost,
+                    settled_cost,
                     &tz,
                 )
                 .await?;
             }
 
-            let apply_balance = cost - pre_deducted; // 正数表示还要扣，负数表示退款
             if apply_balance > 0.0 {
                 sqlx::query(&state.db.format_query(
                     "UPDATE users SET
@@ -1248,32 +1225,30 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
                 ))
                 .bind(apply_balance).bind(apply_balance)
                 .bind(pre_deduct_gift).bind(apply_balance).bind(apply_balance)
-                .bind(apply_balance).bind(apply_balance).bind(cost).bind(&token.user_id)
+                .bind(apply_balance).bind(apply_balance).bind(settled_cost).bind(&token.user_id)
                 .execute(&mut *tx)
                 .await?;
             } else if apply_balance < 0.0 {
-                // 退款：实际费用按先扣赠送原则分配，退还各钱包多扣部分
                 let refund = -apply_balance;
-                let gift_cost = cost.min(pre_deduct_gift); // 赠送钱包应承担的最终费用
-                let gift_refund = pre_deduct_gift - gift_cost; // 退还赠送钱包的多扣部分
-                let balance_refund = refund - gift_refund; // 剩余退还系统钱包
+                let gift_cost = settled_cost.min(pre_deduct_gift);
+                let gift_refund = pre_deduct_gift - gift_cost;
+                let balance_refund = refund - gift_refund;
                 sqlx::query(&state.db.format_query(
                     "UPDATE users SET balance = balance + ?, gift_balance = gift_balance + ?, used_quota = used_quota + ?, gift_used_quota = gift_used_quota + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 ))
                 .bind(balance_refund)
                 .bind(gift_refund)
-                .bind(cost)
+                .bind(settled_cost)
                 .bind(gift_cost)
                 .bind(&token.user_id)
                 .execute(&mut *tx)
                 .await?;
             } else {
-                // apply_balance == 0
-                // 异步任务预扣冻结阶段暂不累加已用配额，在终态结算时再由 execute_settlement_tx 累加
+                // apply==0：冻结阶段不累加 used_quota；同步精确匹配则累加
                 let (add_used, add_gift) = if is_freeze {
                     (0.0, 0.0)
                 } else {
-                    (cost, cost.min(pre_deduct_gift))
+                    (settled_cost, settled_cost.min(pre_deduct_gift))
                 };
                 sqlx::query(&state.db.format_query(
                     "UPDATE users SET used_quota = used_quota + ?, gift_used_quota = gift_used_quota + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -1285,17 +1260,16 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
                 .await?;
             }
 
-            if channel_id > 0 {
-                // 渠道为共享资源：日/月 key 必须用站点时区，禁止用请求用户 timedisplay
+            if channel_id > 0 && settled_cost > 0.0 {
                 super::channel_quota::consume_channel(
-                    &state.db, &mut tx, channel_id, cost, &site_tz,
+                    &state.db, &mut tx, channel_id, settled_cost, &site_tz,
                 )
                 .await?;
             }
             if let Some(cfg_id) = channel_config_id {
-                if cfg_id > 0 {
+                if cfg_id > 0 && settled_cost > 0.0 {
                     super::channel_quota::consume_config(
-                        &state.db, &mut tx, cfg_id as i64, cost, &site_tz,
+                        &state.db, &mut tx, cfg_id as i64, settled_cost, &site_tz,
                     )
                     .await?;
                 }
@@ -1316,7 +1290,7 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
 
         // 【一条日志原则】有 pending_log_id 时 UPDATE 预记录行，否则 INSERT 新行
         // 成功：写入本次成功子渠的 channel_id / channel_config_id（可覆盖先前失败快照）
-        // 全失败：由 ha::reinstate_first_log / 仅首次落库 保证仍为子渠 1
+        // 全失败：由 HA on_spawn_result_err reinstate / 仅首次落库 保证仍为子渠 1
         if let Some(log_id) = pending_log_id {
             sqlx::query(&state.db.format_query(
                 "UPDATE logs SET channel_id = ?, model = ?, \
@@ -1327,7 +1301,7 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
                  task_id = CASE WHEN ? = '' OR ? IS NULL THEN task_id ELSE ? END, \
                  action_type = ?, billing_pid = ?, \
                  billing_features = ?, pre_deduct_gift = ?, is_completed = ?, \
-                 channel_config_id = ? \
+                 channel_config_id = ?, is_ha = ? \
                  WHERE id = ?",
             ))
             .bind(channel_id)
@@ -1335,7 +1309,7 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
             .bind(prompt_tokens)
             .bind(completion_tokens)
             .bind(cached_tokens)
-            .bind(cost)
+            .bind(settled_cost)
             .bind(status_code as i32)
             .bind(system_endpoint)
             .bind(db_error_msg)
@@ -1353,6 +1327,7 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
             .bind(pre_deduct_gift)
             .bind(if is_freeze { 0i16 } else { 1i16 })  // is_completed: 冻结任务=0(待结算), 同步请求=1(已完成)
             .bind(channel_config_id)
+            .bind(is_ha)
             .bind(log_id)
             .execute(&mut *tx)
             .await?;
@@ -1360,8 +1335,8 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
             let fb_prefix = if !final_action_type.is_empty() && final_action_type != "聊天" { "tsk_" } else { "log_" };
             let fallback_log_id = format!("{}{}", fb_prefix, ulid::Ulid::new().to_string().to_lowercase());
             sqlx::query(&state.db.format_query(
-                "INSERT INTO logs (log_id, user_id, channel_id, token_id, model, prompt_tokens, completion_tokens, cached_tokens, cost, status_code, endpoint, error_message, latency_ms, request_content, response_content, post_response, is_stream, upstream_url, upstream_req_content, billing_detail, task_id, action_type, billing_pid, forward_eid, billing_features, pre_deduct_gift, plugin_tag, is_completed, channel_config_id) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO logs (log_id, user_id, channel_id, token_id, model, prompt_tokens, completion_tokens, cached_tokens, cost, status_code, endpoint, error_message, latency_ms, request_content, response_content, post_response, is_stream, upstream_url, upstream_req_content, billing_detail, task_id, action_type, billing_pid, forward_eid, billing_features, pre_deduct_gift, plugin_tag, is_completed, channel_config_id, is_ha) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ))
             .bind(&fallback_log_id)
             .bind(&token.user_id)
@@ -1371,7 +1346,7 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
             .bind(prompt_tokens)
             .bind(completion_tokens)
             .bind(cached_tokens)
-            .bind(cost)
+            .bind(settled_cost)
             .bind(status_code as i32)
             .bind(system_endpoint)
             .bind(db_error_msg)
@@ -1392,6 +1367,7 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
             .bind(plugin_tag.unwrap_or(""))
             .bind(if is_freeze { 0i16 } else { 1i16 })  // is_completed: 冻结任务=0(待结算), 同步请求=1(已完成)
             .bind(channel_config_id)
+            .bind(is_ha)
             .execute(&mut *tx)
             .await?;
         }
@@ -1400,21 +1376,157 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
     }
     .await;
     if let Err(e) = res {
-        tracing::error!("Failed to record relay usage: {:?}", e);
-    } else if cost > 0.0 {
+        tracing::error!("[RelayUsage] 记录使用日志失败: {:?}", e);
+        // 结算事务失败：若已预扣且日志仍为处理中，立即 CAS 退款（不必等孤儿任务）
+        if pre_deducted > 0.0 {
+            const DETAIL: &str = "计费落库失败，预扣费已退回";
+            if let Some(log_id) = pending_log_id {
+                let _ = close_pending_and_refund(
+                    state,
+                    log_id,
+                    &token.user_id,
+                    pre_deducted,
+                    pre_deduct_gift,
+                    500,
+                    DETAIL,
+                    DETAIL,
+                )
+                .await;
+            } else if let Err(e) = refund_wallet_sql(
+                &state.db,
+                &state.db.pool,
+                &token.user_id,
+                pre_deducted,
+                pre_deduct_gift,
+            )
+            .await
+            {
+                tracing::error!(
+                    "[BillCompensate] 无 pending 日志钱包退款失败 user={} amount={:.6}: {:?}",
+                    token.user_id,
+                    pre_deducted,
+                    e
+                );
+            }
+        }
+    } else if crate::money::round_money(cost) > 0.0 {
         // 异步检查低余额提醒，不阻塞计费路径
-        let state_notify = Arc::clone(state);
-        let uid = token.user_id.clone();
-        tokio::spawn(async move {
-            crate::services::notification::check_and_notify_low_balance(&state_notify, &uid).await;
-        });
+        crate::services::notification::spawn_low_balance_check(
+            Arc::clone(state),
+            token.user_id.clone(),
+        );
     }
 }
 
+/// CAS 关闭 status_code=0 的 pending 日志，并按 cost/pre_deduct_gift 退回双钱包。
+/// 返回 true 表示本调用抢到 CAS 并已提交。
+async fn close_pending_and_refund(
+    state: &Arc<AppState>,
+    log_id: i64,
+    user_id: &str,
+    cost: f64,
+    pre_deduct_gift: f64,
+    status_code: i32,
+    error_message: &str,
+    billing_detail: &str,
+) -> bool {
+    let mut tx = match state.db.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!("[PendingClose] 开启事务失败 日志ID={}: {:?}", log_id, e);
+            return false;
+        }
+    };
+
+    let touched = match sqlx::query(&state.db.format_query(
+        "UPDATE logs SET status_code = ?, cost = 0.0, pre_deduct_gift = 0.0, \
+         error_message = ?, billing_detail = ?, is_completed = 1 \
+         WHERE id = ? AND status_code = 0",
+    ))
+    .bind(status_code)
+    .bind(error_message)
+    .bind(billing_detail)
+    .bind(log_id)
+    .execute(&mut *tx)
+    .await
+    {
+        Ok(r) => r.rows_affected(),
+        Err(e) => {
+            tracing::error!("[PendingClose] 更新日志失败 日志ID={}: {:?}", log_id, e);
+            let _ = tx.rollback().await;
+            return false;
+        }
+    };
+    if touched == 0 {
+        let _ = tx.rollback().await;
+        return false;
+    }
+
+    if let Err(e) = refund_wallet_sql(&state.db, &mut *tx, user_id, cost, pre_deduct_gift).await {
+        tracing::error!(
+            "[PendingClose] 退款失败 用户ID={} 日志ID={}: {:?}",
+            user_id,
+            log_id,
+            e
+        );
+        let _ = tx.rollback().await;
+        return false;
+    }
+
+    if let Err(e) = tx.commit().await {
+        tracing::error!("[PendingClose] 提交事务失败 日志ID={}: {:?}", log_id, e);
+        return false;
+    }
+    if cost > 0.0 || pre_deduct_gift > 0.0 {
+        tracing::info!(
+            "[PendingClose] 已关闭并退款 日志ID={} 状态码={} 用户ID={} 金额={:.6} 赠送={:.6}",
+            log_id,
+            status_code,
+            user_id,
+            cost,
+            pre_deduct_gift
+        );
+    } else {
+        tracing::info!(
+            "[PendingClose] 已关闭 日志ID={} 状态码={} (无预扣费)",
+            log_id,
+            status_code
+        );
+    }
+    true
+}
+
+async fn refund_wallet_sql<'e, E>(
+    db: &crate::db::Database,
+    executor: E,
+    user_id: &str,
+    cost: f64,
+    pre_deduct_gift: f64,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if cost <= 0.0 && pre_deduct_gift <= 0.0 {
+        return Ok(());
+    }
+    // 赠送退回不超过 cost，避免脏数据导致 balance 被扣成负向
+    let cost = crate::money::round_money(cost.max(0.0));
+    let gift_refund = crate::money::round_money(pre_deduct_gift.min(cost).max(0.0));
+    let balance_refund = crate::money::round_money(cost - gift_refund);
+    sqlx::query(&db.format_query(
+        "UPDATE users SET balance = balance + ?, gift_balance = gift_balance + ?, \
+         updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    ))
+    .bind(balance_refund)
+    .bind(gift_refund)
+    .bind(user_id)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 /// 清理孤儿预记录日志（status_code=0 且超过指定时间）
-/// 定时调用，将超时日志标记为 408 并退还预扣费
 pub async fn cleanup_orphan_pending_logs(state: &Arc<AppState>) {
-    // 预记录默认 is_completed=0，走 idx_logs_is_completed_pending，避免 logs 全表扫
     let orphans: Vec<(i64, String, f64, f64)> = match sqlx::query_as(&state.db.format_query(
         "SELECT id, user_id, cost, pre_deduct_gift FROM logs \
              WHERE is_completed = 0 AND status_code = 0 \
@@ -1429,89 +1541,35 @@ pub async fn cleanup_orphan_pending_logs(state: &Arc<AppState>) {
             return;
         }
     };
-
     if orphans.is_empty() {
         return;
     }
-
     tracing::info!(
         "[OrphanCleanup] 发现 {} 条孤儿日志，开始清理",
         orphans.len()
     );
-
     for (log_id, user_id, cost, pre_deduct_gift) in &orphans {
-        let mut tx = match state.db.pool.begin().await {
-            Ok(tx) => tx,
-            Err(e) => {
-                tracing::error!("[OrphanCleanup] 启动事务失败: {:?}", e);
-                continue;
-            }
-        };
-
-        // 更新日志状态为 408（请求超时），CAS 防并发
-        let update_res = sqlx::query(&state.db.format_query(
-            "UPDATE logs SET status_code = 408, cost = 0.0, pre_deduct_gift = 0.0, \
-             error_message = '请求处理超时或连接中断', \
-             billing_detail = '孤儿日志清理，预扣费已退回', is_completed = 1 \
-             WHERE id = ? AND status_code = 0",
-        ))
-        .bind(log_id)
-        .execute(&mut *tx)
-        .await;
-
-        let affected = match update_res {
-            Ok(r) => r.rows_affected(),
-            Err(e) => {
-                tracing::error!("[OrphanCleanup] 更新日志 {} 失败: {:?}", log_id, e);
-                let _ = tx.rollback().await;
-                continue;
-            }
-        };
-        if affected == 0 {
-            let _ = tx.rollback().await;
-            continue;
-        }
-
-        // 退还预扣费（如有）：同时退还系统钱包和赠送钱包
-        if *cost > 0.0 || *pre_deduct_gift > 0.0 {
-            let balance_refund = *cost - *pre_deduct_gift;
-            if let Err(e) = sqlx::query(&state.db.format_query(
-                "UPDATE users SET balance = balance + ?, gift_balance = gift_balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-            ))
-            .bind(balance_refund)
-            .bind(pre_deduct_gift)
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await
-            {
-                tracing::error!("[OrphanCleanup] 退还用户 {} 预扣费失败: {:?}", user_id, e);
-                let _ = tx.rollback().await;
-                continue;
-            }
-        }
-
-        if let Err(e) = tx.commit().await {
-            tracing::error!("[OrphanCleanup] 提交事务失败: {:?}", e);
-        } else if *cost > 0.0 || *pre_deduct_gift > 0.0 {
-            let balance_refund = *cost - *pre_deduct_gift;
-            tracing::info!(
-                "[OrphanCleanup] 日志 {} 已清理，退还用户 {} 系统钱包 {:.6} + 赠送钱包 {:.6}",
-                log_id,
-                user_id,
-                balance_refund,
-                pre_deduct_gift
-            );
+        let detail = if *cost > 0.0 || *pre_deduct_gift > 0.0 {
+            "孤儿日志清理，预扣费已退回"
         } else {
-            tracing::info!("[OrphanCleanup] 日志 {} 已清理（无预扣费）", log_id);
-        }
+            "孤儿日志清理"
+        };
+        let _ = close_pending_and_refund(
+            state,
+            *log_id,
+            user_id,
+            *cost,
+            *pre_deduct_gift,
+            408,
+            "请求处理超时或连接中断",
+            detail,
+        )
+        .await;
     }
 }
 
-/// 服务启动时恢复上次中断遗留的"处理中"日志
-/// 仅处理非异步冻结任务（异步任务由 task 模块后台轮询自动恢复，不重复调用上游）
+/// 服务启动时恢复上次中断遗留的"处理中"日志（不含异步冻结 status=200）
 pub async fn recover_interrupted_logs(state: &Arc<AppState>) {
-    // 与 TaskPoller 同思路：预记录 is_completed=0 + status_code=0 命中部分索引；
-    // NOT LIKE 仅在极小候选集上排除误标冻结行（异步冻结一般为 status_code=200）。
     let orphans: Vec<(i64, String, f64, f64)> = match sqlx::query_as(&state.db.format_query(
         "SELECT id, user_id, cost, pre_deduct_gift FROM logs \
              WHERE is_completed = 0 AND status_code = 0 \
@@ -1526,81 +1584,30 @@ pub async fn recover_interrupted_logs(state: &Arc<AppState>) {
             return;
         }
     };
-
     if orphans.is_empty() {
         return;
     }
-
     tracing::info!(
         "[StartupRecover] 发现 {} 条上次中断遗留的处理中日志",
         orphans.len()
     );
-
     for (log_id, user_id, cost, pre_deduct_gift) in &orphans {
-        let mut tx = match state.db.pool.begin().await {
-            Ok(tx) => tx,
-            Err(e) => {
-                tracing::error!("[StartupRecover] 启动事务失败: {:?}", e);
-                continue;
-            }
-        };
-
-        // CAS: 仅更新仍为 status_code=0 的日志，防止与其他清理逻辑并发
-        let result = sqlx::query(&state.db.format_query(
-            "UPDATE logs SET status_code = 503, cost = CASE WHEN ? > 0 THEN 0.0 ELSE cost END, pre_deduct_gift = CASE WHEN ? > 0 THEN 0.0 ELSE pre_deduct_gift END, \
-             error_message = '服务升级重启，请求被中断', \
-             billing_detail = CASE WHEN ? > 0 THEN '服务升级中断，预扣费已退回' \
-                 ELSE '服务升级中断' END, is_completed = 1 \
-             WHERE id = ? AND status_code = 0"
-        ))
-        .bind(cost)
-        .bind(pre_deduct_gift)
-        .bind(cost)
-        .bind(log_id)
-        .execute(&mut *tx)
-        .await;
-
-        let affected = result.as_ref().map(|r| r.rows_affected()).unwrap_or(0);
-        if affected == 0 {
-            let _ = tx.rollback().await;
-            continue;
-        }
-
-        // 退还预扣费（如有）：同时退还系统余额和赠送余额
-        if *cost > 0.0 || *pre_deduct_gift > 0.0 {
-            let balance_refund = *cost - *pre_deduct_gift;
-            if let Err(e) = sqlx::query(&state.db.format_query(
-                "UPDATE users SET balance = balance + ?, gift_balance = gift_balance + ?, \
-                 updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            ))
-            .bind(balance_refund)
-            .bind(pre_deduct_gift)
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await
-            {
-                tracing::error!("[StartupRecover] 退还用户 {} 预扣费失败: {:?}", user_id, e);
-                let _ = tx.rollback().await;
-                continue;
-            }
-        }
-
-        if let Err(e) = tx.commit().await {
-            tracing::error!("[StartupRecover] 提交事务失败: {:?}", e);
-        } else if *cost > 0.0 || *pre_deduct_gift > 0.0 {
-            tracing::info!(
-                "[StartupRecover] 日志 {} 已恢复，退还用户 {} 预扣费 {} (gift: {})",
-                log_id,
-                user_id,
-                cost,
-                pre_deduct_gift
-            );
+        let detail = if *cost > 0.0 || *pre_deduct_gift > 0.0 {
+            "服务升级中断，预扣费已退回"
         } else {
-            tracing::info!(
-                "[StartupRecover] 日志 {} 已标记为服务中断（无预扣费）",
-                log_id
-            );
-        }
+            "服务升级中断"
+        };
+        let _ = close_pending_and_refund(
+            state,
+            *log_id,
+            user_id,
+            *cost,
+            *pre_deduct_gift,
+            503,
+            "服务升级重启，请求被中断",
+            detail,
+        )
+        .await;
     }
 }
 
@@ -1615,34 +1622,107 @@ pub fn sanitize_error_message(msg: &str) -> String {
     re_key.replace_all(&result, "***").to_string()
 }
 
-/// 上游失败对外错误：日志与客户端共用同一 HTTP 状态码（4xx/5xx 透出，其余按 502）
-/// 对方舟/智算等 ErrorCode+ErrorMessage 扁平错误，统一转为 OpenAI error 再返回
-pub fn upstream_fail(status: u16, raw_msg: &str) -> crate::error::AppError {
-    let normalized = normalize_upstream_error_for_client(raw_msg);
-    let msg = sanitize_error_message(&normalized);
-    let status = if (400..600).contains(&status) {
+/// 上游失败对外 HTTP 状态：仅保留 4xx/5xx，其余按网关 502（与日志、HA first_fail 共用）
+#[inline]
+fn norm_status(status: u16) -> u16 {
+    if (400..600).contains(&status) {
         status
     } else {
         502
-    };
-    crate::error::AppError::UpstreamHttpError(status, msg)
+    }
 }
 
-/// 仅将 PascalCase ErrorCode 扁平错误转为 OpenAI 格式；其它厂商 JSON 保持原样透传
-fn normalize_upstream_error_for_client(raw_msg: &str) -> String {
+/// 上游失败对外错误：日志与客户端共用同一 HTTP 状态码（4xx/5xx 透出，其余按 502）
+/// 错误体经 `format_as_openai_error` 收成标准 OpenAI error
+pub fn upstream_fail(status: u16, raw_msg: &str) -> crate::error::AppError {
+    let msg = sanitize_error_message(&norm_err_msg(raw_msg));
+    crate::error::AppError::UpstreamHttpError(norm_status(status), msg)
+}
+
+/// 零费用/失败结算参数（检测仍由调用方完成；本结构负责记账，可选再包成 `upstream_fail`）。
+///
+/// - `prefer_http_status = Some(s)`：传输失败 / HTTP 非 2xx / 调用方已定码，状态用 `s`，日志文案用 `upstream_error_text`
+/// - `prefer_http_status = None`：HTTP 200 业务失败，状态码与日志文案从 `response_body` 推断/提取
+/// - `client_msg`：客户端文案；`None` 时与日志 `error_msg` 相同
+/// - `pre_deducted` / `pre_deduct_gift`：预扣后失败退费场景传入已预扣额；上游失败尚未预扣时保持 `0.0`
+pub struct ZeroCostUpstreamFail<'a> {
+    pub state: &'a Arc<AppState>,
+    pub token: &'a ApiToken,
+    pub channel: &'a crate::models::Channel,
+    pub model: &'a str,
+    pub prefer_http_status: Option<u16>,
+    pub endpoint: &'a str,
+    pub latency_ms: u32,
+    pub is_stream: i32,
+    pub request_content: String,
+    pub response_body: String,
+    pub response_content: Option<String>,
+    pub upstream_req_content: Option<String>,
+    pub billing_detail: Option<String>,
+    pub hint_category: Option<&'a str>,
+    pub pending_log_id: Option<i64>,
+    pub billing_model_hint: Option<&'a str>,
+    pub db_model: Option<&'a crate::models::Model>,
+    pub client_msg: Option<&'a str>,
+    pub pre_deducted: f64,
+    pub pre_deduct_gift: f64,
+}
+
+/// 失败记账（cost=0）：返回 `(status_code, client_msg)`，由调用方决定 `upstream_fail` / `BadRequest` 等。
+/// `status_code` 已经过 `norm_status`，与后续 `upstream_fail` / HA first_fail 一致。
+pub async fn record_zero_cost_fail(p: ZeroCostUpstreamFail<'_>) -> (u16, String) {
+    let raw_status = p
+        .prefer_http_status
+        .unwrap_or_else(|| infer_error_status_code_from_str(&p.response_body));
+    let status_code = norm_status(raw_status);
+    let error_msg = match p.prefer_http_status {
+        Some(_) => upstream_error_text(status_code, &p.response_body),
+        None => extract_error_message(&p.response_body),
+    };
+    let client_owned = p.client_msg.unwrap_or(&error_msg).to_string();
+    record_and_bill_inner(BillRecord {
+        state: p.state,
+        token: p.token,
+        channel: p.channel,
+        model: p.model,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        cached_tokens: 0,
+        cost: 0.0,
+        pre_deducted: p.pre_deducted,
+        pre_deduct_gift: p.pre_deduct_gift,
+        status_code,
+        endpoint: p.endpoint,
+        error_msg: Some(&error_msg),
+        latency_ms: p.latency_ms,
+        is_stream: p.is_stream,
+        request_content: Some(p.request_content),
+        response_content: p.response_content,
+        upstream_req_content: p.upstream_req_content,
+        billing_detail: p.billing_detail,
+        hint_category: p.hint_category,
+        pending_log_id: p.pending_log_id,
+        billing_model_hint: p.billing_model_hint,
+        plugin_tag: None,
+        db_model: p.db_model,
+    })
+    .await;
+    (status_code, client_owned)
+}
+
+/// 失败记账 + 返回 `upstream_fail`（上游失败主路径）
+pub async fn record_zero_cost_upstream_fail(p: ZeroCostUpstreamFail<'_>) -> crate::error::AppError {
+    let (status, msg) = record_zero_cost_fail(p).await;
+    upstream_fail(status, &msg)
+}
+
+/// JSON 则走统一 OpenAI 错误规范化；非 JSON 原样返回
+fn norm_err_msg(raw_msg: &str) -> String {
     let raw = raw_msg.find('{').map(|i| &raw_msg[i..]).unwrap_or(raw_msg);
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
-        // 非空 ErrorCode 才转换，避免空串/null 误入
-        if v.get("ErrorCode")
-            .and_then(|c| c.as_str())
-            .is_some_and(|c| !c.is_empty())
-        {
-            if let Some(formatted) = super::response_formatter::format_as_openai_error(&v) {
-                return formatted;
-            }
-        }
-    }
-    raw_msg.to_string()
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| super::response_formatter::format_as_openai_error(&v))
+        .unwrap_or_else(|| raw_msg.to_string())
 }
 
 /// 上游错误文案：空 body 时补默认句，供日志与 `upstream_fail` 共用
@@ -1670,10 +1750,12 @@ pub fn extract_error_message(resp_body: &str) -> String {
 }
 
 /// 根据错误响应 JSON 推断业务 HTTP 状态码
-/// 优先从结构化 error.code 精确识别；无 code 时从 message 文本关键词兜底
+/// 优先从结构化 error.code 精确识别；非 HTTP 业务码或无 code 时从 message 文本关键词兜底
 pub fn infer_error_status_code(body: &serde_json::Value) -> u16 {
     if let Some(code) = super::response_formatter::extract_error_code_from_value(body) {
-        return classify_error_code(&code);
+        if let Some(status) = classify_error_code(&code) {
+            return status;
+        }
     }
     let msg = super::response_formatter::extract_error_message_from_value(body).unwrap_or_default();
     classify_error_text(&msg)
@@ -1689,14 +1771,16 @@ pub fn infer_error_status_code_from_str(err: &str) -> u16 {
     classify_error_text(err)
 }
 
-/// 按 error.code 字符串分类 HTTP 状态码（私有辅助）
-/// 支持字符串语义码（"PolicyViolation" / "PERMISSION_ERROR"）和数字字符串（"429"）直接映射
-fn classify_error_code(code: &str) -> u16 {
-    // 数字形式（APIMart/即梦等直接返回 HTTP 状态码数字）→ 直接映射
+/// 按 error.code 字符串分类 HTTP 状态码。
+/// 数字仅在合法 HTTP 错误区间（400–599）时采纳；厂商业务码（如 MiniMax 2013）返回 None，
+/// 由调用方按 message 再分级。语义字符串码（PolicyViolation 等）正常映射。
+fn classify_error_code(code: &str) -> Option<u16> {
     if let Ok(n) = code.parse::<u16>() {
-        if n >= 400 {
-            return n;
-        }
+        return if (400..=599).contains(&n) {
+            Some(n)
+        } else {
+            None
+        };
     }
     let c = code.to_lowercase();
     // 403：内容安全 / 政策违规 / 权限不足（permission 须排在 auth 之前）
@@ -1712,7 +1796,7 @@ fn classify_error_code(code: &str) -> u16 {
         || c.contains("forbidden")
         || c.contains("access_denied")
     {
-        return 403;
+        return Some(403);
     }
     // 鉴权/身份认证失败
     if c.contains("auth")
@@ -1722,7 +1806,7 @@ fn classify_error_code(code: &str) -> u16 {
         || c.contains("unauthenticated")
         || c.contains("revoked")
     {
-        return 401;
+        return Some(401);
     }
     // 限流/超额
     if c.contains("rate")
@@ -1731,7 +1815,7 @@ fn classify_error_code(code: &str) -> u16 {
         || c.contains("throttl")
         || c.contains("exceeded")
     {
-        return 429;
+        return Some(429);
     }
     // 超时/不可用
     if c.contains("timeout")
@@ -1739,14 +1823,14 @@ fn classify_error_code(code: &str) -> u16 {
         || c.contains("unavailable")
         || c.contains("overload")
     {
-        return 504;
+        return Some(504);
     }
     // 上游服务内部错误
     if c.contains("internal") || c.contains("server_error") || c.contains("service_error") {
-        return 500;
+        return Some(500);
     }
-    // 有 code 但未命中以上分类 → 客户端类业务错误
-    400
+    // 有语义 code 但未命中以上分类 → 客户端类业务错误
+    Some(400)
 }
 
 /// message 文本关键词分类 HTTP 状态码（无结构化 error.code 时的兜底，私有辅助）
@@ -1872,7 +1956,7 @@ async fn fetch_and_parse(
     let status = resp.status().as_u16();
     if status != 200 && status != 206 {
         tracing::warn!(
-            "[VideoDuration] HTTP 状态码非预期: {}, status={}",
+            "[VideoDuration] HTTP 状态码非预期: {} 状态码={}",
             url,
             status
         );
@@ -1914,7 +1998,7 @@ async fn probe_video_duration(client: &reqwest::Client, url: &str) -> f64 {
 
     if dur > 0.0 {
         tracing::info!(
-            "[VideoDuration] 头部解析成功: {}, duration={}, 耗时={:?}",
+            "[VideoDuration] 头部解析成功: {} 时长={} 耗时={:?}",
             url,
             dur,
             start.elapsed()
@@ -1929,7 +2013,7 @@ async fn probe_video_duration(client: &reqwest::Client, url: &str) -> f64 {
             if let Some((tail_dur, _, _)) = fetch_and_parse(client, url, &range).await {
                 if tail_dur > 0.0 {
                     tracing::info!(
-                        "[VideoDuration] 尾部解析成功: {}, duration={}, 耗时={:?}",
+                        "[VideoDuration] 尾部解析成功: {} 时长={} 耗时={:?}",
                         url,
                         tail_dur,
                         start.elapsed()
@@ -1942,7 +2026,7 @@ async fn probe_video_duration(client: &reqwest::Client, url: &str) -> f64 {
 
     // 3. 兜底处理 (若全部步骤都没找到，则宣告失败)
     tracing::warn!(
-        "[VideoDuration] 探测失败(非标准或元数据过大): {}, 大小={} 字节, 总长={:?}, 耗时={:?}",
+        "[VideoDuration] 探测失败(非标准或元数据过大): {} 大小={} 字节 总大小={:?} 耗时={:?}",
         url,
         head_buf.len(),
         total_size,

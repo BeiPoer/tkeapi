@@ -1169,6 +1169,17 @@ resp = client.chat.completions.create(
       ctaDesc.innerHTML = ctaDesc.innerHTML.replace(urlRegex, `<code>${resolvedApiUrl}</code>`);
     }
 
+    // Update CTA button links dynamically to use the current site's address if they are the default hardcoded artsapi links
+    const ctaPrimary = document.querySelector('.cta-primary');
+    if (ctaPrimary && (ctaPrimary.getAttribute('href') === 'https://api.artsapi.com' || ctaPrimary.getAttribute('href') === '')) {
+      ctaPrimary.setAttribute('href', window.location.origin);
+    }
+    
+    const ctaSecondary = document.querySelector('.cta-secondary');
+    if (ctaSecondary && (ctaSecondary.getAttribute('href') === 'https://docs.artsapi.com' || ctaSecondary.getAttribute('href') === '')) {
+      ctaSecondary.setAttribute('href', window.location.origin + '/docs');
+    }
+
     // Connect Particles Logic
     const particleCanvas = document.getElementById('hero-particles');
     if (particleCanvas) {

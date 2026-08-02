@@ -403,8 +403,10 @@ const Users: React.FC = () => {
       
       message.success(`正在打开用户端: ${user.username}`);
       
-      // 添加一个特定标记，便于 Login.tsx 处理特殊情况
-      window.open(`${baseUrl}/login?token=${token}&impersonate=1`, '_blank');
+      // 用 localStorage 一次性交接，避免 JWT 出现在 URL
+      const handoffKey = `imp_handoff_${crypto.randomUUID()}`;
+      localStorage.setItem(handoffKey, token);
+      window.open(`${baseUrl}/login?impersonate=1&handoff=${encodeURIComponent(handoffKey)}`, '_blank', 'noopener,noreferrer');
     } catch (e) {
       console.error(e);
       message.error('切换用户失败');
@@ -598,21 +600,19 @@ const Users: React.FC = () => {
       key: 'actions',
       render: (_: unknown, record: User) => (
         <Space>
+          <Button 
+            icon={<WalletOutlined />} 
+            style={{ color: '#52c41a', borderColor: '#52c41a' }}
+            onClick={() => handleRechargeClick(record)} 
+            title="充值"
+          />
           {!isAdminPage && (
-            <>
-              <Button 
-                icon={<WalletOutlined />} 
-                style={{ color: '#52c41a', borderColor: '#52c41a' }}
-                onClick={() => handleRechargeClick(record)} 
-                title="充值"
-              />
-              <Button 
-                icon={<LoginOutlined />} 
-                style={{ color: '#1677ff', borderColor: '#1677ff' }}
-                onClick={() => handleImpersonate(record)}
-                title="登录此用户"
-              />
-            </>
+            <Button 
+              icon={<LoginOutlined />} 
+              style={{ color: '#1677ff', borderColor: '#1677ff' }}
+              onClick={() => handleImpersonate(record)}
+              title="登录此用户"
+            />
           )}
           <Button icon={<EditOutlined />} onClick={() => handleEdit(record)} />
           <Popconfirm title={t('common.confirm_delete')} onConfirm={() => handleDelete(record.id)}>
@@ -623,7 +623,7 @@ const Users: React.FC = () => {
     },
   ];
 
-  const columns = (isAdminPage ? baseColumns.filter(c => c.key !== 'balance') : baseColumns).map((col: any) => ({
+  const columns = baseColumns.map((col: any) => ({
     ...col,
     width: columnsWidths[col.key as string] || col.width || 150,
     onHeaderCell: (column: any) => ({
@@ -642,31 +642,29 @@ const Users: React.FC = () => {
         </Title>
         <Space wrap>
           {!isAdminPage && (
-            <>
-              <Select
-                value={filterGroup}
-                onChange={setFilterGroup}
-                style={{ width: screens.xs ? '100%' : 200 }}
-                options={[
-                  { value: 'all', label: '全部用户等级' },
-                  ...userLevels.map(level => ({ value: level.group_key, label: `${level.name} (${level.discount}x)` }))
-                ]}
-              />
-              {screens.xs && (
-                <Select
-                  value={walletTimeFilter}
-                  onChange={(v) => {
-                    setWalletTimeFilter(v);
-                    localStorage.setItem('walletTimeFilter', v);
-                  }}
-                  options={[
-                    { label: '全部钱包数据', value: 'all' },
-                    { label: '当月钱包数据', value: 'month' },
-                  ]}
-                  style={{ width: '100%' }}
-                />
-              )}
-            </>
+            <Select
+              value={filterGroup}
+              onChange={setFilterGroup}
+              style={{ width: screens.xs ? '100%' : 200 }}
+              options={[
+                { value: 'all', label: '全部用户等级' },
+                ...userLevels.map(level => ({ value: level.group_key, label: `${level.name} (${level.discount}x)` }))
+              ]}
+            />
+          )}
+          {screens.xs && (
+            <Select
+              value={walletTimeFilter}
+              onChange={(v) => {
+                setWalletTimeFilter(v);
+                localStorage.setItem('walletTimeFilter', v);
+              }}
+              options={[
+                { label: '全部钱包数据', value: 'all' },
+                { label: '当月钱包数据', value: 'month' },
+              ]}
+              style={{ width: '100%' }}
+            />
           )}
           <Input 
             prefix={<SearchOutlined style={{ color: 'var(--ant-color-text-quaternary, #bfbfbf)' }} />}
@@ -822,29 +820,25 @@ const Users: React.FC = () => {
                   </CardRow>
                 )}
 
-                {!isAdminPage && (
-                  <div style={{ padding: '8px 0', borderBottom: '1px solid var(--ant-color-border-secondary)', borderTop: '1px solid var(--ant-color-border-secondary)', marginTop: 8 }}>
-                    <div style={{ marginBottom: 8 }}>
-                      <Text type="secondary" style={{ fontSize: 13 }}>钱包数据</Text>
-                    </div>
-                    <WalletBalanceDisplay 
-                      record={record} 
-                      onWalletClick={openWalletDetail} 
-                      totalRecharge={allStatsMap[record.id]?.recharge_amount}
-                      totalGiftRecharge={allStatsMap[record.id]?.gift_amount}
-                      monthStats={walletTimeFilter === 'month' ? monthStatsMap[record.id] : undefined}
-                      gap={12}
-                    />
+                <div style={{ padding: '8px 0', borderBottom: '1px solid var(--ant-color-border-secondary)', borderTop: '1px solid var(--ant-color-border-secondary)', marginTop: 8 }}>
+                  <div style={{ marginBottom: 8 }}>
+                    <Text type="secondary" style={{ fontSize: 13 }}>钱包数据</Text>
                   </div>
-                )}
+                  <WalletBalanceDisplay 
+                    record={record} 
+                    onWalletClick={openWalletDetail} 
+                    totalRecharge={allStatsMap[record.id]?.recharge_amount}
+                    totalGiftRecharge={allStatsMap[record.id]?.gift_amount}
+                    monthStats={walletTimeFilter === 'month' ? monthStatsMap[record.id] : undefined}
+                    gap={12}
+                  />
+                </div>
                 <CardRow label="注册IP"><Text type="secondary" style={{ fontSize: 12 }}>{record.register_ip || '未知'}</Text></CardRow>
                 <CardRow label="加入时间"><Text type="secondary" style={{ fontSize: 12 }}>{formatApiDateTime(record.created_at, 'MM-DD HH:mm')}</Text></CardRow>
                 <CardActions>
+                  <Button size="small" icon={<WalletOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a' }} onClick={() => handleRechargeClick(record)} title="充值" />
                   {!isAdminPage && (
-                    <>
-                      <Button size="small" icon={<WalletOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a' }} onClick={() => handleRechargeClick(record)} title="充值" />
-                      <Button size="small" icon={<LoginOutlined />} style={{ color: '#1677ff', borderColor: '#1677ff' }} onClick={() => handleImpersonate(record)} title="登录此用户" />
-                    </>
+                    <Button size="small" icon={<LoginOutlined />} style={{ color: '#1677ff', borderColor: '#1677ff' }} onClick={() => handleImpersonate(record)} title="登录此用户" />
                   )}
                   <Button size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)} />
                   <Popconfirm title={t('common.confirm_delete')} onConfirm={() => handleDelete(record.id)}>
@@ -972,7 +966,7 @@ const Users: React.FC = () => {
               </Select>
             </Form.Item>
           )}
-          {!isAdminPage && !editingUser && (
+          {!editingUser && (
             <div style={{ display: 'flex', gap: 16 }}>
               <Form.Item name="balance" label={`系统钱包余额 (${currencySymbol})`} initialValue={0} style={{ flex: 1 }}>
                 <InputNumber style={{ width: '100%' }} precision={6} min={0} />

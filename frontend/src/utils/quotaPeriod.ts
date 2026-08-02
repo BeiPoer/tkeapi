@@ -35,6 +35,85 @@ export function parseQuotaLimitInput(val: string | undefined): number {
   return Number.isFinite(n) ? n : -1;
 }
 
+/** 有限额度（≥0）；-1 / null / undefined 视为不限制，不参与大小比较 */
+export function isFiniteQuotaLimit(n: unknown): n is number {
+  return typeof n === 'number' && Number.isFinite(n) && n >= 0;
+}
+
+/**
+ * 校验额度层级：日 ≤ 周 ≤ 月 ≤ 总（仅双方均为有限额度时比较）。
+ * @returns 错误文案；合法则返回 null
+ */
+export function validateQuotaHierarchy(values: {
+  quota_limit?: number | null;
+  daily_quota_limit?: number | null;
+  weekly_quota_limit?: number | null;
+  monthly_quota_limit?: number | null;
+}): string | null {
+  const total = values.quota_limit;
+  const day = values.daily_quota_limit;
+  const week = values.weekly_quota_limit;
+  const month = values.monthly_quota_limit;
+
+  for (const [label, v] of [
+    ['总额度', total],
+    ['日额度', day],
+    ['周额度', week],
+    ['月额度', month],
+  ] as const) {
+    if (v != null && Number.isFinite(Number(v)) && Number(v) < -1) {
+      return `${label}不能小于 -1`;
+    }
+  }
+
+  const check = (
+    smaller: number | null | undefined,
+    larger: number | null | undefined,
+    msg: string,
+  ) => {
+    if (isFiniteQuotaLimit(smaller) && isFiniteQuotaLimit(larger) && smaller > larger) {
+      return msg;
+    }
+    return null;
+  };
+
+  return (
+    check(day, week, '日额度不能大于周额度') ||
+    check(day, month, '日额度不能大于月额度') ||
+    check(day, total, '日额度不能大于总额度') ||
+    check(week, month, '周额度不能大于月额度') ||
+    check(week, total, '周额度不能大于总额度') ||
+    check(month, total, '月额度不能大于总额度') ||
+    null
+  );
+}
+
+/** 根据其它字段计算某项额度的动态上限（用于 InputNumber max） */
+function getQuotaInputMax(
+
+  field: 'quota_limit' | 'daily_quota_limit' | 'weekly_quota_limit' | 'monthly_quota_limit',
+  values: {
+    quota_limit?: number | null;
+    daily_quota_limit?: number | null;
+    weekly_quota_limit?: number | null;
+    monthly_quota_limit?: number | null;
+  },
+): number | undefined {
+  const caps: number[] = [];
+  if (field === 'daily_quota_limit') {
+    if (isFiniteQuotaLimit(values.weekly_quota_limit)) caps.push(values.weekly_quota_limit);
+    if (isFiniteQuotaLimit(values.monthly_quota_limit)) caps.push(values.monthly_quota_limit);
+    if (isFiniteQuotaLimit(values.quota_limit)) caps.push(values.quota_limit);
+  } else if (field === 'weekly_quota_limit') {
+    if (isFiniteQuotaLimit(values.monthly_quota_limit)) caps.push(values.monthly_quota_limit);
+    if (isFiniteQuotaLimit(values.quota_limit)) caps.push(values.quota_limit);
+  } else if (field === 'monthly_quota_limit') {
+    if (isFiniteQuotaLimit(values.quota_limit)) caps.push(values.quota_limit);
+  }
+  if (caps.length === 0) return undefined;
+  return Math.min(...caps);
+}
+
 /** 日·周·月周期键（与后端 `%Y-%U` 周键一致；周日为一周起点） */
 export function getLocalPeriodKeys(tz: string) {
   const now = dayjs().tz(tz);

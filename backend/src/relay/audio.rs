@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -147,10 +147,11 @@ pub async fn audio_speech(
             Some(r) => r,
             None => {
                 if forward::model_has_forward_rules(&state, model).await {
-                    return Err(AppError::BadRequest(format!(
+                    ha.on_access_err(AppError::BadRequest(format!(
                         "模型 '{}' 不支持当前接口，请检查模型对应的转发规则",
                         model
                     )));
+                    break;
                 }
                 forward::infer_forward_from_base_url(
                     &channel.base_url,
@@ -228,7 +229,7 @@ pub async fn audio_speech(
         );
 
         tracing::info!(
-            "[Audio] model={}, target_type={}, url={}, text_chars={}",
+            "[Audio] 模型={} 目标类型={} URL={} 文本字符数={}",
             model,
             resolved.target_type,
             url,
@@ -268,8 +269,7 @@ pub async fn audio_speech(
         let model_c = model.clone();
         let request_content_str_c = request_content_str.clone();
         let response_format_c = response_format.clone();
-        let ctx_role_c = ctx.role.clone();
-        let ctx_model_discounts_c = ctx.model_discounts.clone();
+        let ctx_c = ctx.clone();
         let url_c = url.clone();
 
         tokio::spawn(async move {
@@ -279,31 +279,9 @@ pub async fn audio_speech(
             let model = model_c;
             let request_content_str = request_content_str_c;
             let response_format = response_format_c;
-            let ctx_role = ctx_role_c;
-            let ctx_model_discounts = ctx_model_discounts_c;
             let url = url_c;
             let result: Result<Response, AppError> = async {
-                // 业务正常，执行预扣费（管理员跳过）
-                let pre_deduct_gift = proxy::pre_deduct_or_intercept(
-                    &state,
-                    &token,
-                    &channel,
-                    &model,
-                    pre_deduction,
-                    &ep,
-                    start_time,
-                    0,
-                    &request_content_str,
-                    &upstream_body.to_string(),
-                    None,
-                    pending_log_id,
-                    db_model.as_ref(),
-                    &ctx_role,
-                    Some(resolved_cat.as_str()),
-                )
-                .await?;
-
-                // 构建并发送上游请求（统一鉴权 + 设置请求体）
+                // 先打上游；业务成功后再预扣（对齐 chat，缩短失败路径冻账窗口）
                 let builder = state
                     .http_client
                     .post(&url)
@@ -322,75 +300,69 @@ pub async fn audio_speech(
                         .header("X-Api-Request-Id", ulid::Ulid::new().to_string())
                         .header("X-Control-Require-Usage-Tokens-Return", "*");
                 }
+                let builder = crate::services::http_client::with_upstream_timeout(builder);
                 let resp = match builder.send().await {
                     Ok(resp) => resp,
                     Err(e) => {
                         let err_msg = e.to_string();
                         let latency_ms = start_time.elapsed().as_millis() as u32;
-                        proxy::record_and_bill_inner(proxy::BillRecord {
-                            state: &state,
-                            token: &token,
-                            channel: &channel,
-                            model: &model,
-                            prompt_tokens: 0,
-                            completion_tokens: 0,
-                            cached_tokens: 0,
-                            cost: 0.0,
-                            pre_deducted: pre_deduction,
-                            pre_deduct_gift: pre_deduct_gift,
-                            status_code: 502,
-                            endpoint: &ep,
-                            error_msg: Some(&err_msg),
-                            latency_ms: latency_ms,
-                            is_stream: 0,
-                            request_content: Some(request_content_str.clone()),
-                            response_content: Some(err_msg.clone()),
-                            upstream_req_content: Some(upstream_body.to_string()),
-                            billing_detail: None,
-                            hint_category: Some(resolved_cat.as_str()),
-                            pending_log_id: pending_log_id,
-                            billing_model_hint: None,
-                            plugin_tag: None,
-                            db_model: db_model.as_ref(),
-                        })
-                        .await;
-                        return Err(proxy::upstream_fail(502, &err_msg));
+                        return Err(proxy::record_zero_cost_upstream_fail(
+                            proxy::ZeroCostUpstreamFail {
+                                state: &state,
+                                token: &token,
+                                channel: &channel,
+                                model: &model,
+                                prefer_http_status: Some(502),
+                                endpoint: &ep,
+                                latency_ms,
+                                is_stream: 0,
+                                request_content: request_content_str.clone(),
+                                response_body: err_msg.clone(),
+                                response_content: Some(err_msg),
+                                upstream_req_content: Some(upstream_body.to_string()),
+                                billing_detail: None,
+                                hint_category: Some(resolved_cat.as_str()),
+                                pending_log_id,
+                                billing_model_hint: None,
+                                db_model: db_model.as_ref(),
+                                client_msg: None,
+                                pre_deducted: 0.0,
+                                pre_deduct_gift: 0.0,
+                            },
+                        )
+                        .await);
                     }
                 };
 
                 let status = resp.status().as_u16();
                 if !resp.status().is_success() {
                     let err = resp.text().await.unwrap_or_default();
-                    let display_err = proxy::upstream_error_text(status, &err);
                     let latency_ms = start_time.elapsed().as_millis() as u32;
-                    proxy::record_and_bill_inner(proxy::BillRecord {
-                        state: &state,
-                        token: &token,
-                        channel: &channel,
-                        model: &model,
-                        prompt_tokens: 0,
-                        completion_tokens: 0,
-                        cached_tokens: 0,
-                        cost: 0.0,
-                        pre_deducted: pre_deduction,
-                        pre_deduct_gift: pre_deduct_gift,
-                        status_code: status,
-                        endpoint: &ep,
-                        error_msg: Some(&display_err),
-                        latency_ms: latency_ms,
-                        is_stream: 0,
-                        request_content: Some(request_content_str.clone()),
-                        response_content: Some(err),
-                        upstream_req_content: Some(upstream_body.to_string()),
-                        billing_detail: None,
-                        hint_category: Some(resolved_cat.as_str()),
-                        pending_log_id: pending_log_id,
-                        billing_model_hint: None,
-                        plugin_tag: None,
-                        db_model: db_model.as_ref(),
-                    })
-                    .await;
-                    return Err(proxy::upstream_fail(status, &display_err));
+                    return Err(proxy::record_zero_cost_upstream_fail(
+                        proxy::ZeroCostUpstreamFail {
+                            state: &state,
+                            token: &token,
+                            channel: &channel,
+                            model: &model,
+                            prefer_http_status: Some(status),
+                            endpoint: &ep,
+                            latency_ms,
+                            is_stream: 0,
+                            request_content: request_content_str.clone(),
+                            response_body: err.clone(),
+                            response_content: Some(err),
+                            upstream_req_content: Some(upstream_body.to_string()),
+                            billing_detail: None,
+                            hint_category: Some(resolved_cat.as_str()),
+                            pending_log_id,
+                            billing_model_hint: None,
+                            db_model: db_model.as_ref(),
+                            client_msg: None,
+                            pre_deducted: 0.0,
+                            pre_deduct_gift: 0.0,
+                        },
+                    )
+                    .await);
                 }
 
                 // 根据 target_type 和路由类型分发响应处理
@@ -411,17 +383,17 @@ pub async fn audio_speech(
 
                         let raw_response = resp.text().await.unwrap_or_default();
 
-                        // 检查并记录火山 TTS 的业务错误（原生路由退费并透传 200，兼容路由退费并返回 502）
+                        // 检查并记录火山 TTS 的业务错误（原生路由退费并透传 200，兼容路由退费并返回推断状态码）
                         if let Some(err_json) = detect_volcengine_tts_error(&raw_response) {
                             let latency_ms = start_time.elapsed().as_millis() as u32;
                             if is_native_route {
-                                record_volcengine_tts_error(
+                                let _ = record_volcengine_tts_error(
                                     &state,
                                     &token,
                                     &channel,
                                     &model,
-                                    pre_deduction,
-                                    pre_deduct_gift,
+                                    0.0,
+                                    0.0,
                                     &ep,
                                     &err_json,
                                     latency_ms,
@@ -449,13 +421,13 @@ pub async fn audio_speech(
                                 } else {
                                     err_json.clone()
                                 };
-                                record_volcengine_tts_error(
+                                let fail_status = record_volcengine_tts_error(
                                     &state,
                                     &token,
                                     &channel,
                                     &model,
-                                    pre_deduction,
-                                    pre_deduct_gift,
+                                    0.0,
+                                    0.0,
                                     &ep,
                                     &display_err,
                                     latency_ms,
@@ -466,7 +438,7 @@ pub async fn audio_speech(
                                     db_model.as_ref(),
                                 )
                                 .await;
-                                return Err(proxy::upstream_fail(status, &display_err));
+                                return Err(proxy::upstream_fail(fail_status, &display_err));
                             }
                         }
 
@@ -502,13 +474,13 @@ pub async fn audio_speech(
                                 Err(err_msg) => {
                                     // SSE 事件级错误（HTTP 200 但业务失败，如 Invalid X-Api-Key）
                                     let latency_ms = start_time.elapsed().as_millis() as u32;
-                                    record_volcengine_tts_error(
+                                    let fail_status = record_volcengine_tts_error(
                                         &state,
                                         &token,
                                         &channel,
                                         &model,
-                                        pre_deduction,
-                                        pre_deduct_gift,
+                                        0.0,
+                                        0.0,
                                         &ep,
                                         &err_msg,
                                         latency_ms,
@@ -519,7 +491,7 @@ pub async fn audio_speech(
                                         db_model.as_ref(),
                                     )
                                     .await;
-                                    return Err(proxy::upstream_fail(502, &err_msg));
+                                    return Err(proxy::upstream_fail(fail_status, &err_msg));
                                 }
                             }
                         }
@@ -540,6 +512,24 @@ pub async fn audio_speech(
                         (body, request_text_chars, summary)
                     };
 
+                let pre_deduct_gift = proxy::pre_deduct_or_intercept(
+                    &state,
+                    &token,
+                    &channel,
+                    &model,
+                    pre_deduction,
+                    &ep,
+                    start_time,
+                    0,
+                    &request_content_str,
+                    &upstream_body.to_string(),
+                    None,
+                    pending_log_id,
+                    db_model.as_ref(),
+                    Some(resolved_cat.as_str()),
+                )
+                .await?;
+
                 // ── 计费结算 ──
                 let latency_ms = start_time.elapsed().as_millis() as u32;
 
@@ -549,15 +539,9 @@ pub async fn audio_speech(
 
                 // 将 text_characters 记入 completion_tokens 字段（复用现有的 token 计量字段）
                 let usage_tokens = crate::relay::usage_extractor::UsageTokens {
-                    prompt: 0,
                     completion: text_characters,
                     total: text_characters,
-                    cached: 0,
-                    cache_creation: 0,
-                    audio_tokens: 0,
-                    audio_cached_tokens: 0,
-                    image_tokens: 0,
-                    web_search: 0,
+                    ..Default::default()
                 };
 
                 let (cost, mut billing_detail) = crate::relay::calculate_relay_cost(
@@ -565,8 +549,7 @@ pub async fn audio_speech(
                     db_model.as_ref(),
                     db_rule.as_mut(),
                     &channel,
-                    ctx.discount,
-                    &ctx_model_discounts,
+                    &ctx_c,
                     &usage_tokens,
                     &features,
                     mapping_source,
@@ -758,7 +741,8 @@ fn detect_volcengine_tts_error(body_text: &str) -> Option<String> {
     None
 }
 
-/// 记录火山 TTS 错误日志（502）并执行退费结算
+/// 记录火山 TTS 错误日志并执行退费结算（不包装错误类型：原生路径可仍返回 200 透传）。
+/// 返回已规范化的状态码，兼容路由须用同一码构造 `upstream_fail`，避免日志与 HA/客户端不一致。
 async fn record_volcengine_tts_error(
     state: &Arc<AppState>,
     token: &ApiToken,
@@ -774,25 +758,19 @@ async fn record_volcengine_tts_error(
     upstream_body_str: &str,
     pending_log_id: Option<i64>,
     db_model: Option<&crate::models::Model>,
-) {
+) -> u16 {
     let status_code = proxy::infer_error_status_code_from_str(err_msg);
-    proxy::record_and_bill_inner(proxy::BillRecord {
-        state: state,
-        token: token,
-        channel: channel,
-        model: model,
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        cached_tokens: 0,
-        cost: 0.0,
-        pre_deducted: pre_deduction,
-        pre_deduct_gift: pre_deduct_gift,
-        status_code: status_code,
+    let (status_code, _) = proxy::record_zero_cost_fail(proxy::ZeroCostUpstreamFail {
+        state,
+        token,
+        channel,
+        model,
+        prefer_http_status: Some(status_code),
         endpoint: ep,
-        error_msg: Some(err_msg),
-        latency_ms: latency_ms,
+        latency_ms,
         is_stream: 0,
-        request_content: Some(request_content_str.to_string()),
+        request_content: request_content_str.to_string(),
+        response_body: err_msg.to_string(),
         response_content: Some(raw_response.to_string()),
         upstream_req_content: Some(upstream_body_str.to_string()),
         billing_detail: None,
@@ -801,10 +779,13 @@ async fn record_volcengine_tts_error(
                 .and_then(|m| m.type_name.as_deref())
                 .unwrap_or("音频"),
         ),
-        pending_log_id: pending_log_id,
+        pending_log_id,
         billing_model_hint: None,
-        plugin_tag: None,
-        db_model: db_model,
+        db_model,
+        client_msg: Some(err_msg),
+        pre_deducted: pre_deduction,
+        pre_deduct_gift,
     })
     .await;
+    status_code
 }

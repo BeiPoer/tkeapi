@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -58,10 +58,12 @@ pub async fn create_channel_config(
         format!("3{}", rng.gen_range(1000..=9999))
     };
 
+    let status = if req.status == 0 { 0 } else { 1 };
+
     sqlx::query(
         &state.db.format_query(
-            "INSERT INTO channel_configs (name, provider_type, base_url, api_key, remark, yid, sort_order, rate, priority, weight, quota_limit, daily_quota_limit, weekly_quota_limit, monthly_quota_limit) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO channel_configs (name, provider_type, base_url, api_key, remark, yid, sort_order, rate, priority, weight, quota_limit, daily_quota_limit, weekly_quota_limit, monthly_quota_limit, status, category_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
     )
     .bind(&req.name)
@@ -78,6 +80,8 @@ pub async fn create_channel_config(
     .bind(req.daily_quota_limit.unwrap_or(-1.0))
     .bind(req.weekly_quota_limit.unwrap_or(-1.0))
     .bind(req.monthly_quota_limit.unwrap_or(-1.0))
+    .bind(status)
+    .bind(req.category_id)
     .execute(&state.db.pool)
     .await?;
 
@@ -141,11 +145,17 @@ pub async fn update_channel_config(
     if let Some(m) = req.monthly_quota_limit {
         config.monthly_quota_limit = m;
     }
+    if let Some(s) = req.status {
+        config.status = if s == 0 { 0 } else { 1 };
+    }
+    if let Some(category_id) = req.category_id {
+        config.category_id = category_id;
+    }
 
     sqlx::query(
         &state.db.format_query(
             "UPDATE channel_configs SET name = ?, provider_type = ?, base_url = ?, api_key = ?, remark = ?, \
-             sort_order = ?, rate = ?, priority = ?, weight = ?, quota_limit = ?, daily_quota_limit = ?, weekly_quota_limit = ?, monthly_quota_limit = ? \
+             sort_order = ?, rate = ?, priority = ?, weight = ?, quota_limit = ?, daily_quota_limit = ?, weekly_quota_limit = ?, monthly_quota_limit = ?, status = ?, category_id = ? \
              WHERE id = ?"
         )
     )
@@ -162,6 +172,8 @@ pub async fn update_channel_config(
     .bind(config.daily_quota_limit)
     .bind(config.weekly_quota_limit)
     .bind(config.monthly_quota_limit)
+    .bind(config.status)
+    .bind(config.category_id)
     .bind(id)
     .execute(&state.db.pool)
     .await?;

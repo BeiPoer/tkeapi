@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -402,7 +402,6 @@ pub struct StatsQuery {
     pub provider_id: Option<i64>,
     pub api_provider_id: Option<i64>,
     pub type_id: Option<i64>,
-    pub search: Option<String>,
 }
 
 /// 分类统计接口 — 每个维度的 count 基于"排除自身、保留其他维度"的交叉筛选
@@ -414,7 +413,7 @@ pub async fn get_classifications_stats(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<StatsQuery>,
 ) -> AppResult<Json<ClassificationsResponse>> {
-    // ── 官方服务商 count（交叉: api_provider_id + type_id + search） ──
+    // ── 官方服务商 count（交叉: api_provider_id + type_id） ──
     let mut p_sql = r#"SELECT p.id, p.name, p.name_en, p.logo, p.is_system, COUNT(m.id) as count 
            FROM model_providers p 
            LEFT JOIN models m ON p.id = m.provider_id"#
@@ -426,9 +425,6 @@ pub async fn get_classifications_stats(
     }
     if query.type_id.is_some() {
         p_conds.push("m.type_id = ?");
-    }
-    if query.search.is_some() {
-        p_conds.push("(m.name ILIKE ? OR m.model_id ILIKE ? OR m.mid = ?)");
     }
     if !p_conds.is_empty() {
         p_sql.push_str(" AND ");
@@ -444,13 +440,9 @@ pub async fn get_classifications_stats(
     if let Some(tid) = query.type_id {
         pq = pq.bind(tid);
     }
-    if let Some(ref kw) = query.search {
-        let like = format!("%{}%", kw);
-        pq = pq.bind(like.clone()).bind(like).bind(kw);
-    }
     let providers = pq.fetch_all(&state.db.pool).await?;
 
-    // ── API 服务商 count（交叉: provider_id + type_id + search） ──
+    // ── API 服务商 count（交叉: provider_id + type_id） ──
     let mut ap_sql = r#"SELECT p.id, p.name, p.name_en, p.logo, p.is_system, COUNT(m.id) as count 
            FROM model_api_providers p 
            LEFT JOIN models m ON p.id = m.api_provider_id"#
@@ -462,9 +454,6 @@ pub async fn get_classifications_stats(
     }
     if query.type_id.is_some() {
         ap_conds.push("m.type_id = ?");
-    }
-    if query.search.is_some() {
-        ap_conds.push("(m.name ILIKE ? OR m.model_id ILIKE ? OR m.mid = ?)");
     }
     if !ap_conds.is_empty() {
         ap_sql.push_str(" AND ");
@@ -480,13 +469,9 @@ pub async fn get_classifications_stats(
     if let Some(tid) = query.type_id {
         apq = apq.bind(tid);
     }
-    if let Some(ref kw) = query.search {
-        let like = format!("%{}%", kw);
-        apq = apq.bind(like.clone()).bind(like).bind(kw);
-    }
     let api_providers = apq.fetch_all(&state.db.pool).await?;
 
-    // ── 类型 count（交叉: provider_id + api_provider_id + search） ──
+    // ── 类型 count（交叉: provider_id + api_provider_id） ──
     let mut t_sql = r#"SELECT t.id, t.name, t.name_en, t.logo, t.is_system, COUNT(m.id) as count 
            FROM model_types t 
            LEFT JOIN models m ON t.id = m.type_id"#
@@ -498,9 +483,6 @@ pub async fn get_classifications_stats(
     }
     if query.api_provider_id.is_some() {
         t_conds.push("m.api_provider_id = ?");
-    }
-    if query.search.is_some() {
-        t_conds.push("(m.name ILIKE ? OR m.model_id ILIKE ? OR m.mid = ?)");
     }
     if !t_conds.is_empty() {
         t_sql.push_str(" AND ");
@@ -515,10 +497,6 @@ pub async fn get_classifications_stats(
     }
     if let Some(apid) = query.api_provider_id {
         tq = tq.bind(apid);
-    }
-    if let Some(ref kw) = query.search {
-        let like = format!("%{}%", kw);
-        tq = tq.bind(like.clone()).bind(like).bind(kw);
     }
     let types = tq.fetch_all(&state.db.pool).await?;
 

@@ -25,7 +25,7 @@ const AdminLogin: React.FC = () => {
   const { t } = useTranslation();
   const [loading, setLoading] = useState(false);
   const [glitch, setGlitch] = useState(false);
-  const [isInitialized, setIsInitialized] = useState<boolean>(true);
+  const [isInitialized, setIsInitialized] = useState<boolean | null>(null);
 
   const navigate = useNavigate();
   const { token, user, setToken, setUser } = useAuthStore();
@@ -38,18 +38,20 @@ const AdminLogin: React.FC = () => {
         setIsInitialized(response.data.initialized);
       } catch (err) {
         console.error('Failed to check admin init status', err);
+        // 探测失败时按未初始化处理，优先展示配置页
+        setIsInitialized(false);
       }
     };
     checkInitStatus();
   }, []);
 
-  // 如果管理员已登录，直接跳转到控制台页面
+  // 如果管理员已登录，且系统已初始化，直接跳转到控制台页面
   useEffect(() => {
-    if (token && user?.role === 'admin') {
+    if (isInitialized && token && user?.role === 'admin') {
       const adminPath = localStorage.getItem('tokensbyte_admin_path') || 'admin1688';
       navigate(`/${adminPath}/dashboard`, { replace: true });
     }
-  }, [token, user, navigate]);
+  }, [isInitialized, token, user, navigate]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -103,7 +105,8 @@ const AdminLogin: React.FC = () => {
       message.success('超级管理员初始化成功！欢迎登录。');
       setIsInitialized(true);
       const adminPath = localStorage.getItem('tokensbyte_admin_path') || 'admin1688';
-      navigate(`/${adminPath}/dashboard`);
+      // 整页跳转，让 AdminSetupGate 重新探测 initialized 状态
+      window.location.assign(`/${adminPath}/dashboard`);
     } catch (error) {
       console.error(error);
       const axiosError = error as AxiosError<{ error: { message: string } }>;
@@ -112,6 +115,22 @@ const AdminLogin: React.FC = () => {
       setLoading(false);
     }
   };
+
+  if (isInitialized === null) {
+    return (
+      <div style={{
+        height: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: '#000',
+        color: '#00ff41',
+        fontFamily: 'monospace',
+      }}>
+        CHECKING_SYSTEM_STATUS...
+      </div>
+    );
+  }
 
   return (
     <ConfigProvider
@@ -160,8 +179,12 @@ const AdminLogin: React.FC = () => {
           zIndex: 0
         }} />
 
-        <Card 
-          style={{ 
+        <div style={{ zIndex: 2, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+          <Title level={1} style={{ margin: 0, marginBottom: 40, color: '#00ff41', letterSpacing: '8px', textShadow: '0 0 20px #00ff41', fontWeight: 'bold' }}>
+            TokensByte
+          </Title>
+          <Card 
+            style={{ 
             width: 450, 
             borderRadius: 0, 
             backgroundColor: 'rgba(10, 10, 10, 0.9)', 
@@ -336,6 +359,7 @@ const AdminLogin: React.FC = () => {
             </Form>
           )}
         </Card>
+        </div>
 
         <style>
           {`

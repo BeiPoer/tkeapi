@@ -107,7 +107,7 @@ pub async fn video_generations(
     // Plugin: happyhorse_router 智能路由拦截（条件编译，移除 feature 后自动禁用）
     #[cfg(feature = "plugin_happyhorse")]
     let hh_intercept =
-        crate::api::happyhorse_router::try_intercept(&state.db.pool, model, &body).await;
+        crate::api::plugins::happyhorse_router::try_intercept(&state.db.pool, model, &body).await;
     #[cfg(not(feature = "plugin_happyhorse"))]
     let hh_intercept: Option<HappyHorseStub> = None;
 
@@ -184,10 +184,11 @@ pub async fn video_generations(
             Some(r) => r,
             None => {
                 if forward::model_has_forward_rules(&state, billing_model).await {
-                    return Err(AppError::BadRequest(format!(
+                    ha.on_access_err(AppError::BadRequest(format!(
                         "模型 '{}' 不支持当前接口，请检查模型对应的转发规则",
                         billing_model
                     )));
+                    break;
                 }
                 forward::infer_forward_from_base_url(
                     &channel.base_url,
@@ -219,6 +220,17 @@ pub async fn video_generations(
             Some(&state.http_client),
         )
         .await;
+
+        // 通用视频模型分辨率校验（有分辨率计费配置且未开启时拦截，非分辨率计费全放行）
+        if !resolved.is_cascade {
+            if let Some(res_str) = body
+                .get("resolution")
+                .or_else(|| upstream_body.get("resolution"))
+                .and_then(|v| v.as_str())
+            {
+                cascade_check_resolution(db_rule.as_ref(), "", res_str)?;
+            }
+        }
 
         // 级联超分：增强档优先转发规则 res_enhance，缺省标准版；忽略请求体 version
         let mut cascade_tag_json = None;
@@ -281,7 +293,7 @@ pub async fn video_generations(
                 Ok(ch) => ch,
                 Err(e) => {
                     tracing::warn!(
-                        "[Cascade S2 Error] 级联画质增强专属渠道获取失败! 匹配参数 - model_id: '{}', user_group: '{}', level_id: '{}', mids: {:?}, 详细报错: {:?}",
+                        "[Cascade S2 Error] 级联画质增强专属渠道获取失败! 模型='{}' 分组='{}' 等级='{}' MIDs={:?} 错误={:?}",
                         volc_model_id, ctx.user_group, ctx.level_id, Some(vec![volc_db_model.mid.clone()]), e
                     );
                     return Err(e);
@@ -373,16 +385,18 @@ pub async fn video_generations(
             let mut tag_json = serde_json::json!({});
             #[cfg(feature = "plugin_happyhorse")]
             if let Some(ref hh) = hh_intercept {
-                tag_json =
-                    serde_json::from_str(&crate::api::happyhorse_router::build_plugin_tag(hh))
-                        .unwrap_or(serde_json::json!({}));
+                tag_json = serde_json::from_str(
+                    &crate::api::plugins::happyhorse_router::build_plugin_tag(hh),
+                )
+                .unwrap_or(serde_json::json!({}));
             }
             #[cfg(feature = "plugin_volcengine_enhance")]
             if tag_json.as_object().map_or(true, |o| o.is_empty())
                 && resolved.target_type == "volcengine_media_enhance"
             {
                 if let Some(ref m) = resolved.mid {
-                    tag_json = serde_json::json!(m);
+                    // 对象形式便于与 cascade 合并；查询侧走 model=ANY(mid/model_id)
+                    tag_json = serde_json::json!({ "mid": m });
                 }
             }
             // 级联模型：直接合并已获取到的级联配置
@@ -444,31 +458,27 @@ pub async fn video_generations(
                             .join("; ");
                         let latency_ms = start_time.elapsed().as_millis() as u32;
                         let status_code = proxy::infer_error_status_code_from_str(&full_err);
-                        proxy::record_and_bill_inner(proxy::BillRecord {
+                        let _ = proxy::record_zero_cost_fail(proxy::ZeroCostUpstreamFail {
                             state: &state,
                             token: &token,
                             channel: &channel,
-                            model: model,
-                            prompt_tokens: 0,
-                            completion_tokens: 0,
-                            cached_tokens: 0,
-                            cost: 0.0,
-                            pre_deducted: 0.0,
-                            pre_deduct_gift: 0.0,
-                            status_code: status_code,
+                            model,
+                            prefer_http_status: Some(status_code),
                             endpoint: &ep,
-                            error_msg: Some(&full_err),
-                            latency_ms: latency_ms,
+                            latency_ms,
                             is_stream: 0,
-                            request_content: Some(request_content_str.clone()),
+                            request_content: request_content_str.clone(),
+                            response_body: full_err,
                             response_content: None,
                             upstream_req_content: None,
                             billing_detail: asset_convert_log.clone(),
                             hint_category: Some(resolved_cat.as_str()),
                             pending_log_id: ha.pending_log_id,
                             billing_model_hint: Some(billing_model),
-                            plugin_tag: None,
                             db_model: db_model.as_ref(),
+                            client_msg: None,
+                            pre_deducted: 0.0,
+                            pre_deduct_gift: 0.0,
                         })
                         .await;
                         return Err(AppError::BadRequest(format!(
@@ -505,31 +515,27 @@ pub async fn video_generations(
                     .join("; ");
                 let latency_ms = start_time.elapsed().as_millis() as u32;
                 let status_code = proxy::infer_error_status_code_from_str(&full_err);
-                proxy::record_and_bill_inner(proxy::BillRecord {
+                let _ = proxy::record_zero_cost_fail(proxy::ZeroCostUpstreamFail {
                     state: &state,
                     token: &token,
                     channel: &channel,
-                    model: model,
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    cached_tokens: 0,
-                    cost: 0.0,
-                    pre_deducted: 0.0,
-                    pre_deduct_gift: 0.0,
-                    status_code: status_code,
+                    model,
+                    prefer_http_status: Some(status_code),
                     endpoint: &ep,
-                    error_msg: Some(&full_err),
-                    latency_ms: latency_ms,
+                    latency_ms,
                     is_stream: 0,
-                    request_content: Some(request_content_str.clone()),
+                    request_content: request_content_str.clone(),
+                    response_body: full_err,
                     response_content: None,
                     upstream_req_content: None,
                     billing_detail: asset_convert_log.clone(),
                     hint_category: Some(resolved_cat.as_str()),
                     pending_log_id: ha.pending_log_id,
                     billing_model_hint: Some(billing_model),
-                    plugin_tag: None,
                     db_model: db_model.as_ref(),
+                    client_msg: None,
+                    pre_deducted: 0.0,
+                    pre_deduct_gift: 0.0,
                 })
                 .await;
                 return Err(AppError::BadRequest(format!("素材转换失败: {}", user_msg)));
@@ -557,7 +563,6 @@ pub async fn video_generations(
 
         let state_c = state.clone();
         let token_c = token.clone();
-        let ctx_role_c = ctx.role.clone();
         let ep_c = ep.clone();
         let upstream_body_c = upstream_body.clone();
         let asset_convert_log_c = asset_convert_log.clone();
@@ -568,7 +573,6 @@ pub async fn video_generations(
             let state = state_c;
             let token = token_c;
             let channel = channel_c;
-            let ctx_role = ctx_role_c;
             let ep = ep_c;
             let mut upstream_body = upstream_body_c;
             let asset_convert_log = asset_convert_log_c;
@@ -580,82 +584,77 @@ pub async fn video_generations(
                     .http_client
                     .post(&url)
                     .header("Content-Type", "application/json");
-                let builder = forward::apply_request_auth(
-                    builder,
-                    &resolved,
-                    &channel.api_key,
-                    &mut upstream_body,
-                    &channel.base_url,
+                let builder = crate::services::http_client::with_upstream_timeout(
+                    forward::apply_request_auth(
+                        builder,
+                        &resolved,
+                        &channel.api_key,
+                        &mut upstream_body,
+                        &channel.base_url,
+                    ),
                 );
                 let resp = match builder.send().await {
                     Ok(resp) => resp,
                     Err(e) => {
                         let err_msg = e.to_string();
                         let latency_ms = start_time.elapsed().as_millis() as u32;
-                        proxy::record_and_bill_inner(proxy::BillRecord {
-                            state: &state,
-                            token: &token,
-                            channel: &channel,
-                            model: &model,
-                            prompt_tokens: 0,
-                            completion_tokens: 0,
-                            cached_tokens: 0,
-                            cost: 0.0,
-                            pre_deducted: 0.0,
-                            pre_deduct_gift: 0.0,
-                            status_code: 502,
-                            endpoint: &ep,
-                            error_msg: Some(&err_msg),
-                            latency_ms: latency_ms,
-                            is_stream: 0,
-                            request_content: Some(request_content_str.clone()),
-                            response_content: Some(err_msg.clone()),
-                            upstream_req_content: Some(upstream_body.to_string()),
-                            billing_detail: asset_convert_log.clone(),
-                            hint_category: Some(resolved_cat.as_str()),
-                            pending_log_id: pending_log_id,
-                            billing_model_hint: Some(&billing_model),
-                            plugin_tag: None,
-                            db_model: dm.as_ref(),
-                        })
-                        .await;
-                        return Err(proxy::upstream_fail(502, &err_msg));
+                        return Err(proxy::record_zero_cost_upstream_fail(
+                            proxy::ZeroCostUpstreamFail {
+                                state: &state,
+                                token: &token,
+                                channel: &channel,
+                                model: &model,
+                                prefer_http_status: Some(502),
+                                endpoint: &ep,
+                                latency_ms,
+                                is_stream: 0,
+                                request_content: request_content_str.clone(),
+                                response_body: err_msg.clone(),
+                                response_content: Some(err_msg),
+                                upstream_req_content: Some(upstream_body.to_string()),
+                                billing_detail: asset_convert_log.clone(),
+                                hint_category: Some(resolved_cat.as_str()),
+                                pending_log_id,
+                                billing_model_hint: Some(&billing_model),
+                                db_model: dm.as_ref(),
+                                client_msg: None,
+                                pre_deducted: 0.0,
+                                pre_deduct_gift: 0.0,
+                            },
+                        )
+                        .await);
                     }
                 };
 
                 let status = resp.status().as_u16();
                 if !resp.status().is_success() {
                     let err = resp.text().await.unwrap_or_default();
-                    let display_err = proxy::upstream_error_text(status, &err);
                     let latency_ms = start_time.elapsed().as_millis() as u32;
-                    proxy::record_and_bill_inner(proxy::BillRecord {
-                        state: &state,
-                        token: &token,
-                        channel: &channel,
-                        model: &model,
-                        prompt_tokens: 0,
-                        completion_tokens: 0,
-                        cached_tokens: 0,
-                        cost: 0.0,
-                        pre_deducted: 0.0,
-                        pre_deduct_gift: 0.0,
-                        status_code: status,
-                        endpoint: &ep,
-                        error_msg: Some(&display_err),
-                        latency_ms: latency_ms,
-                        is_stream: 0,
-                        request_content: Some(request_content_str.clone()),
-                        response_content: Some(err),
-                        upstream_req_content: Some(upstream_body.to_string()),
-                        billing_detail: asset_convert_log.clone(),
-                        hint_category: Some(resolved_cat.as_str()),
-                        pending_log_id: pending_log_id,
-                        billing_model_hint: Some(&billing_model),
-                        plugin_tag: None,
-                        db_model: dm.as_ref(),
-                    })
-                    .await;
-                    return Err(proxy::upstream_fail(status, &display_err));
+                    return Err(proxy::record_zero_cost_upstream_fail(
+                        proxy::ZeroCostUpstreamFail {
+                            state: &state,
+                            token: &token,
+                            channel: &channel,
+                            model: &model,
+                            prefer_http_status: Some(status),
+                            endpoint: &ep,
+                            latency_ms,
+                            is_stream: 0,
+                            request_content: request_content_str.clone(),
+                            response_body: err.clone(),
+                            response_content: Some(err),
+                            upstream_req_content: Some(upstream_body.to_string()),
+                            billing_detail: asset_convert_log.clone(),
+                            hint_category: Some(resolved_cat.as_str()),
+                            pending_log_id,
+                            billing_model_hint: Some(&billing_model),
+                            db_model: dm.as_ref(),
+                            client_msg: None,
+                            pre_deducted: 0.0,
+                            pre_deduct_gift: 0.0,
+                        },
+                    )
+                    .await);
                 }
 
                 let data = resp.bytes().await.unwrap_or_default();
@@ -669,36 +668,31 @@ pub async fn video_generations(
                 response_content_str = converted;
                 if let Some(err_response) = post_err {
                     let latency_ms = start_time.elapsed().as_millis() as u32;
-                    let err_text = proxy::extract_error_message(&response_content_str);
-                    let err_status = proxy::infer_error_status_code_from_str(&response_content_str);
-                    proxy::record_and_bill_inner(proxy::BillRecord {
-                        state: &state,
-                        token: &token,
-                        channel: &channel,
-                        model: &model,
-                        prompt_tokens: 0,
-                        completion_tokens: 0,
-                        cached_tokens: 0,
-                        cost: 0.0,
-                        pre_deducted: 0.0,
-                        pre_deduct_gift: 0.0,
-                        status_code: err_status,
-                        endpoint: &ep,
-                        error_msg: Some(&err_text),
-                        latency_ms: latency_ms,
-                        is_stream: 0,
-                        request_content: Some(request_content_str),
-                        response_content: Some(response_content_str),
-                        upstream_req_content: Some(upstream_body.to_string()),
-                        billing_detail: Some("请求失败".to_string()),
-                        hint_category: Some(resolved_cat.as_str()),
-                        pending_log_id: pending_log_id,
-                        billing_model_hint: Some(&billing_model),
-                        plugin_tag: None,
-                        db_model: dm.as_ref(),
-                    })
-                    .await;
-                    return Err(proxy::upstream_fail(err_status, &err_response));
+                    return Err(proxy::record_zero_cost_upstream_fail(
+                        proxy::ZeroCostUpstreamFail {
+                            state: &state,
+                            token: &token,
+                            channel: &channel,
+                            model: &model,
+                            prefer_http_status: None,
+                            endpoint: &ep,
+                            latency_ms,
+                            is_stream: 0,
+                            request_content: request_content_str,
+                            response_body: response_content_str.clone(),
+                            response_content: Some(response_content_str),
+                            upstream_req_content: Some(upstream_body.to_string()),
+                            billing_detail: Some("请求失败".to_string()),
+                            hint_category: Some(resolved_cat.as_str()),
+                            pending_log_id,
+                            billing_model_hint: Some(&billing_model),
+                            db_model: dm.as_ref(),
+                            client_msg: Some(&err_response),
+                            pre_deducted: 0.0,
+                            pre_deduct_gift: 0.0,
+                        },
+                    )
+                    .await);
                 }
 
                 let pre_deduct_gift = proxy::pre_deduct_or_intercept(
@@ -715,7 +709,6 @@ pub async fn video_generations(
                     None,
                     pending_log_id,
                     dm.as_ref(),
-                    &ctx_role,
                     Some(resolved_cat.as_str()),
                 )
                 .await?;

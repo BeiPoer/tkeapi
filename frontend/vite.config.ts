@@ -48,7 +48,17 @@ export default defineConfig(({ mode }) => {
           target: apiTarget,
           changeOrigin: true,
         },
-        '/home': {
+        // /home/models 由 React 模型广场页面处理，其余 /home 门户页面代理到后端
+        '^/home(?:/(?!models(?:[/?#]|$))|$)': {
+          target: apiTarget,
+          changeOrigin: true,
+        },
+        // 站点门户增强版公开页（排除 /home-pro/docs 由前端 React 接管）
+        '^/home-pro(?:$|/(?!docs(?:/|$)))': {
+          target: apiTarget,
+          changeOrigin: true,
+        },
+        '/portal-pro': {
           target: apiTarget,
           changeOrigin: true,
         },

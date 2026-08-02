@@ -61,7 +61,7 @@
   "contact_phone": "Phone",
   "contact_address": "Address",
   "contact_tip": "Tip",
-  "contact_tip_desc": "Please fill in the contact information in the admin panel under \"Portal Management -> Column Management\"",
+  "contact_tip_desc": "Please configure contact information in Admin → Site Portal → Portal Manager",
   "contact_social": "Social Media",
   "models_filter_tasks": "Tasks",
   "models_filter_providers": "Providers",

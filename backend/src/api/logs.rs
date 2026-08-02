@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -9,7 +9,7 @@ use crate::api::date_helper;
 use crate::auth;
 use crate::error::{AppError, AppResult};
 use crate::models::{LogDetailContent, LogListResponse, LogQuery, RequestLog};
-use crate::relay::cascade::{cascade_sanitize_for_user, cascade_scrub_plugin_tag_for_user};
+use crate::relay::cascade::cascade_sanitize_for_user;
 use crate::AppState;
 use axum::extract::Path;
 use axum::http::{header, StatusCode};
@@ -19,6 +19,98 @@ use axum::{
     Json,
 };
 use std::sync::Arc;
+
+/// 去掉计费明细末尾的渠道/模型映射段（` | 渠道映射: a ➞ b`），超管保留原文。
+fn strip_model_mapping_from_billing_detail(detail: &mut String) {
+    const MARKERS: &[&str] = &[" | 渠道映射:", " | 模型映射:"];
+    if let Some(i) = MARKERS.iter().filter_map(|m| detail.find(m)).min() {
+        let keep = detail[..i].trim_end().len();
+        detail.truncate(keep);
+    }
+}
+
+/// 普通用户列表：隐藏匹配规则相关标识（PID/EID/YID）。
+pub(crate) fn redact_log_match_ids_for_user(
+    billing_pid: &mut Option<String>,
+    forward_eid: &mut Option<String>,
+    yid: &mut Option<String>,
+) {
+    *billing_pid = None;
+    *forward_eid = None;
+    *yid = None;
+}
+
+/// 用户端接口：plugin_tag 白名单，仅保留列表/展开展示字段。
+fn project_plugin_tag_for_user(plugin_tag: &mut Option<String>) {
+    const KEEP: &[&str] = &["client_ct", "title"];
+    let Some(raw) = plugin_tag.as_deref() else {
+        return;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        *plugin_tag = None;
+        return;
+    };
+    let Some(obj) = v.as_object() else {
+        *plugin_tag = None;
+        return;
+    };
+    let mut out = serde_json::Map::new();
+    for key in KEEP {
+        if let Some(s) = obj
+            .get(*key)
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            out.insert((*key).to_string(), serde_json::Value::String(s.to_string()));
+        }
+    }
+    *plugin_tag = (!out.is_empty()).then(|| serde_json::Value::Object(out).to_string());
+}
+
+fn mask_upstream_url(upstream: &str) -> String {
+    let Some(scheme_end) = upstream.find("://") else {
+        return "***".to_string();
+    };
+    let scheme = &upstream[..scheme_end];
+    let rest = &upstream[scheme_end + 3..];
+    match rest.find('/') {
+        Some(slash_idx) => format!("{}://***{}", scheme, &rest[slash_idx..]),
+        None => format!("{}://***", scheme),
+    }
+}
+
+/// 普通用户 RequestLog 响应脱敏（日志列表 / 仪表盘最近活动共用）。
+pub(crate) fn redact_request_log_for_user(log: &mut RequestLog) {
+    log.channel_id = None;
+    log.channel_group_aid = None;
+    log.channel_name = None;
+    log.sub_channel_name = None;
+    redact_log_match_ids_for_user(&mut log.billing_pid, &mut log.forward_eid, &mut log.yid);
+    project_plugin_tag_for_user(&mut log.plugin_tag);
+    if let Some(ref err) = log.error_message {
+        log.error_message = Some(crate::relay::proxy::sanitize_error_message(err));
+    }
+    if let Some(ref upstream) = log.upstream_url {
+        log.upstream_url = Some(mask_upstream_url(upstream));
+    }
+}
+
+/// 用户等级是否允许查看日志详情（缺省允许）。
+pub(crate) async fn user_allow_view_log_details(
+    db: &crate::db::Database,
+    user_id: &str,
+) -> AppResult<bool> {
+    let perm: Option<i32> = sqlx::query_scalar(
+        &db.format_query(
+            "SELECT ul.allow_view_log_details FROM users u LEFT JOIN user_levels ul ON u.user_group = ul.group_key WHERE u.id = ?",
+        ),
+    )
+    .bind(user_id)
+    .fetch_optional(&db.pool)
+    .await?
+    .flatten();
+    Ok(perm.unwrap_or(1) == 1)
+}
 
 /// 与部分索引 `idx_logs_vision_created_at_new` 谓词对齐（数组成员勿随意改动）。
 pub(crate) const SQL_VISION_ACTION_FILTER: &str =
@@ -51,6 +143,13 @@ fn build_log_where(
         binds.push(uid.clone());
     }
 
+    if let Some(ref group) = query.user_group {
+        if !group.is_empty() {
+            sql.push_str(" AND EXISTS (SELECT 1 FROM users xu WHERE xu.id = l.user_id AND xu.user_group = ?)");
+            binds.push(group.clone());
+        }
+    }
+
     if let Some(ref model) = query.model {
         sql.push_str(" AND l.model LIKE ?");
         let escaped = model.replace('%', "\\%").replace('_', "\\_");
@@ -76,6 +175,11 @@ fn build_log_where(
         } else if status == "fail" {
             sql.push_str(" AND (l.status_code >= 400 OR l.status_code < 200)");
         }
+    }
+
+    if let Some(code) = query.status_code {
+        sql.push_str(" AND l.status_code = CAST(? AS INTEGER)");
+        binds.push(code.to_string());
     }
 
     if let Some(ref s) = query.start_date {
@@ -128,7 +232,10 @@ fn build_log_where(
 
     if let Some(ref keyword) = query.search_keyword {
         if !keyword.is_empty() {
-            sql.push_str(" AND (l.log_id = ? OR l.task_id = ?)");
+            sql.push_str(
+                " AND (l.log_id = ? OR l.task_id = ? OR EXISTS (SELECT 1 FROM channels xc WHERE xc.id = l.channel_id AND xc.group_aid = ?))",
+            );
+            binds.push(keyword.clone());
             binds.push(keyword.clone());
             binds.push(keyword.clone());
         }
@@ -176,7 +283,8 @@ const LOGS_LIST_SELECT: &str = "SELECT l.id, l.log_id, l.user_id, l.channel_id, 
          COALESCE((regexp_match(COALESCE(l.billing_detail, ''), '联网搜索:\\s*([\\d.]+)次'))[1]::float8, 0) AS billing_web_search, \
          l.billing_pid, l.forward_eid, l.pre_deduct_gift, l.plugin_tag, \
          l.action_type, l.is_completed, l.channel_config_id, l.task_id, l.created_at, \
-         c.group_aid AS channel_group_aid, c.name AS channel_name, c.provider_type AS channel_provider_type, \
+         l.is_ha, \
+         c.group_aid AS channel_group_aid, c.name AS channel_name, \
          cc.name AS sub_channel_name, cc.yid AS yid, \
          COALESCE(u.nickname, u.username) AS user_nickname, \
          u.user_group, ul.name AS user_level_name, u.uid AS user_uid, \
@@ -384,40 +492,9 @@ pub async fn list_logs(
 
     let mut allow_details = true;
     if claims.role != "admin" {
-        let perm: Option<i32> = sqlx::query_scalar(
-            &state.db.format_query(
-                "SELECT ul.allow_view_log_details FROM users u LEFT JOIN user_levels ul ON u.user_group = ul.group_key WHERE u.id = ?",
-            ),
-        )
-        .bind(&claims.sub)
-        .fetch_optional(&state.db.pool)
-        .await?
-        .flatten();
-        allow_details = perm.unwrap_or(1) == 1;
-
+        allow_details = user_allow_view_log_details(&state.db, &claims.sub).await?;
         for log in &mut logs {
-            log.channel_id = None;
-            log.channel_group_aid = None;
-            log.channel_name = None;
-            log.sub_channel_name = None;
-            // 列表大字段已为 NULL；stage 体脱敏在 get_log_detail；此处清进行中 cascade 密钥
-            cascade_scrub_plugin_tag_for_user(&mut log.plugin_tag);
-            if let Some(ref err) = log.error_message {
-                log.error_message = Some(crate::relay::proxy::sanitize_error_message(err));
-            }
-            if let Some(ref upstream) = log.upstream_url {
-                if let Some(scheme_end) = upstream.find("://") {
-                    let scheme = &upstream[0..scheme_end];
-                    let rest = &upstream[scheme_end + 3..];
-                    if let Some(slash_idx) = rest.find('/') {
-                        log.upstream_url = Some(format!("{}://***{}", scheme, &rest[slash_idx..]));
-                    } else {
-                        log.upstream_url = Some(format!("{}://***", scheme));
-                    }
-                } else {
-                    log.upstream_url = Some("***".to_string());
-                }
-            }
+            redact_request_log_for_user(log);
         }
     }
 
@@ -445,29 +522,39 @@ pub async fn get_log_detail(
     struct DetailRow {
         user_id: String,
         status_code: i32,
+        is_completed: i16,
+        task_id: Option<String>,
         request_content: Option<String>,
         response_content: Option<String>,
         post_response: Option<String>,
+        #[sqlx(default)]
         upstream_req_content: Option<String>,
         billing_detail: Option<String>,
         plugin_tag: Option<String>,
     }
 
-    let row: Option<DetailRow> = sqlx::query_as(&state.db.format_query(
-        "SELECT user_id, status_code, request_content, response_content, post_response, \
+    let is_admin = claims.role == "admin";
+    // 普通用户不读上游出参大字段（接口也不返回）；超管保留完整列
+    let detail_sql = if is_admin {
+        "SELECT user_id, status_code, is_completed, task_id, request_content, response_content, post_response, \
              upstream_req_content, billing_detail, plugin_tag \
-             FROM logs WHERE id = ?",
-    ))
-    .bind(id)
-    .fetch_optional(&state.db.pool)
-    .await?;
+             FROM logs WHERE id = ?"
+    } else {
+        "SELECT user_id, status_code, is_completed, task_id, request_content, response_content, post_response, \
+             billing_detail, plugin_tag \
+             FROM logs WHERE id = ?"
+    };
+    let row: Option<DetailRow> = sqlx::query_as(&state.db.format_query(detail_sql))
+        .bind(id)
+        .fetch_optional(&state.db.pool)
+        .await?;
 
     let row = match row {
         Some(r) => r,
         None => return Err(AppError::BadRequest("日志记录不存在".to_string())),
     };
 
-    if claims.role != "admin" && row.user_id != claims.sub {
+    if !is_admin && row.user_id != claims.sub {
         let my_uid: Option<String> =
             sqlx::query_scalar(&state.db.format_query("SELECT uid FROM users WHERE id = ?"))
                 .bind(&claims.sub)
@@ -489,21 +576,7 @@ pub async fn get_log_detail(
         }
     }
 
-    let mut allow_details = true;
-    if claims.role != "admin" {
-        let perm: Option<i32> = sqlx::query_scalar(
-            &state.db.format_query(
-                "SELECT ul.allow_view_log_details FROM users u LEFT JOIN user_levels ul ON u.user_group = ul.group_key WHERE u.id = ?",
-            ),
-        )
-        .bind(&claims.sub)
-        .fetch_optional(&state.db.pool)
-        .await?
-        .flatten();
-        allow_details = perm.unwrap_or(1) == 1;
-    }
-
-    if !allow_details {
+    if !is_admin && !user_allow_view_log_details(&state.db, &claims.sub).await? {
         return Ok(Json(LogDetailContent {
             id,
             request_content: None,
@@ -523,18 +596,23 @@ pub async fn get_log_detail(
         billing_detail: row.billing_detail,
     };
 
-    if claims.role != "admin" {
-        // 与列表策略一致：隐藏级联 stage1/stage2 内部结构
+    if !is_admin {
+        // 级联：进行中掩码产物；完成后折叠 stage（仅 response/post；上游出参已不返回）
         cascade_sanitize_for_user(
-            &mut detail.upstream_req_content,
             &mut detail.response_content,
             &mut detail.post_response,
             row.plugin_tag.as_deref(),
+            row.is_completed == 1,
+            row.task_id.as_deref().unwrap_or(""),
+            detail.request_content.as_deref(),
         );
         if row.status_code != 200 {
             if let Some(ref resp) = detail.response_content {
                 detail.response_content = Some(crate::relay::proxy::sanitize_error_message(resp));
             }
+        }
+        if let Some(ref mut bd) = detail.billing_detail {
+            strip_model_mapping_from_billing_detail(bd);
         }
     }
 

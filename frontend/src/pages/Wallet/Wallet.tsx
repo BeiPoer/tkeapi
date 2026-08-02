@@ -510,42 +510,50 @@ const Wallet: React.FC = () => {
       {redemptionEnabled && (
         <div
           style={{
-            marginBottom: 32,
-            padding: '20px 24px',
+            marginBottom: 24,
+            padding: '16px 20px',
             borderRadius: 8,
             border: cardBorder,
             background: cardBg,
             boxShadow: '0 1px 2px 0 rgba(0, 0, 0, 0.05)',
+            display: 'flex',
+            flexDirection: screens.md ? 'row' : 'column',
+            alignItems: screens.md ? 'center' : 'stretch',
+            justifyContent: 'space-between',
+            gap: 16,
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-            <TagOutlined style={{ color: mainText, fontSize: 16 }} />
-            <Text style={{ fontSize: 15, fontWeight: 600, color: mainText }}>
-              {isEn ? 'Redeem Code' : '兑换码充值'}
-            </Text>
-            {redeemFeedback && (
-              <Text
-                style={{
-                  fontSize: 13,
-                  fontWeight: 500,
-                  color:
-                    redeemFeedback.type === 'success'
-                      ? (isLight ? '#15803d' : '#4ade80')
-                      : redeemFeedback.type === 'warning'
-                        ? (isLight ? '#b45309' : '#fbbf24')
-                        : (isLight ? '#dc2626' : '#f87171'),
-                }}
-              >
-                {redeemFeedback.text}
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <TagOutlined style={{ color: mainText, fontSize: 16 }} />
+              <Text style={{ fontSize: 15, fontWeight: 600, color: mainText }}>
+                {isEn ? 'Redeem Code' : '兑换码充值'}
               </Text>
-            )}
+              {redeemFeedback && (
+                <Text
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 500,
+                    color:
+                      redeemFeedback.type === 'success'
+                        ? (isLight ? '#15803d' : '#4ade80')
+                        : redeemFeedback.type === 'warning'
+                          ? (isLight ? '#b45309' : '#fbbf24')
+                          : (isLight ? '#dc2626' : '#f87171'),
+                  }}
+                >
+                  {redeemFeedback.text}
+                </Text>
+              )}
+            </div>
+            <Text style={{ color: subText, fontSize: 13, marginTop: 2, display: 'block' }}>
+              {isEn
+                ? 'Enter a valid redemption code to top up your wallet balance.'
+                : '输入有效兑换码，即可为钱包余额充值。'}
+            </Text>
           </div>
-          <Text style={{ color: subText, fontSize: 13, display: 'block', marginBottom: 12 }}>
-            {isEn
-              ? 'Enter a valid redemption code to top up your wallet balance.'
-              : '输入有效兑换码，即可为钱包余额充值。'}
-          </Text>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', maxWidth: 520 }}>
+
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', width: screens.md ? 'auto' : '100%', flexShrink: 0 }}>
             <Input
               value={redeemCode}
               onChange={(e) => {
@@ -556,7 +564,7 @@ const Wallet: React.FC = () => {
               placeholder={isEn ? 'Enter redemption code' : '请输入兑换码'}
               allowClear
               status={redeemFeedback?.type === 'error' ? 'error' : undefined}
-              style={{ flex: 1, minWidth: 220, height: 40, borderRadius: 6 }}
+              style={{ width: screens.md ? 280 : '100%', height: 36, borderRadius: 6 }}
             />
             <Button
               type="primary"
@@ -564,13 +572,14 @@ const Wallet: React.FC = () => {
               disabled={redeeming || redeemCooldown > 0 || !redeemCode.trim()}
               onClick={handleRedeem}
               style={{
-                height: 40,
+                height: 36,
                 borderRadius: 6,
                 fontWeight: 500,
                 background: isLight ? '#09090b' : '#fafafa',
                 color: isLight ? '#fafafa' : '#09090b',
                 borderWidth: 0,
                 opacity: (redeeming || redeemCooldown > 0 || !redeemCode.trim()) ? 0.55 : 1,
+                flexShrink: 0,
               }}
             >
               {redeemCooldown > 0

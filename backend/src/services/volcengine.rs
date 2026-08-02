@@ -1,15 +1,14 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
 #![allow(dead_code)]
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
-use reqwest::{Client, Method};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -178,36 +177,6 @@ impl VolcClient {
             l.3 = plugin_name.to_string();
         }
         self
-    }
-
-    /// Implement Volcengine Signature V4（委托公共签名函数）
-    fn sign(
-        &self,
-        method: &Method,
-        host: &str,
-        path: &str,
-        query: &str,
-        service: &str,
-        region: &str,
-        _now: DateTime<Utc>,
-        payload: &[u8],
-    ) -> String {
-        let (auth, _, _) = volcengine_sign(
-            &self.config.access_key,
-            &self.config.secret_key,
-            method.as_str(),
-            host,
-            path,
-            query,
-            service,
-            region,
-            payload,
-        );
-        auth
-    }
-
-    fn hmac_sha256(&self, key: &[u8], data: &[u8]) -> Vec<u8> {
-        hmac_sha256(key, data)
     }
 
     pub async fn call_api<T: Serialize, R: for<'de> Deserialize<'de>>(
@@ -429,6 +398,40 @@ pub struct AssetModerationConfig {
     pub strategy: String,
 }
 
+/// 方舟 Create/Update Asset(Group) 的 Name 上限（文档：64 个字符）
+const ARK_NAME_MAX_CHARS: usize = 64;
+
+/// 组合名等：按字符截断到上限。
+pub fn clamp_ark_name(name: &str) -> String {
+    clamp_name(name, false)
+}
+
+/// 素材名：截断到上限，尽量保留扩展名（便于 ListAssets 模糊搜索）。
+pub fn clamp_create_asset_name(name: &str) -> String {
+    clamp_name(name, true)
+}
+
+fn clamp_name(name: &str, keep_ext: bool) -> String {
+    if name.chars().count() <= ARK_NAME_MAX_CHARS {
+        return name.to_string();
+    }
+    if keep_ext {
+        if let Some(i) = name.rfind('.') {
+            let ext = &name[i..];
+            let ext_len = ext.chars().count();
+            if i > 0 && ext_len <= 16 && !name[i + 1..].contains('/') {
+                let mut out: String = name[..i]
+                    .chars()
+                    .take(ARK_NAME_MAX_CHARS - ext_len)
+                    .collect();
+                out.push_str(ext);
+                return out;
+            }
+        }
+    }
+    name.chars().take(ARK_NAME_MAX_CHARS).collect()
+}
+
 /// CreateAsset 创建素材资产（上传到方舟素材库）
 #[derive(Serialize)]
 pub struct CreateAssetRequest {
@@ -504,6 +507,50 @@ pub struct DeleteAssetRequest {
 
 #[derive(Deserialize, Debug)]
 pub struct DeleteAssetResponse {}
+
+/// 规范化方舟素材 ID：先 trim，再去掉 `asset://` 前缀；空串表示无效。
+pub fn normalize_ark_asset_id(id: &str) -> &str {
+    let id = id.trim();
+    id.strip_prefix("asset://").unwrap_or(id).trim()
+}
+
+impl VolcClient {
+    /// 调用方舟 DeleteAsset，结果一律 `info` 输出；调用方应自行决定是否阻塞本地删除。
+    pub async fn delete_asset_logged(&self, asset_id: &str, log_tag: &str) -> bool {
+        let id = normalize_ark_asset_id(asset_id);
+        if id.is_empty() {
+            return false;
+        }
+        let req = DeleteAssetRequest {
+            id: id.to_string(),
+            project_name: Some(self.config.project_name.clone()),
+        };
+        match self
+            .call_api::<_, DeleteAssetResponse>(
+                "ark",
+                &self.config.region,
+                "DeleteAsset",
+                "2024-01-01",
+                req,
+            )
+            .await
+        {
+            Ok(_) => {
+                tracing::info!("[{}] DeleteAsset 成功: {}", log_tag, id);
+                true
+            }
+            Err(e) => {
+                tracing::info!(
+                    "[{}] DeleteAsset 失败(不影响本地删除): {} - {}",
+                    log_tag,
+                    id,
+                    e
+                );
+                false
+            }
+        }
+    }
+}
 
 /// UpdateAssetGroup 更新素材资产组合
 #[derive(Serialize)]

@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -58,6 +58,12 @@ pub struct SiteSettings {
     /// 左右风格下的左侧广告语名言
     #[serde(default)]
     pub login_quote: String,
+    /// 是否开启注册 IP 黑名单拦截
+    #[serde(default)]
+    pub ip_blacklist_enabled: bool,
+    /// 注册 IP 黑名单列表 (支持单 IP 及 CIDR 网段)
+    #[serde(default)]
+    pub ip_blacklist: Vec<String>,
 }
 
 fn default_login_style() -> String {
@@ -255,16 +261,19 @@ pub struct SMTPSettings {
     pub from_name: String,
 }
 
-/// 腾讯云短信通知设置
+/// 短信通知设置（provider: tencent | volcengine；缺省 tencent 兼容旧配置）
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SmsSettings {
-    /// 腾讯云 SecretId
+    /// 服务商：tencent（腾讯云）| volcengine（火山引擎）
+    #[serde(default = "default_sms_provider")]
+    pub provider: String,
+    /// 腾讯云 SecretId / 火山 Access Key
     #[serde(default)]
     pub secret_id: String,
-    /// 腾讯云 SecretKey
+    /// 腾讯云 SecretKey / 火山 Secret Key
     #[serde(default)]
     pub secret_key: String,
-    /// 短信应用 SDK AppID
+    /// 腾讯云 SdkAppId / 火山消息组 ID（SmsAccount）
     #[serde(default)]
     pub sdk_app_id: String,
     /// 已审核的短信签名
@@ -273,9 +282,65 @@ pub struct SmsSettings {
     /// 验证码模板 ID
     #[serde(default)]
     pub template_id: String,
-    /// 余额不足提醒模板 ID（模板参数建议：{1}=当前余额 {2}=阈值）
+    /// 余额不足提醒模板 ID（无变量固定正文）
     #[serde(default)]
     pub balance_template_id: String,
+    /// 火山验证码模板变量名（TemplateParam JSON 键，默认 code）
+    #[serde(default = "default_sms_code_param")]
+    pub code_param: String,
+}
+
+fn default_sms_provider() -> String {
+    "tencent".to_string()
+}
+
+fn default_sms_code_param() -> String {
+    "code".to_string()
+}
+
+impl Default for SmsSettings {
+    fn default() -> Self {
+        Self {
+            provider: default_sms_provider(),
+            secret_id: String::new(),
+            secret_key: String::new(),
+            sdk_app_id: String::new(),
+            sign_name: String::new(),
+            template_id: String::new(),
+            balance_template_id: String::new(),
+            code_param: default_sms_code_param(),
+        }
+    }
+}
+
+impl SmsSettings {
+    pub fn is_volcengine(&self) -> bool {
+        self.provider.trim().eq_ignore_ascii_case("volcengine")
+    }
+
+    pub fn credentials_configured(&self) -> bool {
+        !self.secret_id.trim().is_empty() && !self.secret_key.trim().is_empty()
+    }
+
+    /// 是否已配置余额提醒模板（开启短信余额提醒前的前置条件）
+    pub fn balance_template_configured(&self) -> bool {
+        !self.balance_template_id.trim().is_empty()
+    }
+
+    /// 发送时使用的余额模板 ID（去空白）
+    pub fn balance_template_id_effective(&self) -> &str {
+        self.balance_template_id.trim()
+    }
+
+    /// 火山验证码变量名（与控制台变量名一致，如 1 / code，勿带 ${}）
+    pub fn code_param_effective(&self) -> &str {
+        let p = self.code_param.trim();
+        if p.is_empty() {
+            "code"
+        } else {
+            p
+        }
+    }
 }
 
 /// 营销设置

@@ -61,7 +61,7 @@
   "contact_phone": "Điện thoại",
   "contact_address": "Địa chỉ",
   "contact_tip": "Gợi ý",
-  "contact_tip_desc": "Vui lòng điền thông tin liên hệ trong trang quản trị \"Quản lý cổng thông tin -> Quản lý chuyên mục\"",
+  "contact_tip_desc": "Vui lòng cấu hình liên hệ trong Admin → Site Portal → Portal Manager",
   "contact_social": "Mạng xã hội",
   "models_filter_tasks": "Loại khả năng",
   "models_filter_providers": "Nhà cung cấp",

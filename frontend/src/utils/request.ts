@@ -18,6 +18,24 @@ const request = axios.create({
   timeout: 300000, // 5 minutes timeout for long-running requests like image generation
 });
 
+/** 按当前路径决定 401 后的登录跳转目标；已在登录相关页则返回 null（不跳转） */
+function resolveAuthRedirectPath(): string | null {
+  const pathname = window.location.pathname;
+  const adminPath = localStorage.getItem('tokensbyte_admin_path') || 'admin1688';
+  const adminBase = `/${adminPath}`;
+  const isAdminLogin = pathname === adminBase || pathname === `${adminBase}/`;
+  const isUserAuthPage =
+    pathname === '/login' ||
+    pathname.startsWith('/login/') ||
+    pathname === '/register' ||
+    pathname === '/forgot-password';
+
+  if (isAdminLogin || isUserAuthPage) return null;
+
+  const isAdminArea = pathname === adminBase || pathname.startsWith(`${adminBase}/`);
+  return isAdminArea ? adminBase : '/login';
+}
+
 request.interceptors.request.use(
   (config) => {
     const token = sessionStorage.getItem('token') || localStorage.getItem('token');
@@ -62,6 +80,16 @@ request.interceptors.response.use(
     }
     if (response) {
       const { status, data } = response;
+
+      // 开发环境下，处理后端正在重启/编译的 502/503/504 错误
+      if (status === 502 || status === 503 || status === 504) {
+        if (import.meta.env.DEV) {
+          message.destroy('dev-backend-down');
+          message.warning({ content: '后端服务正在编译或重启中...', key: 'dev-backend-down', duration: 3 });
+          return Promise.reject(error);
+        }
+      }
+
       let serverMsg = data?.error?.message || data?.message || (typeof data?.error === 'string' ? data.error : undefined) || (typeof data === 'string' ? data : undefined);
       
       // Translate specific backend error messages
@@ -74,12 +102,12 @@ request.interceptors.response.use(
       }
 
       if (status === 401) {
-        // 区分"业务认证失败"与"登录态过期"：
-        // 当前无 token（登录/注册等未登录页面）→ 直接展示后端消息
-        // 当前有 token（登录态页面） → 清除 token 并跳转登录
+        // 区分"业务认证失败"与"登录态过期/缺失"：
+        // - 管理端受保护页 → 跳管理登录页；用户端 → /login
+        // - 已在登录页：展示业务错误；忽略退出后残留请求的 Authentication required
         const isImpersonating = !!sessionStorage.getItem('token');
-        const hasToken = isImpersonating || !!localStorage.getItem('token');
-        if (hasToken) {
+        const hadToken = isImpersonating || !!localStorage.getItem('token');
+        if (hadToken) {
           if (isImpersonating) {
             // 代理登录态过期，仅清 session，保留管理员的 localStorage
             sessionStorage.removeItem('token');
@@ -89,18 +117,29 @@ request.interceptors.response.use(
             localStorage.removeItem('token');
             localStorage.removeItem('user');
           }
-          message.error('登录状态已过期，请重新登录');
-          if (window.location.pathname !== '/login') {
-            window.location.href = '/login';
+        }
+
+        const redirectTo = resolveAuthRedirectPath();
+        if (redirectTo) {
+          if (hadToken) {
+            message.error('登录状态已过期，请重新登录');
           }
-        } else {
-          message.error(serverMsg || '认证失败');
+          window.location.href = redirectTo;
+        } else if (serverMsg && serverMsg !== 'Authentication required') {
+          message.error(serverMsg);
+        } else if (!serverMsg) {
+          message.error('认证失败');
         }
       } else {
         message.error(serverMsg || 'Request failed');
       }
     } else {
-      message.error('Network error');
+      if (import.meta.env.DEV) {
+        message.destroy('dev-backend-down');
+        message.warning({ content: '后端服务离线或正在编译重启...', key: 'dev-backend-down', duration: 3 });
+      } else {
+        message.error('Network error');
+      }
     }
     return Promise.reject(error);
   }

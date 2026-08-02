@@ -6,38 +6,34 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Table, Button, Modal, Form, Input, InputNumber, Checkbox, Space, message, Card, Typography, Divider, Grid, Tag } from 'antd';
+import { Table, Button, Space, message, Card, Typography, Grid, Tag, Popconfirm } from 'antd';
 import MobileCardList, { MobileCard, CardRow, CardActions } from '../../components/MobileCardList';
 import { PlusOutlined, EditOutlined, DeleteOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
+import { useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
 import { formatApiDateTime } from '../../utils/timedisplay';
+import useSettingsStore from '../../store/settings';
 import type { AdminGroup } from '../../types';
+import {
+  ADMIN_MENU_PERMISSIONS,
+  expandLegacyAdminMenuPermissions,
+  flattenAdminMenuPermissions,
+  getAdminMenuPermissionLabel,
+} from '../../constants/adminMenuPermissions';
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 const { useBreakpoint } = Grid;
 
-const ALL_PERMISSIONS = [
-  { label: '仪表盘 (Dashboard)', value: 'dashboard' },
-  { label: '中转网关 (Relay API)', value: 'relay_api' },
-  { label: '令牌管理 (Tokens)', value: 'tokens' },
-  { label: '日志管理 (Logs)', value: 'logs' },
-  { label: '渠道管理 (Channels)', value: 'channels' },
-  { label: '模型管理 (Models)', value: 'models' },
-  { label: '营销管理 (Marketing)', value: 'marketing' },
-  { label: '用户管理 (Users)', value: 'users' },
-  { label: '财务管理 (Finance)', value: 'finance' },
-  { label: '系统设置 (Settings)', value: 'settings' },
-  { label: '权限分组管理 (Admin Groups)', value: 'admin_groups' },
-];
+const ALL_BASIC_PERMISSION_VALUES = flattenAdminMenuPermissions();
 
 const AdminGroups: React.FC = () => {
   const [groups, setGroups] = useState<AdminGroup[]>([]);
   const [loading, setLoading] = useState(false);
-  const [modalVisible, setModalVisible] = useState(false);
-  const [editingGroup, setEditingGroup] = useState<AdminGroup | null>(null);
   const [activePlugins, setActivePlugins] = useState<any[]>([]);
-  const [form] = Form.useForm();
   const screens = useBreakpoint();
+  const navigate = useNavigate();
+  const { settings } = useSettingsStore();
+  const adminPath = settings?.site?.admin_path || 'admin1688';
 
   const fetchGroups = async () => {
     setLoading(true);
@@ -68,25 +64,11 @@ const AdminGroups: React.FC = () => {
   }, []);
 
   const handleCreate = () => {
-    setEditingGroup(null);
-    form.resetFields();
-    setModalVisible(true);
+    navigate(`/${adminPath}/admin-groups/new`);
   };
 
   const handleEdit = (group: AdminGroup) => {
-    setEditingGroup(group);
-    const allPerms = group.permissions ? JSON.parse(group.permissions) : [];
-    const basicPerms = allPerms.filter((p: string) => !p.startsWith('plugin:'));
-    const pluginPerms = allPerms.filter((p: string) => p.startsWith('plugin:'));
-
-    form.setFieldsValue({
-      name: group.name,
-      description: group.description,
-      permissions: basicPerms,
-      plugin_permissions: pluginPerms,
-      sort_order: group.sort_order || 0,
-    });
-    setModalVisible(true);
+    navigate(`/${adminPath}/admin-groups/${group.id}`);
   };
 
   const handleDelete = async (id: number) => {
@@ -99,30 +81,6 @@ const AdminGroups: React.FC = () => {
     }
   };
 
-  const onModalOk = async () => {
-    try {
-      const values = await form.validateFields();
-      const allPerms = [...(values.permissions || []), ...(values.plugin_permissions || [])];
-      const payload = {
-        ...values,
-        permissions: allPerms
-      };
-      delete payload.plugin_permissions;
-
-      if (editingGroup) {
-        await request.put(`/admin_groups/${editingGroup.id}`, payload);
-        message.success('修改成功');
-      } else {
-        await request.post('/admin_groups', payload);
-        message.success('创建成功');
-      }
-      setModalVisible(false);
-      fetchGroups();
-    } catch (error) {
-      console.error(error);
-    }
-  };
-
   const renderPermissionsTags = (permissionsStr?: string) => {
     let perms: string[] = [];
     try {
@@ -131,8 +89,12 @@ const AdminGroups: React.FC = () => {
       }
     } catch {}
     
-    const hasAllBasic = ALL_PERMISSIONS.every(item => perms.includes(item.value));
-    const hasAllPlugins = activePlugins.every(plugin => perms.includes(`plugin:${plugin.name}`));
+    const basicPerms = perms.filter((p) => !p.startsWith('plugin:'));
+    const expandedBasic = expandLegacyAdminMenuPermissions(basicPerms);
+    const hasAllBasic = ALL_BASIC_PERMISSION_VALUES.every((item) => expandedBasic.includes(item));
+    const hasAllPlugins =
+      activePlugins.length === 0 ||
+      activePlugins.every((plugin) => perms.includes(`plugin:${plugin.name}`));
 
     if (hasAllBasic && hasAllPlugins) {
       return (
@@ -144,14 +106,29 @@ const AdminGroups: React.FC = () => {
       );
     }
 
-    const permLabels = perms.map(p => {
+    const displayKeys: string[] = [];
+    for (const group of ADMIN_MENU_PERMISSIONS) {
+      if (!group.children?.length) {
+        if (expandedBasic.includes(group.value)) displayKeys.push(group.value);
+        continue;
+      }
+      const selectedChildren = group.children.filter((c) => expandedBasic.includes(c.value));
+      if (selectedChildren.length === 0) continue;
+      if (selectedChildren.length === group.children.length) {
+        displayKeys.push(group.value);
+      } else {
+        selectedChildren.forEach((c) => displayKeys.push(c.value));
+      }
+    }
+    perms.filter((p) => p.startsWith('plugin:')).forEach((p) => displayKeys.push(p));
+
+    const permLabels = displayKeys.map((p) => {
       if (p.startsWith('plugin:')) {
         const pName = p.substring(7);
-        const foundPlugin = activePlugins.find(ap => ap.name === pName);
+        const foundPlugin = activePlugins.find((ap) => ap.name === pName);
         return `插件: ${foundPlugin ? (foundPlugin.title || pName) : pName}`;
       }
-      const found = ALL_PERMISSIONS.find(item => item.value === p);
-      return found ? found.label.split(' ')[0] : p;
+      return getAdminMenuPermissionLabel(p);
     });
 
     if (permLabels.length === 0) {
@@ -160,7 +137,7 @@ const AdminGroups: React.FC = () => {
 
     return (
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-        {permLabels.map(label => (
+        {permLabels.map((label) => (
           <Tag color="blue" style={{ fontSize: '11px', margin: 0, padding: '0 4px' }} key={label}>
             {label}
           </Tag>
@@ -184,11 +161,13 @@ const AdminGroups: React.FC = () => {
     { 
       title: '操作', 
       key: 'action', 
-      width: 200,
+      width: 160,
       render: (_: any, record: AdminGroup) => (
         <Space>
           <Button icon={<EditOutlined />} onClick={() => handleEdit(record)} />
-          <Button danger icon={<DeleteOutlined />} onClick={() => handleDelete(record.id)} />
+          <Popconfirm title="确认删除该管理员等级？" onConfirm={() => handleDelete(record.id)}>
+            <Button danger icon={<DeleteOutlined />} />
+          </Popconfirm>
         </Space>
       )
     },
@@ -226,7 +205,9 @@ const AdminGroups: React.FC = () => {
               <CardRow label="创建时间"><Text type="secondary" style={{ fontSize: 12 }}>{formatApiDateTime(record.created_at)}</Text></CardRow>
               <CardActions>
                 <Button size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)} />
-                <Button size="small" danger icon={<DeleteOutlined />} onClick={() => handleDelete(record.id)} />
+                <Popconfirm title="确认删除该管理员等级？" onConfirm={() => handleDelete(record.id)}>
+                  <Button size="small" danger icon={<DeleteOutlined />} />
+                </Popconfirm>
               </CardActions>
             </MobileCard>
           )}
@@ -239,67 +220,6 @@ const AdminGroups: React.FC = () => {
           loading={loading}
         />
       )}
-
-      <Modal
-        title={editingGroup ? '编辑管理员等级' : '添加管理员等级'}
-        open={modalVisible}
-        onOk={onModalOk}
-        onCancel={() => setModalVisible(false)}
-        width={600}
-      >
-        <Form form={form} layout="vertical">
-          <Form.Item name="name" label="分组名称" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="description" label="描述">
-            <Input.TextArea />
-          </Form.Item>
-          <Form.Item name="sort_order" label="排序（数字越大越靠前）" initialValue={0}>
-            <InputNumber style={{ width: '100%' }} />
-          </Form.Item>
-          <Divider>权限配置</Divider>
-          <Form.Item 
-            name="permissions" 
-            label={
-              <Space>
-                选择可见基础菜单
-                <Checkbox 
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={(e) => {
-                    form.setFieldsValue({ permissions: e.target.checked ? ALL_PERMISSIONS.map(p => p.value) : [] });
-                  }}
-                >
-                  <span style={{ fontWeight: 'normal', fontSize: 12, color: '#1677ff' }}>全选/全不选</span>
-                </Checkbox>
-              </Space>
-            }
-          >
-            <Checkbox.Group options={ALL_PERMISSIONS} />
-          </Form.Item>
-          {activePlugins.length > 0 && (
-            <Form.Item 
-              name="plugin_permissions" 
-              label={
-                <Space>
-                  插件权限（可展示使用的插件）
-                  <Checkbox 
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => {
-                      form.setFieldsValue({ plugin_permissions: e.target.checked ? activePlugins.map(p => `plugin:${p.name}`) : [] });
-                    }}
-                  >
-                    <span style={{ fontWeight: 'normal', fontSize: 12, color: '#1677ff' }}>全选/全不选</span>
-                  </Checkbox>
-                </Space>
-              }
-            >
-              <Checkbox.Group 
-                options={activePlugins.map(p => ({ label: p.title || p.name, value: `plugin:${p.name}` }))} 
-              />
-            </Form.Item>
-          )}
-        </Form>
-      </Modal>
     </Card>
   );
 };

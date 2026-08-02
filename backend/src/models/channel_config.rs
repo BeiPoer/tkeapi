@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -13,6 +13,10 @@ fn default_rate() -> f64 {
 }
 
 fn default_weight() -> i32 {
+    1
+}
+
+fn default_status() -> i32 {
     1
 }
 
@@ -58,6 +62,12 @@ pub struct ChannelConfig {
     pub last_reset_week: String,
     #[sqlx(default)]
     pub last_reset_month: String,
+    /// 1=启用, 0=禁用（迁移后列恒有值；缺列时 sqlx 回退为 0）
+    #[sqlx(default)]
+    pub status: i32,
+    /// 上游分类（复用 channel_categories）
+    #[sqlx(default)]
+    pub category_id: Option<i64>,
 }
 
 impl ChannelConfig {
@@ -102,6 +112,10 @@ pub struct CreateChannelConfigRequest {
     pub daily_quota_limit: Option<f64>,
     pub weekly_quota_limit: Option<f64>,
     pub monthly_quota_limit: Option<f64>,
+    /// 1=启用, 0=禁用；缺省为启用
+    #[serde(default = "default_status")]
+    pub status: i32,
+    pub category_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +133,11 @@ pub struct UpdateChannelConfigRequest {
     pub daily_quota_limit: Option<f64>,
     pub weekly_quota_limit: Option<f64>,
     pub monthly_quota_limit: Option<f64>,
+    /// 1=启用, 0=禁用
+    pub status: Option<i32>,
+    /// None = 未传不改；Some(None) = 清空；Some(Some(id)) = 设置
+    #[serde(default, deserialize_with = "crate::models::user::deserialize_some_option")]
+    pub category_id: Option<Option<i64>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,6 +173,8 @@ pub struct ChannelConfigSafe {
     pub last_reset_day: String,
     pub last_reset_week: String,
     pub last_reset_month: String,
+    pub status: i32,
+    pub category_id: Option<i64>,
 }
 
 impl ChannelConfigSafe {
@@ -192,6 +213,8 @@ impl ChannelConfigSafe {
             last_reset_day: c.last_reset_day,
             last_reset_week: c.last_reset_week,
             last_reset_month: c.last_reset_month,
+            status: c.status,
+            category_id: c.category_id,
         }
     }
 }

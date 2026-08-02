@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -19,6 +19,10 @@ pub enum AppError {
 
     #[error("Forbidden: {0}")]
     Forbidden(String),
+
+    /// 钱包可用余额不足（HTTP 402 Payment Required）
+    #[error("{0}")]
+    PaymentRequired(String),
 
     #[error("Not found: {0}")]
     NotFound(String),
@@ -60,6 +64,7 @@ impl AppError {
         match self {
             Self::UpstreamHttpError(s, _) => *s,
             Self::Unauthorized | Self::AuthFailed(_) => 401,
+            Self::PaymentRequired(_) => 402,
             Self::Forbidden(_) => 403,
             Self::NotFound(_) => 404,
             Self::BadRequest(_) => 400,
@@ -76,6 +81,7 @@ impl IntoResponse for AppError {
         let (status, message) = match &self {
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
             AppError::AuthFailed(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
+            AppError::PaymentRequired(msg) => (StatusCode::PAYMENT_REQUIRED, msg.clone()),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
@@ -126,12 +132,12 @@ impl IntoResponse for AppError {
         let mut body = json!({
             "error": {
                 "message": message.clone(),
-                "type": format!("{:?}", status),
+                "type": "api_error",
+                "code": status.as_u16().to_string(),
             },
-            "success": false,
         });
 
-        // 如果是上游错误且本身就是有效 JSON，则直接透传上游响应
+        // 上游错误且本身就是有效 JSON：透传（upstream_fail 已收成 OpenAI 时无 success 字段）
         match self {
             AppError::UpstreamError(ref msg) | AppError::UpstreamHttpError(_, ref msg) => {
                 if let Ok(json_msg) = serde_json::from_str::<serde_json::Value>(msg) {

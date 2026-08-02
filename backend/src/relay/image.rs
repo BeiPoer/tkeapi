@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -19,6 +19,50 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::sync::Arc;
+
+/// Content-Type 是否为 multipart/form-data（大小写不敏感的子串匹配，兼容带 boundary）
+fn content_type_is_multipart(content_type: Option<&str>) -> bool {
+    const MARKER: &[u8] = b"multipart/form-data";
+    content_type
+        .map(|ct| {
+            ct.as_bytes()
+                .windows(MARKER.len())
+                .any(|w| w.eq_ignore_ascii_case(MARKER))
+        })
+        .unwrap_or(false)
+}
+
+/// 客户端提交类型：与上游透传、日志 plugin_tag.client_ct 共用
+fn client_content_type(is_multipart: bool) -> &'static str {
+    if is_multipart {
+        "multipart/form-data"
+    } else {
+        "application/json"
+    }
+}
+
+/// 预记录日志用的 plugin_tag（仅 client_ct）
+fn plugin_tag_client_ct(client_ct: &str) -> String {
+    serde_json::json!({ "client_ct": client_ct }).to_string()
+}
+
+/// 即梦轮询写回 plugin_tag：保留 client_ct + 轮询上下文
+fn plugin_tag_jimeng_poll(
+    client_ct: &str,
+    req_key: &str,
+    response_format: &str,
+    watermark: bool,
+) -> String {
+    serde_json::json!({
+        "client_ct": client_ct,
+        "jimeng_poll": {
+            "req_key": req_key,
+            "response_format": response_format,
+            "watermark": watermark
+        }
+    })
+    .to_string()
+}
 
 /// 从 multipart/form-data 请求中解析字段为 JSON 对象。
 /// - text 字段：尝试解析为 JSON 原始值（数值/布尔/null），失败则作为字符串
@@ -135,12 +179,15 @@ pub async fn image_generations(
         .get("x-log-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-    let is_multipart = request
-        .headers()
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|ct| ct.contains("multipart/form-data"))
-        .unwrap_or(false);
+    let is_multipart = content_type_is_multipart(
+        request
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+    );
+    // 落库 plugin_tag.client_ct，后台日志列表可直接展示（与 enable_log 无关）
+    let client_ct = client_content_type(is_multipart);
+    let plugin_tag_ct = plugin_tag_client_ct(client_ct);
     let body: serde_json::Value = if is_multipart {
         let (parts, body) = request.into_parts();
         parse_multipart_to_json(state.clone(), parts, body).await?
@@ -189,7 +236,7 @@ pub async fn image_generations(
         };
 
         // 3. 预扣费检查（带 channel 精确匹配同名模型的预扣费金额，同时获取 Model 供下游复用）
-        // 余额不足等不可 failover，必须 break（不可 ? 直接退出 HA 环，以免跳过 finish_err）
+        // 余额不足等不可 failover，必须 break（不可 ? 直接退出 HA 环，以免跳过 finish）
         let (pre_deduction, db_model, resolved_cat) =
             match proxy::check_access(&state, &token, model, &ctx, Some("图片"), Some(&channel))
                 .await
@@ -221,10 +268,11 @@ pub async fn image_generations(
             Some(r) => r,
             None => {
                 if forward::model_has_forward_rules(&state, model).await {
-                    return Err(AppError::BadRequest(format!(
+                    ha.on_access_err(AppError::BadRequest(format!(
                         "模型 '{}' 不支持当前接口，请检查模型对应的转发规则",
                         model
                     )));
+                    break;
                 }
                 forward::infer_forward_from_base_url(
                     &channel.base_url,
@@ -272,7 +320,7 @@ pub async fn image_generations(
                 upstream_url: Some(&initial_url),
                 channel: &channel,
                 billing_model_hint: None,
-                plugin_tag: None,
+                plugin_tag: Some(plugin_tag_ct.as_str()),
                 category: Some(resolved_cat.as_str()),
                 db_model: db_model.as_ref(),
                 forward_eid: Some(&resolved.eid),
@@ -292,9 +340,7 @@ pub async fn image_generations(
         let model_c = model.clone();
         let request_content_str_c = request_content_str.clone();
         let body_c = body.clone();
-        let ctx_role_c = ctx.role.clone();
-        let ctx_model_discounts_c = ctx.model_discounts.clone();
-        let ctx_discount_c = ctx.discount;
+        let ctx_c = ctx.clone();
 
         tokio::spawn(async move {
             let state = state_c;
@@ -303,9 +349,6 @@ pub async fn image_generations(
             let model = model_c;
             let request_content_str = request_content_str_c;
             let body = body_c;
-            let ctx_role = ctx_role_c;
-            let ctx_model_discounts = ctx_model_discounts_c;
-            let ctx_discount = ctx_discount_c;
             let result: Result<Response, AppError> = async {
                 // 参数转换（含图片并发下载转 base64，耗时操作）
                 let mut upstream_body: serde_json::Value = forward::transform_request_body(&resolved, &resolved_model, &body, &resolved_cat, db_rule.as_ref(), Some(&state.http_client)).await;
@@ -314,19 +357,14 @@ pub async fn image_generations(
                 let url = forward::build_upstream_url(&channel.base_url, &resolved, &resolved_model, &channel.api_key);
                 // 动态路径可能变更（可灵/GPT），重建 ep 确保计费日志 endpoint 准确
                 let ep = format!("{}|{}", raw_path, resolved.upstream_path.replace("${model}", &resolved_model));
-                // 实际发起前打一条脱敏上游地址（证明图片入口 → 厂商官方路由）
+                // 上游 Content-Type 与客户端一致透传（不再因 gpt+图片强制改写）
                 tracing::info!(
-                    "[Image→Upstream] entry={}, target_type={}, upstream_url={}",
-                    raw_path,
+                    "[Image] 目标类型={} URL={}",
                     resolved.target_type,
                     forward::mask_key_in_string(&url, &channel.api_key)
                 );
 
-                // 构建并发送上游请求
-                // multipart 转发条件：客户端发来 multipart 或 GPT 图片有图片输入（edits 端点要求 multipart/form-data）
-                let use_multipart = is_multipart
-                    || (resolved.target_type == "gpt" && forward::has_image_inputs(&body));
-                let builder = if use_multipart {
+                let builder = if is_multipart {
                     let auth_headers = forward::build_auth_headers(&resolved, &channel.api_key);
                     let mut b = state.http_client.post(&url);
                     for (k, v) in &auth_headers {
@@ -339,74 +377,74 @@ pub async fn image_generations(
                         .header("Content-Type", "application/json");
                     forward::apply_request_auth(b, &resolved, &channel.api_key, &mut upstream_body, &channel.base_url)
                 };
+                let builder = crate::services::http_client::with_upstream_timeout(builder);
                 let upstream_resp = match builder.send().await {
                     Ok(resp) => resp,
                     Err(e) => {
                         let err_msg = e.to_string();
                         let latency_ms = start_time.elapsed().as_millis() as u32;
-                        proxy::record_and_bill_inner(proxy::BillRecord {
-                            state: &state,
-                            token: &token,
-                            channel: &channel,
-                            model: &model,
-                            prompt_tokens: 0,
-                            completion_tokens: 0,
-                            cached_tokens: 0,
-                            cost: 0.0,
-                            pre_deducted: 0.0,
-                            pre_deduct_gift: 0.0,
-                            status_code: 502,
-                            endpoint: &ep,
-                            error_msg: Some(&err_msg),
-                            latency_ms: latency_ms,
-                            is_stream: 0,
-                            request_content: Some(request_content_str.clone()),
-                            response_content: Some(err_msg.clone()),
-                            upstream_req_content: Some(upstream_body.to_string()),
-                            billing_detail: None,
-                            hint_category: Some(resolved_cat.as_str()),
-                            pending_log_id: pending_log_id,
-                            billing_model_hint: None,
-                            plugin_tag: None,
-                            db_model: db_model.as_ref(),
-                        }).await;
-                        return Err(proxy::upstream_fail(502, &err_msg));
+                        return Err(proxy::record_zero_cost_upstream_fail(
+                            proxy::ZeroCostUpstreamFail {
+                                state: &state,
+                                token: &token,
+                                channel: &channel,
+                                model: &model,
+                                prefer_http_status: Some(502),
+                                endpoint: &ep,
+                                latency_ms,
+                                is_stream: 0,
+                                request_content: request_content_str.clone(),
+                                response_body: err_msg.clone(),
+                                response_content: Some(err_msg),
+                                upstream_req_content: Some(upstream_body.to_string()),
+                                billing_detail: None,
+                                hint_category: Some(resolved_cat.as_str()),
+                                pending_log_id,
+                                billing_model_hint: None,
+                                db_model: db_model.as_ref(),
+                                client_msg: None,
+                                pre_deducted: 0.0,
+                                pre_deduct_gift: 0.0,
+                            },
+                        )
+                        .await);
                     }
                 };
 
                 let status = upstream_resp.status().as_u16();
                 if !upstream_resp.status().is_success() {
                     let err = upstream_resp.text().await.unwrap_or_default();
-                    let display_err = proxy::upstream_error_text(status, &err);
                     let latency_ms = start_time.elapsed().as_millis() as u32;
-                    tracing::info!("image post提交失败  {}", display_err);
-                    proxy::record_and_bill_inner(proxy::BillRecord {
-                        state: &state,
-                        token: &token,
-                        channel: &channel,
-                        model: &model,
-                        prompt_tokens: 0,
-                        completion_tokens: 0,
-                        cached_tokens: 0,
-                        cost: 0.0,
-                        pre_deducted: 0.0,
-                        pre_deduct_gift: 0.0,
-                        status_code: status,
-                        endpoint: &ep,
-                        error_msg: Some(&display_err),
-                        latency_ms: latency_ms,
-                        is_stream: 0,
-                        request_content: Some(request_content_str.clone()),
-                        response_content: Some(err),
-                        upstream_req_content: Some(upstream_body.to_string()),
-                        billing_detail: None,
-                        hint_category: Some(resolved_cat.as_str()),
-                        pending_log_id: pending_log_id,
-                        billing_model_hint: None,
-                        plugin_tag: None,
-                        db_model: db_model.as_ref(),
-                    }).await;
-                    return Err(proxy::upstream_fail(status, &display_err));
+                    tracing::warn!(
+                        "[Image] 上游失败 状态码={} 响应体长度={}",
+                        status,
+                        err.len()
+                    );
+                    return Err(proxy::record_zero_cost_upstream_fail(
+                        proxy::ZeroCostUpstreamFail {
+                            state: &state,
+                            token: &token,
+                            channel: &channel,
+                            model: &model,
+                            prefer_http_status: Some(status),
+                            endpoint: &ep,
+                            latency_ms,
+                            is_stream: 0,
+                            request_content: request_content_str.clone(),
+                            response_body: err.clone(),
+                            response_content: Some(err),
+                            upstream_req_content: Some(upstream_body.to_string()),
+                            billing_detail: None,
+                            hint_category: Some(resolved_cat.as_str()),
+                            pending_log_id,
+                            billing_model_hint: None,
+                            db_model: db_model.as_ref(),
+                            client_msg: None,
+                            pre_deducted: 0.0,
+                            pre_deduct_gift: 0.0,
+                        },
+                    )
+                    .await);
                 }
                 let model = &model;
 
@@ -422,13 +460,13 @@ pub async fn image_generations(
                     let pre_deduct_gift = proxy::pre_deduct_or_intercept(
                         &state, &token, &channel, model, pre_deduction, &ep,
                         start_time, 0, &request_content_str, &upstream_body.to_string(),
-                        None, pending_log_id, db_model.as_ref(), &ctx_role, Some(resolved_cat.as_str()),
+                        None, pending_log_id, db_model.as_ref(), Some(resolved_cat.as_str()),
                     ).await?;
 
-                    tracing::info!("[Image] model={}, path=STREAM (is_stream={}, is_upstream_stream={})", model, is_stream, is_upstream_stream);
+                    tracing::debug!("[Image] 路径=STREAM 流式={} 上游流式={}", is_stream, is_upstream_stream);
                     Ok(crate::relay::stream::handle_image_stream(
                         state, token, channel, model.to_string(), upstream_resp,
-                        ctx_discount, ctx_model_discounts.clone(), request_content_str, start_time,
+                        ctx_c.clone(), request_content_str, start_time,
                         resolved.upstream_path.replace("${model}", &resolved_model),
                         Some(upstream_body.to_string()),
                         pre_deduction,
@@ -452,42 +490,38 @@ pub async fn image_generations(
                     response_content_str = converted;
                     if let Some(err_response) = post_err {
                         let latency_ms = start_time.elapsed().as_millis() as u32;
-                        let err_text = proxy::extract_error_message(&response_content_str);
-                        let err_status = proxy::infer_error_status_code_from_str(&response_content_str);
-                        proxy::record_and_bill_inner(proxy::BillRecord {
-                            state: &state,
-                            token: &token,
-                            channel: &channel,
-                            model: model,
-                            prompt_tokens: 0,
-                            completion_tokens: 0,
-                            cached_tokens: 0,
-                            cost: 0.0,
-                            pre_deducted: 0.0,
-                            pre_deduct_gift: 0.0,
-                            status_code: err_status,
-                            endpoint: &ep,
-                            error_msg: Some(&err_text),
-                            latency_ms: latency_ms,
-                            is_stream: 0,
-                            request_content: Some(request_content_str),
-                            response_content: Some(response_content_str),
-                            upstream_req_content: Some(upstream_body.to_string()),
-                            billing_detail: Some("请求失败".to_string()),
-                            hint_category: Some(resolved_cat.as_str()),
-                            pending_log_id: pending_log_id,
-                            billing_model_hint: None,
-                            plugin_tag: None,
-                            db_model: db_model.as_ref(),
-                        }).await;
                         // 返回 Err 以进入外环 HA failover（不可用 Ok(400) 伪装成功）
-                        return Err(proxy::upstream_fail(err_status, &err_response));
+                        return Err(proxy::record_zero_cost_upstream_fail(
+                            proxy::ZeroCostUpstreamFail {
+                                state: &state,
+                                token: &token,
+                                channel: &channel,
+                                model,
+                                prefer_http_status: None,
+                                endpoint: &ep,
+                                latency_ms,
+                                is_stream: 0,
+                                request_content: request_content_str,
+                                response_body: response_content_str.clone(),
+                                response_content: Some(response_content_str),
+                                upstream_req_content: Some(upstream_body.to_string()),
+                                billing_detail: Some("请求失败".to_string()),
+                                hint_category: Some(resolved_cat.as_str()),
+                                pending_log_id,
+                                billing_model_hint: None,
+                                db_model: db_model.as_ref(),
+                                client_msg: Some(&err_response),
+                                pre_deducted: 0.0,
+                                pre_deduct_gift: 0.0,
+                            },
+                        )
+                        .await);
                     }
 
                     let pre_deduct_gift = proxy::pre_deduct_or_intercept(
                         &state, &token, &channel, model, pre_deduction, &ep,
                         start_time, 0, &request_content_str, &upstream_body.to_string(),
-                        None, pending_log_id, db_model.as_ref(), &ctx_role, Some(resolved_cat.as_str()),
+                        None, pending_log_id, db_model.as_ref(), Some(resolved_cat.as_str()),
                     ).await?;
 
                     let resp_json: serde_json::Value = serde_json::from_str(&response_content_str).unwrap_or(serde_json::json!({}));
@@ -510,7 +544,7 @@ pub async fn image_generations(
                             // OpenAI 兼容 + 无 poll_path：同步轮询直到获取终态
                             // task_id 已在上方通过 find_id 提取，直接复用
                             let tid = &task_id_str;
-                            tracing::info!("[Image] model={}, path=SYNC_POLL, target_type={}, task_id={}", model, resolved.target_type, tid);
+                            tracing::debug!("[Image] 路径=SYNC_POLL 目标类型={} 任务ID={}", resolved.target_type, tid);
 
                             // 轮询上下文：即梦等厂商需要原始请求内容来组装 req_json（如 return_url）
                             let upstream_body_str = serde_json::to_string(&upstream_body).unwrap_or_default();
@@ -522,14 +556,14 @@ pub async fn image_generations(
                                 &state.http_client, &channel, &resolved, tid, &resolved_model, &resolved_cat, 1800, jimeng_ctx,
                             ).await {
                                 Some((success_body, status)) if status == "succeeded" => {
-                                    tracing::info!("[Image SYNC_POLL] model={}, task_id={}, status=succeeded, resp_len={}",
+                                    tracing::info!("[ImageSyncPoll] 模型={}, 任务ID={}, 状态=成功, 响应长度={}",
                                         model, tid, success_body.len());
                                     response_content_str = success_body;
                                 }
                                 Some((fail_body, _)) => {
                                     let poll_json: serde_json::Value = serde_json::from_str(&fail_body).unwrap_or(serde_json::json!({}));
                                     let err_msg = crate::relay::response_formatter::extract_error_message(&poll_json);
-                                    tracing::warn!("[Image SYNC_POLL] model={}, task_id={}, status=failed, error={}", model, tid, err_msg);
+                                    tracing::warn!("[ImageSyncPoll] 模型={}, 任务ID={}, 状态=失败, 错误={}", model, tid, err_msg);
                                     let latency_ms = start_time.elapsed().as_millis() as u32;
                                     let billing_detail = if pre_deduction > 0.0 {
                                         "同步轮询任务失败，预扣费已退回".to_string()
@@ -537,36 +571,34 @@ pub async fn image_generations(
                                         "同步轮询任务失败".to_string()
                                     };
                                     let status_code = proxy::infer_error_status_code(&poll_json);
-                                    proxy::record_and_bill_inner(proxy::BillRecord {
-                                        state: &state,
-                                        token: &token,
-                                        channel: &channel,
-                                        model: model,
-                                        prompt_tokens: 0,
-                                        completion_tokens: 0,
-                                        cached_tokens: 0,
-                                        cost: 0.0,
-                                        pre_deducted: pre_deduction,
-                                        pre_deduct_gift: pre_deduct_gift,
-                                        status_code: status_code,
-                                        endpoint: &ep,
-                                        error_msg: Some(&err_msg),
-                                        latency_ms: latency_ms,
-                                        is_stream: 0,
-                                        request_content: Some(request_content_str),
-                                        response_content: Some(fail_body),
-                                        upstream_req_content: Some(upstream_body.to_string()),
-                                        billing_detail: Some(billing_detail),
-                                        hint_category: Some(resolved_cat.as_str()),
-                                        pending_log_id: pending_log_id,
-                                        billing_model_hint: None,
-                                        plugin_tag: None,
-                                        db_model: db_model.as_ref(),
-                                    }).await;
-                                    return Err(proxy::upstream_fail(status_code, &err_msg));
+                                    return Err(proxy::record_zero_cost_upstream_fail(
+                                        proxy::ZeroCostUpstreamFail {
+                                            state: &state,
+                                            token: &token,
+                                            channel: &channel,
+                                            model,
+                                            prefer_http_status: Some(status_code),
+                                            endpoint: &ep,
+                                            latency_ms,
+                                            is_stream: 0,
+                                            request_content: request_content_str,
+                                            response_body: err_msg.clone(),
+                                            response_content: Some(fail_body),
+                                            upstream_req_content: Some(upstream_body.to_string()),
+                                            billing_detail: Some(billing_detail),
+                                            hint_category: Some(resolved_cat.as_str()),
+                                            pending_log_id,
+                                            billing_model_hint: None,
+                                            db_model: db_model.as_ref(),
+                                            client_msg: Some(&err_msg),
+                                            pre_deducted: pre_deduction,
+                                            pre_deduct_gift,
+                                        },
+                                    )
+                                    .await);
                                 }
                                 None => {
-                                    tracing::warn!("[Image SYNC_POLL] model={}, task_id={}, status=timeout", model, tid);
+                                    tracing::warn!("[ImageSyncPoll] 模型={}, 任务ID={}, 状态=超时", model, tid);
                                     let err_msg = format!("任务处理超时，请稍后查询结果，任务ID: {}", tid);
                                     let latency_ms = start_time.elapsed().as_millis() as u32;
                                     let billing_detail = if pre_deduction > 0.0 {
@@ -575,33 +607,31 @@ pub async fn image_generations(
                                         "同步轮询超时".to_string()
                                     };
                                     let status_code = proxy::infer_error_status_code_from_str(&err_msg);
-                                    proxy::record_and_bill_inner(proxy::BillRecord {
-                                        state: &state,
-                                        token: &token,
-                                        channel: &channel,
-                                        model: model,
-                                        prompt_tokens: 0,
-                                        completion_tokens: 0,
-                                        cached_tokens: 0,
-                                        cost: 0.0,
-                                        pre_deducted: pre_deduction,
-                                        pre_deduct_gift: pre_deduct_gift,
-                                        status_code: status_code,
-                                        endpoint: &ep,
-                                        error_msg: Some(&err_msg),
-                                        latency_ms: latency_ms,
-                                        is_stream: 0,
-                                        request_content: Some(request_content_str),
-                                        response_content: Some(response_content_str),
-                                        upstream_req_content: Some(upstream_body.to_string()),
-                                        billing_detail: Some(billing_detail),
-                                        hint_category: Some(resolved_cat.as_str()),
-                                        pending_log_id: pending_log_id,
-                                        billing_model_hint: None,
-                                        plugin_tag: None,
-                                        db_model: db_model.as_ref(),
-                                    }).await;
-                                    return Err(proxy::upstream_fail(status_code, &err_msg));
+                                    return Err(proxy::record_zero_cost_upstream_fail(
+                                        proxy::ZeroCostUpstreamFail {
+                                            state: &state,
+                                            token: &token,
+                                            channel: &channel,
+                                            model,
+                                            prefer_http_status: Some(status_code),
+                                            endpoint: &ep,
+                                            latency_ms,
+                                            is_stream: 0,
+                                            request_content: request_content_str,
+                                            response_body: err_msg.clone(),
+                                            response_content: Some(response_content_str),
+                                            upstream_req_content: Some(upstream_body.to_string()),
+                                            billing_detail: Some(billing_detail),
+                                            hint_category: Some(resolved_cat.as_str()),
+                                            pending_log_id,
+                                            billing_model_hint: None,
+                                            db_model: db_model.as_ref(),
+                                            client_msg: Some(&err_msg),
+                                            pre_deducted: pre_deduction,
+                                            pre_deduct_gift,
+                                        },
+                                    )
+                                    .await);
                                 }
                             }
                         } else if has_task_id && resolved.poll_path.is_some() {
@@ -627,7 +657,7 @@ pub async fn image_generations(
                     };
 
                     if is_async {
-                        tracing::info!("[Image] model={}, path=ASYNC_SUBMIT, pre_deduction={}", model, pre_deduction);
+                        tracing::debug!("[Image] 路径=ASYNC_SUBMIT 预扣费={}", pre_deduction);
                         let billing_detail = if pre_deduction > 0.0 {
                             "异步任务预扣费冻结".to_string()
                         } else {
@@ -667,12 +697,10 @@ pub async fn image_generations(
                                 let req_key = upstream_body.get("req_key").and_then(|v| v.as_str()).unwrap_or(model);
                                 let response_format = body.get("response_format").and_then(|v| v.as_str()).unwrap_or("url");
                                 let watermark = body.get("watermark").and_then(|v| v.as_bool()).unwrap_or(false);
-                                let poll_ctx = serde_json::json!({
-                                    "jimeng_poll": { "req_key": req_key, "response_format": response_format, "watermark": watermark }
-                                });
+                                let poll_tag = plugin_tag_jimeng_poll(client_ct, req_key, response_format, watermark);
                                 let _ = sqlx::query(&state.db.format_query(
                                     "UPDATE logs SET plugin_tag = ? WHERE id = ?"
-                                )).bind(poll_ctx.to_string()).bind(log_id).execute(&state.db.pool).await;
+                                )).bind(poll_tag).bind(log_id).execute(&state.db.pool).await;
                             }
                         }
                     } else {
@@ -680,72 +708,63 @@ pub async fn image_generations(
                         let resp_image_count = crate::relay::usage_extractor::count_response_images(&response_content_str);
                         if resp_image_count.unwrap_or(0) <= 0 {
                             let err_msg = "上游返回空响应或无有效图片";
-                            tracing::warn!("[Image SYNC] model={}, empty/no-image response, len={}, images={:?}",
+                            tracing::warn!("[ImageSync] 模型={}, 空响应/无有效图片 响应长度={} 图片数量={:?}",
                                 model, response_content_str.len(), resp_image_count);
                             let billing_detail = if pre_deduction > 0.0 {
                                 "同步空响应，预扣费已退回".to_string()
                             } else {
                                 "同步空响应".to_string()
                             };
-                            proxy::record_and_bill_inner(proxy::BillRecord {
-                                state: &state,
-                                token: &token,
-                                channel: &channel,
-                                model: model,
-                                prompt_tokens: 0,
-                                completion_tokens: 0,
-                                cached_tokens: 0,
-                                cost: 0.0,
-                                pre_deducted: pre_deduction,
-                                pre_deduct_gift: pre_deduct_gift,
-                                status_code: 502,
-                                endpoint: &ep,
-                                error_msg: Some(err_msg),
-                                latency_ms: latency_ms,
-                                is_stream: 0,
-                                request_content: Some(request_content_str),
-                                response_content: Some(response_content_str),
-                                upstream_req_content: Some(upstream_body.to_string()),
-                                billing_detail: Some(billing_detail),
-                                hint_category: Some(resolved_cat.as_str()),
-                                pending_log_id: pending_log_id,
-                                billing_model_hint: None,
-                                plugin_tag: None,
-                                db_model: db_model.as_ref(),
-                            }).await;
-                            return Err(proxy::upstream_fail(502, err_msg));
+                            return Err(proxy::record_zero_cost_upstream_fail(
+                                proxy::ZeroCostUpstreamFail {
+                                    state: &state,
+                                    token: &token,
+                                    channel: &channel,
+                                    model,
+                                    prefer_http_status: Some(502),
+                                    endpoint: &ep,
+                                    latency_ms,
+                                    is_stream: 0,
+                                    request_content: request_content_str,
+                                    response_body: err_msg.to_string(),
+                                    response_content: Some(response_content_str),
+                                    upstream_req_content: Some(upstream_body.to_string()),
+                                    billing_detail: Some(billing_detail),
+                                    hint_category: Some(resolved_cat.as_str()),
+                                    pending_log_id,
+                                    billing_model_hint: None,
+                                    db_model: db_model.as_ref(),
+                                    client_msg: Some(err_msg),
+                                    pre_deducted: pre_deduction,
+                                    pre_deduct_gift,
+                                },
+                            )
+                            .await);
                         }
 
                         let usage_tokens = crate::relay::usage_extractor::parse_usage(&response_content_str);
                         let p_tokens = usage_tokens.prompt;
                         let c_tokens = usage_tokens.completion;
 
-                        tracing::info!("[Image] model={}, path=SYNC, prompt={}, completion={}, total={}", model, p_tokens, c_tokens, usage_tokens.total);
-
                         let mut features = crate::relay::usage_extractor::extract_request_features(&body);
-                        // 优化与精简：合并转发阶段上游请求体中的计费特征（保障同步与异步结算的一致性，防范分辨率等特征丢失）
                         let upstream_features = crate::relay::usage_extractor::extract_request_features(&upstream_body);
                         features.merge(upstream_features);
-
-                        // 从响应中提取最新计费特征（如火山图片的 input_images 和 data.0.size）
                         if let Ok(resp_json) = serde_json::from_str::<serde_json::Value>(&response_content_str) {
-                            let resp_features = crate::relay::usage_extractor::extract_request_features(&resp_json);
-                            features.merge(resp_features);
+                            features.merge(crate::relay::usage_extractor::extract_request_features(&resp_json));
                         }
-
-                        // 用响应中的实际图片数量覆盖请求体的 n 值（按张计费的最终依据）
                         if let Some(resp_count) = resp_image_count {
                             features.image_count = Some(resp_count);
                         }
-                        tracing::info!("[Image SYNC] model={}, tokens={}+{}={}, images={:?}, latency={}ms",
-                            model, p_tokens, c_tokens, usage_tokens.total, resp_image_count, latency_ms);
+                        tracing::debug!(
+                            "[Image] 路径=SYNC Tokens={}+{} 图片数量={:?} 耗时={}ms",
+                            p_tokens, c_tokens, resp_image_count, latency_ms
+                        );
                         let (c, d) = crate::relay::calculate_relay_cost(
                             &state,
                             db_model.as_ref(),
                             db_rule.as_mut(),
                             &channel,
-                            ctx_discount,
-                            &ctx_model_discounts,
+                            &ctx_c,
                             &usage_tokens,
                             &features,
                             mapping_source.as_deref(),

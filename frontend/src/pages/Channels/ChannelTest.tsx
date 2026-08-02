@@ -296,10 +296,13 @@ const ChannelTest: React.FC = () => {
                                                                 <span style={{ fontSize: 10, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
                                                                     {sc.provider_type ? `(${sc.provider_type})` : ''} {(sc as any).yid ? `YID: ${(sc as any).yid}` : `ID: ${sc.id}`}
                                                                 </span>
+                                                                {(sc as any).status !== undefined && (sc as any).status !== 1 && (
+                                                                    <Tag color="error" style={{ margin: 0, fontSize: 10, borderRadius: 4 }}>已禁用</Tag>
+                                                                )}
                                                                 <Space size={4} style={{ marginLeft: 8 }}>
                                                                     <Tag color="cyan" style={{ margin: 0, fontSize: 10, borderRadius: 4 }}>倍率: {(sc as any).rate ?? 1}x</Tag>
-                                                                    <Tag color="blue" style={{ margin: 0, fontSize: 10, borderRadius: 4 }}>请求优先级: {(sc as any).priority ?? 0}</Tag>
-                                                                    <Tag color="cyan" style={{ margin: 0, fontSize: 10, borderRadius: 4 }}>请求权重: {(sc as any).weight ?? 1}</Tag>
+                                                                    <Tag color="blue" style={{ margin: 0, fontSize: 10, borderRadius: 4 }}>优先级: {(sc as any).priority ?? 0}</Tag>
+                                                                    <Tag color="cyan" style={{ margin: 0, fontSize: 10, borderRadius: 4 }}>权重: {(sc as any).weight ?? 1}</Tag>
                                                                 </Space>
                                                             </div>
                                                             
@@ -323,8 +326,13 @@ const ChannelTest: React.FC = () => {
                                                                     type="dashed"
                                                                     style={{ fontSize: 11 }}
                                                                     loading={isTesting}
+                                                                    disabled={(sc as any).status !== undefined && (sc as any).status !== 1}
                                                                     onClick={(e) => {
                                                                         e.stopPropagation();
+                                                                        if ((sc as any).status !== undefined && (sc as any).status !== 1) {
+                                                                            message.warning('该上游渠道配置已禁用，无法拨测');
+                                                                            return;
+                                                                        }
                                                                         runSingleModelTest(channel!.id, record.model, selectedRules[record.model], true, statusKey, sc.id);
                                                                     }}
                                                                 >

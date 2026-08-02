@@ -8,18 +8,19 @@ description = "TokensByte - Next-gen LLM API Distribution & Management Platform"
 default = ["plugin_site_icons", "plugin_site_portal"]
 plugin_site_icons = []       # 站点图标管理插件
 plugin_site_portal = []      # 站点门户插件
+# Mac cargo-zigbuild 交叉编译专用：强制 openssl-sys 源码静态编入（无 Linux OpenSSL sysroot）
+cross_compile = ["dep:openssl"]
 
 [dependencies]
-# Web framework
-axum = { version = "0.8", features = ["ws", "multipart", "macros"] }
-axum-extra = { version = "0.10", features = ["typed-header"] }
-tower = { version = "0.5", features = ["full"] }
-tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "fs"] }
+# Web framework（multipart：图片编辑上传；无 WebSocket / debug_handler 故不开 ws、macros）
+axum = { version = "0.8", features = ["multipart"] }
+# tower 由 axum / tower-http 传递引入；勿再 features=["full"]
+tower-http = { version = "0.6", features = ["cors", "fs"] }
 
-# Async runtime
-tokio = { version = "1", features = ["full"] }
+# Async runtime（default 已含 rt-multi-thread/macros/net/time/sync/io-util；补 fs+signal）
+tokio = { version = "1", features = ["fs", "signal"] }
 tokio-stream = "0.1"
-futures = "0.3"
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "json"] }
@@ -28,9 +29,8 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres",
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 
-# HTTP client (for upstream providers)
+# HTTP client（gzip：上游 Content-Encoding；stream/multipart：SSE 与图床表单）
 reqwest = { version = "0.12", features = ["json", "stream", "gzip", "multipart"] }
-eventsource-stream = "0.2"
 
 # Auth
 jsonwebtoken = "9"
@@ -43,7 +43,7 @@ dotenvy = "0.15"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 
 # Time
@@ -63,46 +63,55 @@ base64 = "0.22"
 async-trait = "0.1"
 thiserror = "2"
 anyhow = "1"
-bytes = "1"
-pin-project-lite = "0.2"
 regex = "1"
 governor = "0.7"
 dashmap = "6"
-lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport", "hostname"] }
+# 邮件：同步 SmtpTransport + Message builder；TLS 用 rustls（勿开 tokio1-*，代码未用 AsyncSmtpTransport）
+lettre = { version = "0.11", default-features = false, features = ["rustls-tls", "builder", "smtp-transport", "hostname"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 urlencoding = "2.1"
 form_urlencoded = "1"
 url = "2"
+# 支付验签：sha1/sha2/pem 均有渠道在用，勿再收窄
 rsa = { version = "0.9", features = ["sha1", "sha2", "pem"] }
 sha1 = { version = "0.10", default-features = false, features = ["oid"] }
 md-5 = "0.10"
 
-# Volcengine TOS Object Storage
+# Volcengine TOS（会传递引入 reqwest 0.11，与上方 0.12 并存属上游约束，勿强行删）
 ve-tos-rust-sdk = { version = "2.9", features = ["tokio-runtime"] }
-
-# OpenSSL (静态内置编译，解决 cross/zigbuild 交叉编译缺系统 libssl 库问题)
-openssl = { version = "0.10", features = ["vendored"] }
 
 # Template engine (portal static HTML generation)
 tera = "1"
 chrono-tz = "0.10.4"
 iana-time-zone = "0.1.65"
 
+# 系统运行时指标（关于页：CPU/内存/磁盘/主机）
+sysinfo = { version = "0.33", default-features = false, features = ["system", "disk"] }
+
+# 可选：仅 --features cross_compile（zigbuild）启用，避免交叉时找 Linux OpenSSL
+openssl = { version = "0.10", optional = true, features = ["vendored"] }
+
 [build-dependencies]
 serde_json = "1"
 
-# 本地开发：减小调试信息 + 增量，缩短链接等待（不影响 release）
+# 本地开发：减小调试信息 + 增量编译，缩短 watch 热重载等待（不影响 release）
 [profile.dev]
-debug = "line-tables-only"
+debug = false
 incremental = true
 
 [profile.release]
-# opt-level=1 配合 codegen-units=1 极大幅度减少 LLVM 优化器的内存占用，防 OOM
-opt-level = 1
+# opt-level = 's' 大幅压缩二进制与中间 AST，配合 --no-keep-memory 防止链接器 OOM
+opt-level = 's'
 codegen-units = 1
 panic = 'abort'
 strip = true
 lto = false
 debug = false
+
+[profile.dev.package."*"]
+# 加速编译：不对依赖进行 debug 生成并轻量级优化，极大缩短开发期间的编译和链接时间
+opt-level = 1
+debug = false
+incremental = false

@@ -6,7 +6,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { Card, Form, Input, InputNumber, Button, message, Space, Tabs, Spin, Switch } from 'antd';
+import { Card, Form, Input, InputNumber, Button, message, Space, Tabs, Spin, Switch, Radio } from 'antd';
 import { SaveOutlined, ArrowLeftOutlined, KeyOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useParams, useNavigate } from 'react-router-dom';
@@ -30,22 +30,22 @@ const UserLevelEdit: React.FC = () => {
   const [groupKeyManuallyEdited, setGroupKeyManuallyEdited] = useState(false);
   const isAdd = actionId === 'new';
 
-  // 根据名称自动生成分组标识
-  const generateGroupKey = (name: string): string => {
-    if (!name.trim()) return '';
-    const hasChinese = /[\u4e00-\u9fa5]/.test(name);
-    if (hasChinese) {
-      const py = pinyin(name, { pattern: 'first', toneType: 'none', type: 'array' });
-      return py.join('').toLowerCase().replace(/[^a-z0-9]/g, '');
-    } else {
-      return name.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+  const generateGroupKey = (nameStr: string) => {
+    if (!nameStr) return '';
+    try {
+      const py = pinyin(nameStr, { toneType: 'none', type: 'array' });
+      const cleanPy = py.map(p => p.toLowerCase().replace(/[^a-z0-9]/g, '')).join('');
+      return cleanPy || 'group_' + Date.now().toString().slice(-4);
+    } catch (e) {
+      return 'group_' + Date.now().toString().slice(-4);
     }
   };
 
   const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const name = e.target.value;
     if (isAdd && !groupKeyManuallyEdited) {
-      form.setFieldValue('group_key', generateGroupKey(name));
+      const newName = e.target.value;
+      const key = generateGroupKey(newName);
+      form.setFieldValue('group_key', key);
     }
   };
 
@@ -54,6 +54,7 @@ const UserLevelEdit: React.FC = () => {
       setLoading(false);
       form.setFieldsValue({
         discount: 1.0,
+        discount_type: 2,
         commission_ratio: 0.0,
         invite_reward_inviter: 0.0,
         invite_reward_invitee: 0.0,
@@ -75,6 +76,7 @@ const UserLevelEdit: React.FC = () => {
         if (level) {
           form.setFieldsValue({
             ...level,
+            discount_type: level.discount_type ?? 0,
             marketing_enabled: level.marketing_enabled === 1,
             is_default: level.is_default === 1,
             allow_view_log_details: level.allow_view_log_details === undefined ? true : level.allow_view_log_details === 1,
@@ -151,8 +153,6 @@ const UserLevelEdit: React.FC = () => {
     return <div style={{ textAlign: 'center', marginTop: 100 }}><Spin size="large" /></div>;
   }
 
-  const groupKey = form.getFieldValue('group_key');
-
   return (
     <Card 
       title={
@@ -185,6 +185,40 @@ const UserLevelEdit: React.FC = () => {
                 disabled={!isAdd}
                 onChange={() => { if(isAdd) setGroupKeyManuallyEdited(true); }}
               />
+            </Form.Item>
+            <Form.Item 
+              name="discount_type" 
+              label="折扣使用设置" 
+              extra={
+                <div className="mt-2 rounded-lg bg-muted/40 p-4 text-sm text-muted-foreground border border-border shadow-sm">
+                  <div className="mb-2 text-[13px] font-medium flex items-center text-foreground">
+                    <span className="mr-1.5">💡</span> 折扣生效规则说明
+                  </div>
+                  <div className="mb-3 text-xs leading-relaxed opacity-90">
+                    <code className="bg-background border border-border/50 px-1 py-0.5 rounded text-[11px] font-mono text-foreground">用户模型折扣</code> 是单独为用户设置的对应的专属模型折扣，系统在结算根据以下策略自动取<strong className="text-foreground font-semibold">最大折扣力度（即最大优惠）</strong>：
+                  </div>
+                  <ul className="space-y-3 text-xs m-0 pl-0 list-none">
+                    <li className="flex flex-col gap-1 relative pl-3 before:content-[''] before:absolute before:left-0 before:top-2 before:w-1 before:h-1 before:bg-primary/50 before:rounded-full">
+                      <span className="font-medium text-foreground flex items-center gap-1.5"><span className="text-[14px]">🎚️</span> 用户等级折扣优先</span>
+                      <span className="text-muted-foreground/80 leading-snug">仅比较 <code className="bg-background border border-border/50 px-1 py-0.5 rounded text-[11px] font-mono text-foreground">用户模型折扣</code> 与 <code className="bg-background border border-border/50 px-1 py-0.5 rounded text-[11px] font-mono text-foreground">用户等级折扣</code>，自动选取<strong className="text-foreground">最低值</strong>。</span>
+                    </li>
+                    <li className="flex flex-col gap-1 relative pl-3 before:content-[''] before:absolute before:left-0 before:top-2 before:w-1 before:h-1 before:bg-primary/50 before:rounded-full">
+                      <span className="font-medium text-foreground flex items-center gap-1.5"><span className="text-[14px]">🌐</span> 全站折扣优先</span>
+                      <span className="text-muted-foreground/80 leading-snug">仅比较 <code className="bg-background border border-border/50 px-1 py-0.5 rounded text-[11px] font-mono text-foreground">用户模型折扣</code> 与 <code className="bg-background border border-border/50 px-1 py-0.5 rounded text-[11px] font-mono text-foreground">全局全站折扣</code>，自动选取<strong className="text-foreground">最低值</strong>。</span>
+                    </li>
+                    <li className="flex flex-col gap-1 relative pl-3 before:content-[''] before:absolute before:left-0 before:top-2 before:w-1 before:h-1 before:bg-primary/50 before:rounded-full">
+                      <span className="font-medium text-foreground flex items-center gap-1.5"><span className="text-[14px]">⚙️</span> 默认融合（不选择）</span>
+                      <span className="text-muted-foreground/80 leading-snug">综合对比 <code className="bg-background border border-border/50 px-1 py-0.5 rounded text-[11px] font-mono text-foreground">用户模型折扣</code>、<code className="bg-background border border-border/50 px-1 py-0.5 rounded text-[11px] font-mono text-foreground">用户等级折扣</code> 及 <code className="bg-background border border-border/50 px-1 py-0.5 rounded text-[11px] font-mono text-foreground">全局全站折扣</code>，自动选取三者<strong className="text-foreground">最低值</strong>。</span>
+                    </li>
+                  </ul>
+                </div>
+              }
+            >
+              <Radio.Group optionType="button" buttonStyle="solid">
+                <Radio.Button value={2}>用户等级折扣 (默认)</Radio.Button>
+                <Radio.Button value={1}>全站折扣</Radio.Button>
+                <Radio.Button value={0}>不选择 (系统融合)</Radio.Button>
+              </Radio.Group>
             </Form.Item>
             <Form.Item 
               name="discount" 

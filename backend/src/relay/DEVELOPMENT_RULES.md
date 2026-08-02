@@ -52,7 +52,7 @@
 
 1. 请求前：`proxy::record_pending_log(PendingLog { ... })` → `status_code=0`
 2. 完成后：`proxy::record_and_bill_inner(BillRecord { ... })` 传入同一 `pending_log_id`（UPDATE，禁止再 INSERT）
-3. HA 重试复用同一条 pending；非首次失败由 `ha::reinstate_first_log` 还原首次子渠快照
+3. HA 重试复用同一条 pending；非首次失败由 `on_spawn_result_err` 内 reinstate 还原首次子渠快照
 
 ### PendingLog / BillRecord
 
@@ -67,10 +67,30 @@
 
 ```rust
 proxy::pre_deduct_or_intercept(..., category).await
-// admin / amount≤0 跳过；失败写 403 日志并返回 AppError
+// amount≤0 跳过；超管/管理员与普通用户同等预扣；失败写 403 日志并返回 AppError
+// 预扣与 pending 日志 cost/pre_deduct_gift 同事务落账，崩溃可由孤儿清理退款
 ```
 
 禁止各端点手写 `pre_deduct` + 403 落库副本（除非有特殊不可复用路径）。
+
+### 上游失败零费用结算（预扣前 / 失败退费）
+
+判定仍分两入口（勿合并成单一 if）：
+
+1. `send` 失败或 HTTP 非 2xx → `prefer_http_status = Some(status)`
+2. HTTP 200 但 `check_upstream_post_error` → `prefer_http_status = None`
+
+记账复用（禁止再抄一整段 `BillRecord { cost: 0, ... }`）：
+
+| API | 用途 |
+|-----|------|
+| `record_zero_cost_upstream_fail` | 记账 + `upstream_fail`（上游失败主路径，可进 HA） |
+| `record_zero_cost_fail` | **只记账**，调用方自行 `BadRequest` / `PaymentRequired` 等（业务侧停 HA） |
+
+`pre_deducted`/`pre_deduct_gift`：尚未预扣传 `0.0`；预扣后失败退费传已扣金额。  
+成功计费、异步冻结、流结束结算：**不要**走上述 API。
+
+状态码一致性：`record_zero_cost_fail` 写入的 `status_code` 与 `upstream_fail` / HA `first_fail` 均经 `norm_status`（仅保留 400–599，其余→502）。HTTP 200 业务失败走 body 推断后再规范化。分账与对外错误须共用同一码，禁止「日志推断码 + `upstream_fail(HTTP 200/硬编码 502)`」分叉。
 
 ---
 
@@ -80,7 +100,7 @@ proxy::pre_deduct_or_intercept(..., category).await
 let mut ha = HaAttempt::begin(&state, token.high_availability).await;
 while ha.cont() {
     // select → ha.on_select_err / access → ha.on_access_err
-    // spawn 内同步 BillRecord 错误落库后 return Err(e)
+    // spawn 内失败：record_zero_cost_upstream_fail / record_zero_cost_fail 后 return Err(e)
     if ha.on_spawn_result_err(&state, &channel, e, Some(&url)).await {
         ha.bump(); continue;
     }
@@ -89,12 +109,12 @@ while ha.cont() {
 Err(ha.finish())
 ```
 
-- `on_spawn_result_err`：spawn 外环统一入口——余额/鉴权等业务错误走 `on_access_err`（禁止 reinstate 覆盖 403）；上游错误走 `on_spawn_fail`
-- `on_spawn_fail` / `on_spawn_attempt_fail`：记首次失败、熔断、非首次 reinstate；返回是否 continue
-- 多模型外环（chat）：一个 `HaAttempt` + 每模型 `reset_attempts()`（清 attempt/排除/had_upstream，保留 pending + first_fail）
-- 不可 failover（余额不足等）：`ha.on_access_err(e); break`
+- `on_spawn_result_err`：唯一失败入口——业务侧 `on_access_err`；上游失败在同一方法内完成 first_fail / 熔断或 skip-melt / reinstate
+- `finish()`：若 `last_err` 为业务侧则对外返回业务错误，否则全失败保留 first_fail
+- 不可 failover（余额不足、转发规则不匹配等）：`ha.on_access_err(e); break`（禁止 `return Err` 绕过 `finish`）
 - HA 重载（轮询/取消/列表）：必须 `router::fetch_channel(state, channel_id, channel_config_id)`，禁止只读父渠 + preset
 - 日志子配快照只存 `channel_config_id`；展示 YID 由 JOIN `channel_configs` 得到
+- 对外表面：`HaAttempt` + `policy` / `yid_label` / `channel_is_ha_flag` / `resolve_log_config_id` / `is_melted_down` / `scrub_failed_channels`（熔断写入在 `ha` 内私有，不经 `proxy`）
 
 ---
 
@@ -151,7 +171,7 @@ POST 冻结（`billing_detail` 含「冻结」）→ GET 成功结算 / 失败�
 |------|--------|
 | 计费 | `calculate_relay_cost`, `compute_cost` |
 | 日志 | `PendingLog`, `BillRecord`, `record_pending_log` |
-| HA | `HaAttempt`, `on_spawn_fail`, `reinstate_first_log` |
+| HA | `HaAttempt::on_spawn_result_err`, `finish` |
 | 预扣费 | `pre_deduct_or_intercept` |
 | Usage / 特征 | `parse_usage`, `extract_request_features` |
 | 异步 | `already_billed`, `"冻结"`, `TaskRelayLogRow` |

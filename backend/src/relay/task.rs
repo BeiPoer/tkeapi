@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -379,7 +379,7 @@ pub async fn task_status(
                     }
                 };
                 tracing::info!(
-                    "[Task Poll] task_id={}, is_completed=1, 直接返回缓存响应, status_code={}",
+                    "[TaskPoll] 任务ID={}, 已完成=1, 直接返回缓存响应, 状态码={}",
                     task_id,
                     log_status_code
                 );
@@ -391,7 +391,7 @@ pub async fn task_status(
         }
         // is_completed=1 但 response_content 无效，降级到上游轮询
         tracing::warn!(
-            "[Task Poll] task_id={}, is_completed=1 但 response_content 无效，降级轮询上游",
+            "[TaskPoll] 任务ID={}, 已完成=1 但 response_content 无效，降级轮询上游",
             task_id
         );
     }
@@ -550,7 +550,7 @@ pub async fn task_status(
     let raw_status = super::response_formatter::extract_raw_status(&resp_json);
     let task_status = normalize_task_status(&raw_status);
     tracing::info!(
-        "[Task Poll] task_id={}, model={}, category={}, status={}, cascade_stage={}, resp_len={}",
+        "[TaskPoll] 任务ID={}, 模型={}, 类别={}, 状态={}, 级联阶段={}, 响应长度={}",
         task_id,
         model_name,
         category,
@@ -566,7 +566,7 @@ pub async fn task_status(
                 .into_iter()
                 .next()
                 .unwrap_or_default();
-            tracing::info!("[Cascade S1] 底座成功，触发阶段二 task_id={}", task_id);
+            tracing::info!("[Cascade S1] 底座成功，触发阶段二 任务ID={}", task_id);
             if let Some(log_id) = db_log_id {
                 match cascade_stage2_submit(
                     &state,
@@ -713,6 +713,10 @@ pub async fn task_status(
                 &resolved.res_mul,
             )
             .await;
+            crate::services::notification::spawn_low_balance_check(
+                Arc::clone(&state),
+                token.user_id.clone(),
+            );
             let _ = sqlx::query(&state.db.format_query(
                 "UPDATE logs SET response_content = ?, error_message = NULL WHERE id = ?",
             ))
@@ -721,7 +725,7 @@ pub async fn task_status(
             .execute(&state.db.pool)
             .await;
             tracing::info!(
-                "[Task Billing] log_id={}, model={}, cascade_stage={}, url={}",
+                "[TaskBilling] 日志ID={}, 模型={}, 级联阶段={}, URL={}",
                 log_id,
                 model_name,
                 cascade_stage,
@@ -731,7 +735,7 @@ pub async fn task_status(
             let err_text = proxy::extract_error_message(&store_body);
             if cascade_stage == 2 {
                 tracing::warn!(
-                    "[Cascade S2] 画质增强失败: log_id={}, err={}",
+                    "[Cascade S2] 画质增强失败: 日志ID={}, 错误={}",
                     log_id,
                     err_text
                 );
@@ -757,7 +761,7 @@ pub async fn task_status(
             let status_code = proxy::infer_error_status_code_from_str(&store_body);
             settle_failure(&state, log_id, &url, status_code, cascade_stage).await;
             tracing::info!(
-                "[Task Refund] log_id={}, model={}, cascade_stage={}, url={}, status={}",
+                "[TaskRefund] 日志ID={}, 模型={}, 级联阶段={}, URL={}, 状态码={}",
                 log_id,
                 model_name,
                 cascade_stage,
@@ -893,93 +897,81 @@ pub fn start(
     })
 }
 
-/// 查询所有未结算的异步任务日志并逐条轮询上游
-/// 连续轮询失败超过 4 次的任务将被标记为失败并退还预扣费
+/// 活跃轮询窗口与单批大小；超窗外仍冻结的任务走 `refund_stale_freezes` 兜底退款。
+const POLL_ACTIVE_INTERVAL: &str = "2 days";
+const POLL_BATCH: i64 = 100;
+const POLL_MAX_BATCHES_PER_TICK: u32 = 5;
+/// `logs.latency_ms` 为 INT4；超龄冻结直接 CAST 会 22003，先按 bigint 钳到上限。
+const LATENCY_MS_SQL: &str = "LEAST(2147483647, GREATEST(0, \
+    (EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - created_at)) * 1000)::bigint))::integer";
+
+fn pending_freeze_filter(cmp: &str) -> String {
+    format!(
+        "is_completed = 0 AND status_code = 200 \
+         AND created_at {cmp} CURRENT_TIMESTAMP - INTERVAL '{interval}'",
+        cmp = cmp,
+        interval = POLL_ACTIVE_INTERVAL
+    )
+}
+
+/// 查询未结算异步任务并轮询上游；连续失败 ≥4 次则退款终结。
+/// 按 id ASC 分批，避免 DESC+LIMIT 饿死旧任务；窗口外僵死冻结单独退款。
 async fn poll_pending_tasks(state: &Arc<AppState>) -> anyhow::Result<()> {
-    // 通用条件：billing_detail 含"冻结"即为待结算异步任务
-    // 提示：测试渠道日志（不扣费）在 INSERT 及迁移中已全部将 is_completed 置为 1，
-    // 因此这里无需在 SQL 中对 billing_detail 进行低效的 LIKE '%冻结%' 模糊过滤，
-    // 仅通过 is_completed = 0 即可极其高效地命中部分索引，完全排除所有测试日志。
-    let rows: Vec<(i64, i64, String, Option<String>, String)> =
-        sqlx::query_as(&state.db.format_query(
-            "SELECT id, channel_id, model, error_message, COALESCE(task_id, '') FROM logs \
-             WHERE is_completed = 0 \
-             AND status_code = 200 \
-             AND created_at > CURRENT_TIMESTAMP - INTERVAL '24 hours' \
-             ORDER BY id DESC LIMIT 50",
-        ))
-        .fetch_all(&state.db.pool)
-        .await?;
+    refund_stale_freezes(state).await;
 
-    if rows.is_empty() {
-        return Ok(());
-    }
-    tracing::info!("[TaskPoller] 发现 {} 条待轮询任务", rows.len());
+    let filter = pending_freeze_filter(">");
+    for _ in 0..POLL_MAX_BATCHES_PER_TICK {
+        let rows: Vec<(i64, String, Option<String>, String)> =
+            sqlx::query_as(&state.db.format_query(&format!(
+                "SELECT id, model, error_message, COALESCE(task_id, '') FROM logs \
+             WHERE {filter} ORDER BY id ASC LIMIT ?",
+                filter = filter
+            )))
+            .bind(POLL_BATCH)
+            .fetch_all(&state.db.pool)
+            .await?;
 
-    for (log_id, _, model, error_message, db_task_id) in rows {
-        // 解析已有的失败次数（格式：[POLL_FAIL:N] 错误内容）
-        let prev_fail_count = error_message
-            .as_deref()
-            .and_then(|m| m.strip_prefix("[POLL_FAIL:"))
-            .and_then(|m| m.split(']').next())
-            .and_then(|n| n.parse::<u32>().ok())
-            .unwrap_or(0);
-
-        // 已达失败上限，跳过（理论上不应出现，因为第 4 次已执行退款终结）
-        if prev_fail_count >= 4 {
-            continue;
+        if rows.is_empty() {
+            break;
         }
+        let batch_len = rows.len();
+        tracing::info!("[TaskPoller] 本批待轮询 {} 条", batch_len);
 
-        // task_id 直接从日志表获取，无需从 response_content 解析
-        if db_task_id.is_empty() {
-            tracing::warn!(
-                "[TaskPoller] log_id={}, model={} 日志中无 task_id",
+        for (log_id, model, error_message, db_task_id) in rows {
+            let prev_fail_count = error_message
+                .as_deref()
+                .and_then(|m| m.strip_prefix("[POLL_FAIL:"))
+                .and_then(|m| m.split(']').next())
+                .and_then(|n| n.parse::<u32>().ok())
+                .unwrap_or(0);
+            if prev_fail_count >= 4 {
+                continue;
+            }
+            if db_task_id.is_empty() {
+                // 正常冻结路径 task_id 非空；异常脏数据跳过，超窗由 stale 兜底
+                tracing::warn!(
+                    "[TaskPoller] 日志ID={}, 模型={} 日志中无 task_id，跳过本轮",
+                    log_id,
+                    model
+                );
+                continue;
+            }
+
+            tracing::info!(
+                "[TaskPoller] 开始轮询 日志ID={}, 模型={}, 任务ID={}",
                 log_id,
-                model
+                model,
+                db_task_id
             );
-            continue;
-        }
-
-        tracing::info!(
-            "[TaskPoller] 开始轮询 log_id={}, model={}, task_id={}",
-            log_id,
-            model,
-            db_task_id
-        );
-        if let Err(e) = sync_single_task(state, log_id).await {
-            let fail_count = prev_fail_count + 1;
-            let err_msg = e.to_string();
-            tracing::warn!(
-                "[TaskPoller] log_id={} 自动轮询失败 ({}/4): {}",
-                log_id,
-                fail_count,
-                err_msg
-            );
-
-            if fail_count >= 4 {
-                // 超过 4 次失败，记录真实错误原因并执行退款终结
-                let _ = sqlx::query(
-                    &state
-                        .db
-                        .format_query("UPDATE logs SET error_message = ? WHERE id = ?"),
-                )
-                .bind(&format!("[POLL_FAIL:{}] {}", fail_count, err_msg))
-                .bind(log_id)
-                .execute(&state.db.pool)
-                .await;
-
-                let poll_url = format!("auto_poll_fail:{}", err_msg);
-                let status_code = proxy::infer_error_status_code_from_str(&err_msg);
-                settle_failure(state, log_id, &poll_url, status_code, 0).await;
-                tracing::error!(
-                    "[TaskPoller] log_id={} 连续 {} 次轮询失败，已终止并退款: {}, 推断状态码: {}",
+            if let Err(e) = sync_single_task(state, log_id).await {
+                let fail_count = prev_fail_count + 1;
+                let err_msg = e.to_string();
+                tracing::warn!(
+                    "[TaskPoller] 日志ID={} 自动轮询失败 ({}/4): {}",
                     log_id,
                     fail_count,
-                    err_msg,
-                    status_code
+                    err_msg
                 );
-            } else {
-                // 更新失败次数和最近错误原因，下次轮询时继续尝试
                 let _ = sqlx::query(
                     &state
                         .db
@@ -989,11 +981,55 @@ async fn poll_pending_tasks(state: &Arc<AppState>) -> anyhow::Result<()> {
                 .bind(log_id)
                 .execute(&state.db.pool)
                 .await;
+
+                if fail_count >= 4 {
+                    let poll_url = format!("auto_poll_fail:{}", err_msg);
+                    let status_code = proxy::infer_error_status_code_from_str(&err_msg);
+                    settle_failure(state, log_id, &poll_url, status_code, 0).await;
+                    tracing::error!(
+                        "[TaskPoller] 日志ID={} 连续 {} 次轮询失败，已终止并退款",
+                        log_id,
+                        fail_count
+                    );
+                }
             }
+        }
+
+        if (batch_len as i64) < POLL_BATCH {
+            break;
         }
     }
 
     Ok(())
+}
+
+/// 超过活跃窗口仍未完成的冻结任务：退款终结，防止预扣永久挂住。
+async fn refund_stale_freezes(state: &Arc<AppState>) {
+    let filter = pending_freeze_filter("<=");
+    let stale: Vec<i64> = match sqlx::query_scalar(&state.db.format_query(&format!(
+        "SELECT id FROM logs WHERE {filter} ORDER BY id ASC LIMIT 50",
+        filter = filter
+    )))
+    .fetch_all(&state.db.pool)
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::error!("[TaskPoller] 查询僵死冻结失败: {:?}", e);
+            return;
+        }
+    };
+    if stale.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        "[TaskPoller] 发现 {} 条超过 {} 仍冻结，执行兜底退款",
+        stale.len(),
+        POLL_ACTIVE_INTERVAL
+    );
+    for log_id in stale {
+        settle_failure(state, log_id, "stale_freeze_timeout", 408, 0).await;
+    }
 }
 
 // ── sync_single_task ────────────────────────────────────────────
@@ -1189,7 +1225,7 @@ pub async fn sync_single_task(state: &Arc<AppState>, log_id: i64) -> anyhow::Res
             .into_iter()
             .next()
             .unwrap_or_default();
-        tracing::info!("[Cascade S1 BG] 底座成功，触发阶段二 task_id={}", task_id);
+        tracing::info!("[Cascade S1 BG] 底座成功，触发阶段二 任务ID={}", task_id);
         match cascade_stage2_submit(
             state,
             &user_id,
@@ -1296,7 +1332,7 @@ pub async fn sync_single_task(state: &Arc<AppState>, log_id: i64) -> anyhow::Res
         if cascade_stage == 2 {
             let err_text = proxy::extract_error_message(&final_body);
             tracing::warn!(
-                "[Cascade S2 BG] 画质增强失败: log_id={}, err={}",
+                "[Cascade S2 BG] 画质增强失败: 日志ID={}, 错误={}",
                 log_id,
                 err_text
             );
@@ -1366,6 +1402,12 @@ pub async fn sync_single_task(state: &Arc<AppState>, log_id: i64) -> anyhow::Res
             &resolved.res_mul,
         )
         .await;
+        if !user_id.is_empty() {
+            crate::services::notification::spawn_low_balance_check(
+                Arc::clone(state),
+                user_id.clone(),
+            );
+        }
         let _ = sqlx::query(&state.db.format_query(
             "UPDATE logs SET response_content = ?, error_message = NULL WHERE id = ?",
         ))
@@ -1444,43 +1486,19 @@ async fn settle_success(
     if b_detail.as_deref().map_or(false, |d| d.contains("退回")) {
         pre_deduction = 0.0;
         pre_deduct_gift = 0.0;
+    } else {
+        pre_deduction = crate::money::round_money(pre_deduction);
+        pre_deduct_gift = crate::money::round_money(pre_deduct_gift);
     }
     let user_id = if uid.is_empty() { None } else { Some(uid) };
 
-    // 获取用户折扣和模型单独折扣
-    let (user_discount, user_model_discounts): (f64, Option<String>) =
-        if let Some(ref uid) = user_id {
-            let row: Option<(String, Option<String>)> = sqlx::query_as(
-                &state
-                    .db
-                    .format_query("SELECT user_group, model_discounts FROM users WHERE id = ?"),
-            )
-            .bind(uid)
-            .fetch_optional(&state.db.pool)
+    // 获取用户折扣上下文（复用 get_user_context，避免重复拼装 discount 查询）
+    let ctx = match user_id.as_deref() {
+        Some(uid) => proxy::get_user_context(state, uid)
             .await
-            .unwrap_or(None);
-            if let Some((group, md)) = row {
-                let d = if group.is_empty() {
-                    1.0
-                } else {
-                    sqlx::query_scalar::<_, f64>(
-                        &state
-                            .db
-                            .format_query("SELECT discount FROM user_levels WHERE group_key = ?"),
-                    )
-                    .bind(&group)
-                    .fetch_optional(&state.db.pool)
-                    .await
-                    .unwrap_or(None)
-                    .unwrap_or(1.0)
-                };
-                (d, md)
-            } else {
-                (1.0, None)
-            }
-        } else {
-            (1.0, None)
-        };
+            .unwrap_or_else(|_| proxy::UserContext::from_discounts(1.0, 0, None)),
+        None => proxy::UserContext::from_discounts(1.0, 0, None),
+    };
 
     // 计费特征恢复：复用 build_poll_settlement_features 统一逻辑（内部已含 image_count 提取）
     let billing_features_str: Option<String> = if bf_str.is_empty() {
@@ -1521,8 +1539,7 @@ async fn settle_success(
         db_model,
         db_rule.as_mut(),
         channel,
-        user_discount,
-        &user_model_discounts,
+        &ctx,
         &usage,
         &features,
         mapping_source,
@@ -1560,7 +1577,7 @@ async fn settle_success(
         updated_bf.as_deref(),
     )
     .await;
-    tracing::info!("[TaskPoller Billing] log_id={}, model={}, cost={:.6}, pre_deduction={:.6}, tokens={}+{}={}, images={:?}, url={}",
+    tracing::info!("[TaskPoller Billing] 日志ID={}, 模型={}, 费用={:.6}, 预扣={:.6}, Tokens={}+{}={}, 图片数={:?}, URL={}",
         log_id, model_name, cost, pre_deduction, usage.prompt, usage.completion, usage.total, features.image_count, poll_url);
 }
 
@@ -1614,7 +1631,7 @@ async fn settle_failure(
     )
     .await;
     tracing::info!(
-        "[TaskPoller Failure] log_id={}, cascade_stage={}, refunded={:.6}, url={}, status_code={}",
+        "[TaskPoller Failure] 日志ID={}, 级联阶段={}, 退款={:.6}, URL={}, 状态码={}",
         log_id,
         cascade_stage,
         pre_deduction,
@@ -1661,7 +1678,7 @@ pub(super) fn normalize_task_status(raw: &str) -> &str {
 /// 腾讯云轮询原始响应日志（手动 / 自动 / 同步轮询共用，不影响业务路径）
 fn log_tencent_poll_raw(source: &str, task_id: &str, body: &str) {
     tracing::info!(
-        "[{}] 腾讯云原始响应 task_id={}, body={}",
+        "[{}] 腾讯云原始响应 任务ID={}, 响应体={}",
         source,
         task_id,
         body
@@ -1686,46 +1703,13 @@ pub(super) fn build_poll_settlement_features(
     store_body: &str,
     category: &str,
 ) -> super::usage_extractor::ExtractedFeatures {
-    // 恢复 billing_features 快照
     let mut features = if let Some(ref bf_str) = billing_features_str {
         serde_json::from_str::<super::usage_extractor::ExtractedFeatures>(bf_str)
             .unwrap_or_default()
     } else {
         super::usage_extractor::ExtractedFeatures::default()
     };
-    // 火山 MediaKit 终态 result（时长/分辨率/帧率）
-    if let Some(result) = resp_json.get("result") {
-        if let Some(duration) = result.get("duration").and_then(|v| v.as_f64()) {
-            features.duration_seconds = Some(duration);
-        }
-        if let Some(res) = result.get("resolution").and_then(|v| v.as_str()) {
-            features.resolution = Some(res.to_string());
-        }
-        if let Some(fps) = result.get("fps").and_then(|v| v.as_f64()) {
-            features.fps = Some(fps);
-        } else if let Some(fps) = result.get("fps").and_then(|v| v.as_i64()) {
-            features.fps = Some(fps as f64);
-        }
-    }
-    // 合并终态响应中新出现的特征（如火山图片 input_images / size）；不覆盖已有 resolution
-    features.merge(super::usage_extractor::extract_request_features(resp_json));
-    // 厂商终态覆盖放在 merge 之后，确保不被冲掉
-    if let Some(d) = super::usage_extractor::extract_kling_video_duration(resp_json) {
-        features.duration_seconds = Some(d);
-    }
-    let (tc_dur, tc_res) = super::usage_extractor::extract_tencent_vod_video_settlement(resp_json);
-    if let Some(d) = tc_dur {
-        features.duration_seconds = Some(d);
-    }
-    if let Some(r) = tc_res {
-        features.resolution = Some(r);
-    }
-    if category.contains("视频") && features.duration_seconds.is_none() {
-        features.duration_seconds = Some(5.0);
-    }
-    if let Some(resp_count) = super::usage_extractor::count_response_images(store_body) {
-        features.image_count = Some(resp_count);
-    }
+    features.merge_settlement_response(resp_json, store_body, category);
     features
 }
 
@@ -1746,17 +1730,18 @@ pub(super) async fn execute_settlement_tx(
     detail: &str,
     billing_features: Option<&str>, // 新增参数：更新后的计费特征快照JSON
 ) {
-    let apply_balance = cost - pre_deduction;
-
     match state.db.pool.begin().await {
         Ok(mut tx) => {
+            let (settled_cost, apply_balance) = crate::money::settlement_delta(cost, pre_deduction);
+
             // 原子 CAS：仅当 billing_detail 含"冻结"（首次结算）或"退回"（退款后重新结算）时才更新，
             // 且排除用户已取消(499)的记录，防止取消后轮询到 succeeded 覆盖状态码
             // 同时将 status_code 恢复为 200（退款后重新成功场景需要从 400 恢复）
             // 使用 COALESCE(?, billing_features) 绑定，如传入 None 则不修改原有特征快照值
-            let result = sqlx::query(&state.db.format_query(
-                "UPDATE logs SET status_code = 200, prompt_tokens = ?, completion_tokens = ?, cached_tokens = 0, cost = ?, billing_detail = ?, billing_features = COALESCE(?, billing_features), error_message = NULL, is_completed = 1, latency_ms = CAST(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - created_at)) * 1000 AS INTEGER) WHERE id = ? AND (billing_detail LIKE '%冻结%' OR billing_detail LIKE '%退回%') AND status_code != 499"
-            )).bind(prompt_tokens).bind(completion_tokens).bind(cost).bind(detail).bind(billing_features).bind(log_id)
+            let result = sqlx::query(&state.db.format_query(&format!(
+                "UPDATE logs SET status_code = 200, prompt_tokens = ?, completion_tokens = ?, cached_tokens = 0, cost = ?, billing_detail = ?, billing_features = COALESCE(?, billing_features), error_message = NULL, is_completed = 1, latency_ms = {latency} WHERE id = ? AND (billing_detail LIKE '%冻结%' OR billing_detail LIKE '%退回%') AND status_code != 499",
+                latency = LATENCY_MS_SQL
+            ))).bind(prompt_tokens).bind(completion_tokens).bind(settled_cost).bind(detail).bind(billing_features).bind(log_id)
             .execute(&mut *tx).await;
 
             let affected = match &result {
@@ -1788,12 +1773,12 @@ pub(super) async fn execute_settlement_tx(
                     .bind(apply_balance).bind(apply_balance)
                     .bind(pre_deduct_gift).bind(apply_balance).bind(apply_balance)
                     .bind(apply_balance).bind(apply_balance)
-                    .bind(cost)
+                    .bind(settled_cost)
                     .bind(user_id)
                     .execute(&mut *tx).await?;
-                } else {
+                } else if apply_balance < 0.0 {
                     let refund = -apply_balance;
-                    let gift_cost = cost.min(pre_deduct_gift);
+                    let gift_cost = settled_cost.min(pre_deduct_gift);
                     let gift_refund = pre_deduct_gift - gift_cost;
                     let balance_refund = refund - gift_refund;
                     sqlx::query(&state.db.format_query(
@@ -1801,8 +1786,18 @@ pub(super) async fn execute_settlement_tx(
                          used_quota = used_quota + ?, gift_used_quota = gift_used_quota + ?, \
                          updated_at = CURRENT_TIMESTAMP WHERE id = ?"
                     )).bind(balance_refund).bind(gift_refund)
-                    .bind(cost).bind(gift_cost).bind(user_id)
+                    .bind(settled_cost).bind(gift_cost).bind(user_id)
                     .execute(&mut *tx).await?;
+                } else {
+                    sqlx::query(&state.db.format_query(
+                        "UPDATE users SET used_quota = used_quota + ?, gift_used_quota = gift_used_quota + ?, \
+                         updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+                    ))
+                    .bind(settled_cost)
+                    .bind(settled_cost.min(pre_deduct_gift))
+                    .bind(user_id)
+                    .execute(&mut *tx)
+                    .await?;
                 }
 
                 if apply_balance != 0.0 {
@@ -1874,7 +1869,7 @@ pub(super) async fn execute_settlement_tx(
                     tracing::info!(
                         "[Settlement] log_id={}, cost={:.6}, applied={:.6}",
                         log_id,
-                        cost,
+                        settled_cost,
                         apply_balance
                     );
                     // 异步任务结算成功：补记实时 TPM（该路径不经 record_and_bill_inner）
@@ -1909,9 +1904,10 @@ pub(crate) async fn execute_refund_tx(
     match state.db.pool.begin().await {
         Ok(mut tx) => {
             // 原子 CAS：仅当 billing_detail 仍含"冻结"且未被用户取消(499)时才更新，防止并发双重退款
-            let result = sqlx::query(&state.db.format_query(
-                "UPDATE logs SET status_code = ?, cost = 0.0, pre_deduct_gift = 0.0, billing_detail = ?, is_completed = 1, latency_ms = CAST(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - created_at)) * 1000 AS INTEGER) WHERE id = ? AND billing_detail LIKE '%冻结%' AND status_code != 499"
-            )).bind(status_code as i32).bind(detail).bind(log_id)
+            let result = sqlx::query(&state.db.format_query(&format!(
+                "UPDATE logs SET status_code = ?, cost = 0.0, pre_deduct_gift = 0.0, billing_detail = ?, is_completed = 1, latency_ms = {latency} WHERE id = ? AND billing_detail LIKE '%冻结%' AND status_code != 499",
+                latency = LATENCY_MS_SQL
+            ))).bind(status_code as i32).bind(detail).bind(log_id)
             .execute(&mut *tx).await;
 
             let affected = match &result {
@@ -1933,11 +1929,13 @@ pub(crate) async fn execute_refund_tx(
             let res: Result<(), sqlx::Error> =
                 async {
                     if pre_deduction > 0.0 {
-                        let balance_refund = pre_deduction - pre_deduct_gift;
+                        let gift_refund =
+                            crate::money::round_money(pre_deduct_gift.min(pre_deduction).max(0.0));
+                        let balance_refund = crate::money::round_money(pre_deduction - gift_refund);
                         sqlx::query(&state.db.format_query(
                         "UPDATE users SET balance = balance + ?, gift_balance = gift_balance + ?, \
                          updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-                    )).bind(balance_refund).bind(pre_deduct_gift).bind(user_id)
+                    )).bind(balance_refund).bind(gift_refund).bind(user_id)
                     .execute(&mut *tx).await?;
 
                         let (site_tz, _) = crate::relay::get_cached_config(state).await;
@@ -2002,7 +2000,7 @@ pub(crate) async fn execute_refund_tx(
                 if let Err(e) = tx.commit().await {
                     tracing::error!("[Refund] 提交事务失败: {:?}", e);
                 } else {
-                    tracing::info!("[Refund] log_id={}, refunded={:.6}", log_id, pre_deduction);
+                    tracing::info!("[Refund] 日志ID={}, 退款={:.6}", log_id, pre_deduction);
                 }
             }
         }
@@ -2095,7 +2093,7 @@ async fn send_poll_request(
             "{}/?Action=CVSync2AsyncGetResult&Version=2022-08-31",
             channel.base_url.trim_end_matches('/')
         );
-        tracing::info!("轮询 url={}", poll_url);
+        tracing::info!("[PollTask] 轮询 URL={}", poll_url);
         let mut builder = http_client
             .post(&poll_url)
             .header("Content-Type", "application/json")
@@ -2146,7 +2144,7 @@ async fn send_poll_request(
     } else {
         join_url(&channel.base_url, &poll_path)
     };
-    tracing::info!("轮询 url={}", url);
+    tracing::info!("[PollTask] 轮询 URL={}", url);
 
     let resp = if is_tencent {
         let (ak, sk, sub_app_id) = forward::parse_tencent_vod_key(&channel.api_key);
@@ -2215,7 +2213,7 @@ pub async fn poll_task_result(
     let mut attempt: u32 = 0;
 
     tracing::info!(
-        "[PollTask] 开始轮询 task_id={}, timeout={}s",
+        "[PollTask] 开始轮询 任务ID={}, 超时={}秒",
         task_id,
         timeout_secs
     );
@@ -2238,7 +2236,7 @@ pub async fn poll_task_result(
                 let task_status = normalize_task_status(&raw_status).to_string();
 
                 tracing::info!(
-                    "[PollTask] 轮询第 {} 次, task_id={}, status={}",
+                    "[PollTask] 轮询第 {} 次, 任务ID={}, 状态={}",
                     attempt,
                     task_id,
                     task_status
@@ -2246,7 +2244,7 @@ pub async fn poll_task_result(
 
                 if task_status == "succeeded" || task_status == "failed" {
                     tracing::info!(
-                        "[PollTask] 终态 task_id={}, status={}, body_len={}",
+                        "[PollTask] 终态 任务ID={}, 状态={}, 响应长度={}",
                         task_id,
                         task_status,
                         body.len()
@@ -2268,13 +2266,13 @@ pub async fn poll_task_result(
             Err(e) => {
                 consecutive_errors += 1;
                 tracing::warn!(
-                    "[PollTask] 轮询请求失败 ({}/3): {} (task_id={})",
+                    "[PollTask] 轮询请求失败 ({}/3): {} (任务ID={})",
                     consecutive_errors,
                     e,
                     task_id
                 );
                 if consecutive_errors >= 3 {
-                    tracing::error!("[PollTask] 连续 3 次请求失败，放弃轮询 task_id={}", task_id);
+                    tracing::error!("[PollTask] 连续 3 次请求失败，放弃轮询 任务ID={}", task_id);
                     return None;
                 }
             }
@@ -2290,7 +2288,7 @@ pub async fn poll_task_result(
     }
 
     tracing::warn!(
-        "[PollTask] 轮询超时 task_id={}, 已尝试 {} 次",
+        "[PollTask] 轮询超时 任务ID={}, 已尝试 {} 次",
         task_id,
         attempt
     );
@@ -2452,12 +2450,14 @@ async fn cascade_stage2_submit(
             .http_client
             .post(&volc_url)
             .header("Content-Type", "application/json");
-        let builder = forward::apply_request_auth(
-            builder,
-            &volc_resolved,
-            &enhance_ch.api_key,
-            &mut volc_body,
-            &enhance_ch.base_url,
+        let builder = crate::services::http_client::with_upstream_timeout(
+            forward::apply_request_auth(
+                builder,
+                &volc_resolved,
+                &enhance_ch.api_key,
+                &mut volc_body,
+                &enhance_ch.base_url,
+            ),
         );
 
         let (should_retry, err_msg, err_status, raw_text) = match builder.send().await {
@@ -2569,7 +2569,7 @@ async fn cascade_stage2_submit(
         .bind(&updated).bind(stage1_response).bind(&upstream_combined).bind(db_log_id).execute(&state.db.pool).await;
 
     tracing::info!(
-        "[Cascade S2] submitted log_id={} stage1={} stage2={} mid={} res={} ch={}",
+        "[Cascade S2] 级联提交成功 日志ID={} 阶段1={} 阶段2={} MID={} 分辨率={} 渠道={}",
         db_log_id,
         task_id,
         stage2_id,

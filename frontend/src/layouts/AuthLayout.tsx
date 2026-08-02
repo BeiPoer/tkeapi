@@ -12,6 +12,7 @@ import { Terminal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useThemeStore } from '../store/theme';
 import useSettingsStore from '../store/settings';
+import { persistUserLanguagePreference } from '../utils/language';
 import { GridStarsEffect } from '../components/GridStarsEffect';
 
 export interface AuthMethodOption {
@@ -90,7 +91,7 @@ const AuthLayout: React.FC<AuthLayoutProps> = ({
       label: langNameMap[lng] || lng,
       onClick: () => {
         i18n.changeLanguage(lng);
-        localStorage.setItem('i18nextLng', lng);
+        persistUserLanguagePreference(lng);
       },
     }));
 

@@ -6,7 +6,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { Table, Button, Space, Tag, Modal, Form, Input, InputNumber, message, Popconfirm, Card, Typography, Tooltip, Row, Col, Grid, theme, Spin, Dropdown, Progress, Checkbox } from 'antd';
+import { Table, Button, Space, Tag, Modal, Form, Input, InputNumber, message, Popconfirm, Card, Typography, Tooltip, Row, Col, Grid, theme, Spin, Dropdown, Progress, Checkbox, Select } from 'antd';
 import AppSwitch from '../../components/AppSwitch';
 import MobileCardList, { MobileCard, CardRow, CardActions } from '../../components/MobileCardList';
 import { PlusOutlined, EditOutlined, DeleteOutlined, CopyOutlined, SyncOutlined, EyeOutlined, EyeInvisibleOutlined, KeyOutlined, CheckOutlined, ArrowLeftOutlined, DollarOutlined, BarChartOutlined, EllipsisOutlined, PieChartOutlined, InfoCircleOutlined, FileTextOutlined, ClearOutlined } from '@ant-design/icons';
@@ -43,6 +43,8 @@ const Tokens: React.FC = () => {
   const screens = useBreakpoint();
   const [saving, setSaving] = useState(false);
   const [enableModelFilter, setEnableModelFilter] = useState(false);
+  const [availableModels, setAvailableModels] = useState<Array<{ model_id: string; name?: string }>>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [limitQuotaEnabled, setLimitQuotaEnabled] = useState(false);
   const [periodicQuotaEnabled, setPeriodicQuotaEnabled] = useState(false);
   const [ipFilterEnabled, setIpFilterEnabled] = useState(false);
@@ -151,10 +153,33 @@ const Tokens: React.FC = () => {
     } catch { /* ignore */ }
   };
 
+  const fetchAvailableModels = async () => {
+    setModelsLoading(true);
+    try {
+      // 与模型广场一致：仅加载广场中已展示的模型（隐藏/未启用的不出现）
+      const res = await (request.get('/marketplace/public') as Promise<{
+        models?: Array<{ model_id: string; name?: string }>;
+      }>);
+      const models = res?.models || [];
+      const seen = new Set<string>();
+      setAvailableModels(models.filter((m) => {
+        if (!m.model_id || seen.has(m.model_id)) return false;
+        seen.add(m.model_id);
+        return true;
+      }));
+    } catch (e) {
+      console.error(e);
+      setAvailableModels([]);
+    } finally {
+      setModelsLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchTokens();
     fetchPluginsState();
     fetchSettings();
+    fetchAvailableModels();
   }, []);
 
   const handleCopy = async (key: string, tokenId: number) => {
@@ -190,7 +215,6 @@ const Tokens: React.FC = () => {
     setSaving(false);
     form.resetFields();
     form.setFieldsValue({
-      only_playground: false,
       high_availability: false,
       daily_quota_limit: -1,
       weekly_quota_limit: -1,
@@ -221,9 +245,8 @@ const Tokens: React.FC = () => {
       monthly_quota_limit: record.monthly_quota_limit === -1 ? undefined : record.monthly_quota_limit,
       rps_limit: record.rps_limit === 0 ? undefined : record.rps_limit,
       rpm_limit: record.rpm_limit === 0 ? undefined : record.rpm_limit,
-      only_playground: record.only_playground === 1,
       high_availability: record.high_availability === 1,
-      allowed_models: Array.isArray(models) ? models.join('\n') : '',
+      allowed_models: Array.isArray(models) ? models : [],
     });
     setIsModalVisible(true);
   };
@@ -248,10 +271,14 @@ const Tokens: React.FC = () => {
       rps_limit: (formValues.rps_limit === undefined || formValues.rps_limit === null) ? 0 : formValues.rps_limit,
       rpm_limit: (formValues.rpm_limit === undefined || formValues.rpm_limit === null) ? 0 : formValues.rpm_limit,
       allowed_ips: ipFilterEnabled ? (formValues.allowed_ips || '') : '',
-      only_playground: formValues.only_playground ? 1 : 0,
+      // 创作中心标识仅由创作中心创建令牌时自动写入；令牌管理页创建恒为 0，编辑时保留原值
+      only_playground: editingToken ? editingToken.only_playground : 0,
+      only_playground_2026: editingToken ? editingToken.only_playground_2026 : 0,
       high_availability: formValues.high_availability ? 1 : 0,
       allowed_models: enableModelFilter
-        ? (formValues.allowed_models?.split('\n').filter((m: string) => m.trim()) || [])
+        ? (Array.isArray(formValues.allowed_models)
+            ? formValues.allowed_models.map((m: string) => String(m).trim()).filter(Boolean)
+            : [])
         : [],
     };
 
@@ -275,7 +302,7 @@ const Tokens: React.FC = () => {
     }
   };
 
-  const handleSave = async (values: { allowed_models?: string; allowed_ips?: string; [key: string]: unknown }) => {
+  const handleSave = async (values: { allowed_models?: string[]; allowed_ips?: string; [key: string]: unknown }) => {
     const isDismissed = editingToken && localStorage.getItem(`ha_confirm_dismiss_${editingToken.id}`) === 'true';
 
     if (values.high_availability && !isDismissed) {
@@ -380,13 +407,22 @@ const Tokens: React.FC = () => {
       sorter: (a: ApiToken, b: ApiToken) => a.name.localeCompare(b.name),
       render: (text: string, record: ApiToken) => {
         const isPlayground = record.only_playground === 1;
+        const isPlayground2026 = record.only_playground_2026 === 1;
         const isActive = record.is_active === 1 || record.is_active === true;
+        const scopeLabel = isPlayground && isPlayground2026
+          ? t('tokens.playground_both', '创作中心系列')
+          : isPlayground2026
+            ? t('tokens.playground_2026_only', '仅创作中心2026')
+            : isPlayground
+              ? t('tokens.playground_only', '仅创作中心')
+              : t('tokens.general', '通用');
+        const scopeColor = (isPlayground || isPlayground2026) ? 'orange' : 'blue';
         return (
           <Space direction="vertical" size={4} style={{ display: 'flex' }}>
             <Text strong>{text}</Text>
             <Space size={4} wrap>
-              <Tag color={isPlayground ? 'orange' : 'blue'} style={{ margin: 0, fontSize: '11px', padding: '0 4px', lineHeight: '16px' }}>
-                {isPlayground ? t('tokens.playground_only', '仅创作中心') : t('tokens.general', '通用')}
+              <Tag color={scopeColor} style={{ margin: 0, fontSize: '11px', padding: '0 4px', lineHeight: '16px' }}>
+                {scopeLabel}
               </Tag>
               <Tag color={isActive ? 'success' : 'default'} style={{ margin: 0, fontSize: '11px', padding: '0 4px', lineHeight: '16px' }}>
                 {isActive ? t('common.active', '启用') : t('common.disabled', '禁用')}
@@ -737,8 +773,14 @@ const Tokens: React.FC = () => {
                         </Space>
                       </CardRow>
                       <CardRow label="使用范围" compact={true}>
-                        <Tag color={record.only_playground === 1 ? 'blue' : 'gray'} style={{ fontSize: 11, margin: 0 }}>
-                          {record.only_playground === 1 ? t('tokens.playground_only', '仅创作中心') : t('tokens.general', '通用')}
+                        <Tag color={(record.only_playground === 1 || record.only_playground_2026 === 1) ? 'blue' : 'gray'} style={{ fontSize: 11, margin: 0 }}>
+                          {record.only_playground === 1 && record.only_playground_2026 === 1
+                            ? t('tokens.playground_both', '创作中心系列')
+                            : record.only_playground_2026 === 1
+                              ? t('tokens.playground_2026_only', '仅创作中心2026')
+                              : record.only_playground === 1
+                                ? t('tokens.playground_only', '仅创作中心')
+                                : t('tokens.general', '通用')}
                         </Tag>
                       </CardRow>
                       <CardRow label="速率限制" compact={true}>
@@ -1143,29 +1185,7 @@ const Tokens: React.FC = () => {
 
               </div>
 
-              {/* 区块二：访问控制 */}
-              <div style={sectionContainerStyle}>
-                <div style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  height: '100%',
-                  boxSizing: 'border-box',
-                  padding: '8px 0',
-                }}>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', paddingRight: '12px' }}>
-                    <Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.playground_only_limit', '仅创作中心使用')}</Text>
-                    <Text style={{ fontSize: '13px', lineHeight: '1.3', color: isLight ? '#71717a' : '#a1a1aa' }}>
-                      令牌限制仅在创作中心内可用
-                    </Text>
-                  </div>
-                  <Form.Item name="only_playground" valuePropName="checked" noStyle>
-                    <AppSwitch />
-                  </Form.Item>
-                </div>
-              </div>
-
-              {/* 区块三：模型与路由 */}
+              {/* 区块二：模型与路由 */}
               <div style={sectionContainerStyle}>
 
                 {/* 指定模型开关行 */}
@@ -1188,7 +1208,9 @@ const Tokens: React.FC = () => {
                     onChange={(checked) => {
                       setEnableModelFilter(checked);
                       if (!checked) {
-                        form.setFieldsValue({ allowed_models: '' });
+                        form.setFieldsValue({ allowed_models: [] });
+                      } else if (availableModels.length === 0) {
+                        fetchAvailableModels();
                       }
                     }}
                   />
@@ -1206,21 +1228,26 @@ const Tokens: React.FC = () => {
                       style={{ marginBottom: 0 }}
                       extra={
                         <div style={{ fontSize: 12, color: isLight ? '#71717a' : '#a1a1aa', lineHeight: 1.6, marginTop: 6 }}>
-                          <div>{t('tokens.models_hint_1', '📌 每行填写一个模型名称（model ID），例如：')}</div>
-                          <div style={{ fontFamily: 'monospace', color: isLight ? '#71717a' : '#a1a1aa', padding: '4px 0 4px 12px', fontSize: '12px' }}>
-                            gpt-4o<br />
-                            claude-sonnet-4-20250514<br />
-                            ep-tokensbyte2a7f9x3k
-                          </div>
-                          <div>{t('tokens.models_hint_2', '模型名称需与站内已配置的模型 ID 完全一致，不区分大小写。')}</div>
+                          {t('tokens.models_hint_1', '可从下方列表选择站点可用模型，也可直接输入模型 ID 后按回车添加。')}
                         </div>
                       }
                     >
-                      <Input.TextArea
-                        rows={4}
-                        style={{ ...inputStyle, fontFamily: 'monospace', fontSize: '14px' }}
+                      <Select
+                        mode="tags"
+                        allowClear
+                        showSearch
+                        loading={modelsLoading}
+                        optionFilterProp="label"
+                        tokenSeparators={[',', '\n']}
+                        style={{ width: '100%', ...inputStyle }}
                         className="shadcn-input"
-                        placeholder={t('tokens.models_placeholder', '请输入允许使用的模型名称，每行一个\n例如：\ngpt-4o\nclaude-sonnet-4-20250514\nep-tokensbyteXXXXXXXX')}
+                        placeholder={t('tokens.models_placeholder', '选择或输入允许使用的模型 ID')}
+                        options={availableModels.map((m) => ({
+                          value: m.model_id,
+                          label: m.name && m.name !== m.model_id
+                            ? `${m.name} (${m.model_id})`
+                            : m.model_id,
+                        }))}
                       />
                     </Form.Item>
                   </div>

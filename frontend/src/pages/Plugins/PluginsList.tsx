@@ -22,7 +22,8 @@ import {
   Settings,
   RefreshCw,
   Globe,
-  Share2
+  Share2,
+  ArrowLeftRight
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
@@ -50,14 +51,17 @@ const pluginIcons: Record<string, React.ReactNode> = {
   asset_manager_intl: <Image className="w-3.5 h-3.5" />,
   team_marketing: <Users className="w-3.5 h-3.5" />,
   playground: <Beaker className="w-3.5 h-3.5" />,
+  playground_2026: <Beaker className="w-3.5 h-3.5" />,
   model_marketplace: <Store className="w-3.5 h-3.5" />,
   site_icons: <LayoutGrid className="w-3.5 h-3.5" />,
 
   site_portal: <Home className="w-3.5 h-3.5" />,
+  site_portal_pro: <Home className="w-3.5 h-3.5" />,
   docs_api: <BookOpen className="w-3.5 h-3.5" />,
   happyhorse_router: <Zap className="w-3.5 h-3.5" />,
   volcengine_ark_monitor: <MonitorPlay className="w-3.5 h-3.5" />,
   upstream_asset_relay: <Share2 className="w-3.5 h-3.5" />,
+  data_sync: <ArrowLeftRight className="w-3.5 h-3.5" />,
 };
 
 // 系统增强插件使用不同的图标/徽章颜色样式，适配 shadcn ui 风格
@@ -107,8 +111,7 @@ const PluginsList: React.FC = () => {
       setLoading(true);
       const res = await (request.get('/plugins', { skipErrorHandler: true } as any) as any);
       if (res.plugins) setPlugins(res.plugins);
-    } catch (error: any) {
-      console.log('未开启插件模块或获取列表失败:', error);
+    } catch {
       setPlugins([]);
     } finally {
       setLoading(false);
@@ -155,7 +158,7 @@ const PluginsList: React.FC = () => {
       <div
         key={plugin.id}
         onClick={() => navigate(`/${adminPath}/plugins/${plugin.name}/config`)}
-        className={`group relative flex flex-col justify-between p-3 bg-zinc-50/70 dark:bg-zinc-900/50 text-card-foreground rounded-lg border border-border cursor-pointer shadow-xs transition-all duration-200 hover:shadow-sm hover:bg-zinc-100/60 dark:hover:bg-zinc-900 ${style.cardBorder}`}
+        className={`group relative flex flex-col justify-between p-3 bg-card text-card-foreground rounded-lg border border-border cursor-pointer shadow-xs transition-all duration-200 hover:shadow-sm hover:bg-dashboard dark:hover:bg-muted ${style.cardBorder}`}
       >
         <div>
           {/* 头部信息 */}

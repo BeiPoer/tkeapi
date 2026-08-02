@@ -1,11 +1,12 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
 use crate::error::AppResult;
+use crate::models::verification::VERIFICATION_CODE_EXPIRY_MINUTES;
 use crate::models::SMTPSettings;
 use lettre::message::{Mailbox, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
@@ -58,13 +59,13 @@ impl EmailService {
     <div style="background-color: #f5f5f5; padding: 20px; border-radius: 6px; text-align: center; font-size: 36px; font-weight: bold; color: #1677ff; letter-spacing: 8px; margin-bottom: 24px;">
       {}
     </div>
-    <p style="color: #666; font-size: 14px; margin: 0 0 12px 0;">验证码有效期为 10 分钟，请勿泄露给他人。</p>
+    <p style="color: #666; font-size: 14px; margin: 0 0 12px 0;">验证码有效期为 {} 分钟，请勿泄露给他人。</p>
     <div style="border-top: 1px dashed #e8e8e8; margin-top: 24px; padding-top: 16px;">
       <p style="color: #999; font-size: 12px; margin: 0;">如非本人操作，请忽略此邮件。</p>
     </div>
   </div>
 </div>"#,
-            self.from_name, action_text, code
+            self.from_name, action_text, code, VERIFICATION_CODE_EXPIRY_MINUTES
         );
 
         let from_mailbox = Mailbox::new(

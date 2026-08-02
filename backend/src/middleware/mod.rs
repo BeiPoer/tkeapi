@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -279,14 +279,36 @@ pub async fn api_key_middleware(
         Err(e) => return AppError::Internal(format!("Database error: {}", e)).into_response(),
     };
 
-    // Check only_playground restrict
-    if token.only_playground == 1 {
+    // Check only_playground / only_playground_2026 restrict
+    let only_pg = token.only_playground == 1;
+    let only_pg2026 = token.only_playground_2026 == 1;
+    if only_pg || only_pg2026 {
         let x_playground = request
             .headers()
             .get("x-playground")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if x_playground != "1" && x_playground != "true" {
+        let x_playground_2026 = request
+            .headers()
+            .get("x-playground-2026")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let pg_ok = x_playground == "1" || x_playground == "true";
+        let pg2026_ok = x_playground_2026 == "1" || x_playground_2026 == "true";
+        let allowed = match (only_pg, only_pg2026) {
+            (true, true) => pg_ok || pg2026_ok,
+            (true, false) => pg_ok,
+            (false, true) => pg2026_ok,
+            (false, false) => true,
+        };
+        if !allowed {
+            let msg = if only_pg && only_pg2026 {
+                "该令牌仅能在创作中心或创作中心2026内使用"
+            } else if only_pg2026 {
+                "该令牌仅能在创作中心2026内使用"
+            } else {
+                "该令牌仅能在创作中心内使用"
+            };
             if !skip_log {
                 crate::relay::proxy::record_error_log(
                     &state,
@@ -302,7 +324,7 @@ pub async fn api_key_middleware(
                 )
                 .await;
             }
-            return AppError::Forbidden("该令牌仅能在创作中心内使用".to_string()).into_response();
+            return AppError::Forbidden(msg.to_string()).into_response();
         }
     }
 

@@ -30,6 +30,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Input, Button, Space, Row, Col, Tag, Typography, Spin } from 'antd';
 import request from '../utils/request';
+import { modelMatchesKeyword } from '../utils/modelKeywordMatch';
 
 const { Title, Text } = Typography;
 
@@ -37,6 +38,7 @@ interface ModelSelectorModel {
   mid: string;
   name: string;
   model_id: string;
+  model_id_alias?: string;
   provider_id?: number;
   api_provider_id?: number;
   type_id?: number;
@@ -129,11 +131,8 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
 
   /** 基础筛选：仅搜索关键词（所有维度共用） */
   const searchFiltered = useMemo(() => {
-    if (!modelSearch) return availableModels;
-    const q = modelSearch.toLowerCase();
-    return availableModels.filter(m =>
-      m.name.toLowerCase().includes(q) || m.model_id.toLowerCase().includes(q) || m.mid.toLowerCase().includes(q)
-    );
+    if (!modelSearch.trim()) return availableModels;
+    return availableModels.filter(m => modelMatchesKeyword(m, modelSearch));
   }, [availableModels, modelSearch]);
 
   /**
@@ -142,24 +141,24 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
    */
   const providerCountBase = useMemo(() => {
     return searchFiltered.filter(m => {
-      if (selectedApiProvider && m.api_provider_id !== selectedApiProvider) return false;
-      if (selectedType && m.type_id !== selectedType) return false;
+      if (selectedApiProvider != null && m.api_provider_id !== selectedApiProvider) return false;
+      if (selectedType != null && m.type_id !== selectedType) return false;
       return true;
     });
   }, [searchFiltered, selectedApiProvider, selectedType]);
 
   const apiProviderCountBase = useMemo(() => {
     return searchFiltered.filter(m => {
-      if (selectedProvider && m.provider_id !== selectedProvider) return false;
-      if (selectedType && m.type_id !== selectedType) return false;
+      if (selectedProvider != null && m.provider_id !== selectedProvider) return false;
+      if (selectedType != null && m.type_id !== selectedType) return false;
       return true;
     });
   }, [searchFiltered, selectedProvider, selectedType]);
 
   const typeCountBase = useMemo(() => {
     return searchFiltered.filter(m => {
-      if (selectedProvider && m.provider_id !== selectedProvider) return false;
-      if (selectedApiProvider && m.api_provider_id !== selectedApiProvider) return false;
+      if (selectedProvider != null && m.provider_id !== selectedProvider) return false;
+      if (selectedApiProvider != null && m.api_provider_id !== selectedApiProvider) return false;
       return true;
     });
   }, [searchFiltered, selectedProvider, selectedApiProvider]);
@@ -167,9 +166,9 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
   // 最终筛选结果：所有条件叠加
   const filteredModels = useMemo(() => {
     return searchFiltered.filter(m => {
-      if (selectedProvider && m.provider_id !== selectedProvider) return false;
-      if (selectedApiProvider && m.api_provider_id !== selectedApiProvider) return false;
-      if (selectedType && m.type_id !== selectedType) return false;
+      if (selectedProvider != null && m.provider_id !== selectedProvider) return false;
+      if (selectedApiProvider != null && m.api_provider_id !== selectedApiProvider) return false;
+      if (selectedType != null && m.type_id !== selectedType) return false;
       return true;
     });
   }, [searchFiltered, selectedProvider, selectedApiProvider, selectedType]);

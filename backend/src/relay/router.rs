@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -13,7 +13,7 @@ use rand::Rng;
 use std::sync::Arc;
 
 /// Select the best channel for a given model based on priority and load balancing.
-/// `allow_ha`: 是否允许选中高可用虚拟组（插件+令牌，见 `ha::failover_enabled`）。
+/// `allow_ha`: 是否允许选中高可用虚拟组（插件+令牌，见 `ha::policy`）。
 pub async fn select_channel(
     state: &Arc<AppState>,
     model: &str,
@@ -24,8 +24,12 @@ pub async fn select_channel(
     allow_ha: bool,
 ) -> AppResult<Channel> {
     tracing::info!(
-        "[SelectChannel Debug] 渠道选择算法启动 - model: '{}', user_group: '{}', level_id: '{}', exclude_aids: {:?}, mids: {:?}, allow_ha: {}",
-        model, user_group, level_id, exclude_aids, mids, allow_ha
+        "[SelectChannel] 开始 模型={} 分组={} 等级={} 已排除={:?} 允许HA={}",
+        model,
+        user_group,
+        level_id,
+        exclude_aids,
+        allow_ha
     );
 
     // 1. 查找请求 model_id 对应的所有 mid（若传入了已解析好的 mids 数组，则免于数据库查询）
@@ -111,14 +115,13 @@ pub async fn select_channel(
     query = query.bind(format!("%\"{}\"%", level_id));
     let channels: Vec<Channel> = query.fetch_all(&state.db.pool).await?;
 
-    // 开发者调试日志：数据库粗筛候选渠道
     tracing::info!(
-        "[SelectChannel Debug] 数据库匹配出的候选渠道数: {}, 渠道ID列表: {:?}",
+        "[SelectChannel] 库候选数={} 渠道id={:?}",
         channels.len(),
         channels.iter().map(|c| c.id).collect::<Vec<i64>>()
     );
 
-    // 预加载非 HA 渠道绑定的上游预设，过滤额度耗尽的预设
+    // 预加载非 HA 渠道绑定的上游预设，过滤禁用 / 额度耗尽的预设
     let preset_ids: Vec<i64> = channels
         .iter()
         .filter(|c| c.provider_type != "high_availability_group")
@@ -126,7 +129,7 @@ pub async fn select_channel(
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-    let mut exhausted_presets: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut unusable_presets: std::collections::HashSet<i64> = std::collections::HashSet::new();
     if !preset_ids.is_empty() {
         let presets: Vec<crate::models::ChannelConfig> = sqlx::query_as(
             &state
@@ -138,13 +141,19 @@ pub async fn select_channel(
         .await
         .unwrap_or_default();
         for p in &presets {
-            if !p.has_available_quota(&now_day, &now_week, &now_month) {
-                exhausted_presets.insert(p.id);
+            if p.status != 1 || !p.has_available_quota(&now_day, &now_week, &now_month) {
+                unusable_presets.insert(p.id);
+            }
+        }
+        // 预设记录缺失也视为不可用
+        for pid in &preset_ids {
+            if !presets.iter().any(|p| p.id == *pid) {
+                unusable_presets.insert(*pid);
             }
         }
     }
 
-    // 过滤：熔断 / 黑名单 / 不允许 HA / 整组 exclude（ha_group_{id}）/ 预设额度耗尽
+    // 过滤：熔断 / 黑名单 / 不允许 HA / 整组 exclude（ha_group_{id}）/ 预设禁用或额度耗尽
     let mut channels: Vec<Channel> = channels
         .into_iter()
         .filter(|c| {
@@ -157,7 +166,7 @@ pub async fn select_channel(
                     return false;
                 }
             } else if let Some(pid) = c.preset_id {
-                if exhausted_presets.contains(&pid) {
+                if unusable_presets.contains(&pid) {
                     return false;
                 }
             }
@@ -178,7 +187,7 @@ pub async fn select_channel(
         .collect();
 
     tracing::info!(
-        "[SelectChannel Debug] 过滤熔断/黑名单/HA/预设额度后剩余有效渠道数: {}, 渠道ID列表: {:?}",
+        "[SelectChannel] 过滤后={} 渠道id={:?}",
         channels.len(),
         channels.iter().map(|c| c.id).collect::<Vec<i64>>()
     );
@@ -186,13 +195,15 @@ pub async fn select_channel(
     if channels.is_empty() {
         let err_msg = format!("No available channels found for model {}", model);
         tracing::warn!(
-            "[SelectChannel Debug] 渠道匹配失败! model: '{}', user_group: '{}', level_id: '{}', 错误: {}",
-            model, user_group, level_id, err_msg
+            "[SelectChannel] 未命中 模型={} 分组={} 等级={}",
+            model,
+            user_group,
+            level_id
         );
         return Err(AppError::NotFound(err_msg));
     }
 
-    // 加权选渠；若命中 HA 组但子渠耗尽，剔除该组后重选（可落到其它物理渠）
+    // 物理渠加权选；HA 子渠：priority → weight → 绑定序（确定性）
     // 顺序不变量：HA 子配注入并清 preset_id →（仅剩 preset 时）查 preset → 最后 volc
     let mut ch = loop {
         let highest_priority = channels[0].priority;
@@ -250,6 +261,9 @@ pub async fn select_channel(
         sub_configs = sub_configs
             .into_iter()
             .filter(|sub_c| {
+                if sub_c.status != 1 {
+                    return false;
+                }
                 let config_key = format!("ha_group_{}_config_{}", group_id, sub_c.id);
                 if exclude_aids.contains(&config_key) {
                     return false;
@@ -267,40 +281,26 @@ pub async fn select_channel(
             channels.retain(|c| c.id != group_id);
             if channels.is_empty() {
                 let err_msg = format!("No available channels found for model {}", model);
-                tracing::warn!(
-                    "[SelectChannel Debug] HA组 {} 子渠耗尽且无其它候选: {}",
-                    group_id,
-                    err_msg
-                );
+                tracing::warn!("[SelectChannel] HA组 {} 子渠已耗尽", group_id);
                 return Err(AppError::NotFound(err_msg));
             }
             continue;
         }
 
-        sub_configs.sort_by(|a, b| b.priority.cmp(&a.priority));
-        let highest_sub_priority = sub_configs[0].priority;
-        let top_subs: Vec<crate::models::ChannelConfig> = sub_configs
-            .into_iter()
-            .take_while(|c| c.priority == highest_sub_priority)
-            .collect();
-
-        let mut rng = rand::rngs::OsRng;
-        let selected_sub = if top_subs.len() == 1 {
-            &top_subs[0]
-        } else {
-            let total_weight: i32 = top_subs.iter().map(|c| c.weight.max(1)).sum();
-            let mut rand_val = rng.gen_range(0..total_weight);
-            let mut selected = &top_subs[0];
-            for sub in &top_subs {
-                let w = sub.weight.max(1);
-                if rand_val < w {
-                    selected = sub;
-                    break;
-                }
-                rand_val -= w;
-            }
-            selected
+        // 子渠：priority 高档优先；同档 weight 高者优先；再同则按绑定序（确定性，不随机）
+        let bind_idx = |id: i64| {
+            sub_channel_ids
+                .iter()
+                .position(|&x| x == id)
+                .unwrap_or(usize::MAX)
         };
+        sub_configs.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| b.weight.cmp(&a.weight))
+                .then_with(|| bind_idx(a.id).cmp(&bind_idx(b.id)))
+        });
+        let selected_sub = &sub_configs[0];
 
         let mut resolved = picked;
         apply_ha_sub_mapped(&mut resolved, selected_sub);
@@ -318,15 +318,32 @@ pub async fn select_channel(
         .fetch_optional(&state.db.pool)
         .await
         {
-            tracing::info!(
-                "[SelectChannel Debug] 渠道 {} (group_aid={:?}) 解析上游预设: preset_id={}, preset_name='{}', base_url: '{}' -> '{}'",
-                ch.id, ch.group_aid, pid, preset.name, ch.base_url, preset.base_url
+            if preset.status != 1 {
+                tracing::warn!(
+                    "[SelectChannel] 预设已禁用 渠道={} 预设id={}",
+                    ch.id,
+                    pid
+                );
+                return Err(AppError::NotFound(format!(
+                    "上游渠道配置已禁用 (preset_id={})",
+                    pid
+                )));
+            }
+            tracing::debug!(
+                "[SelectChannel] 套用预设 渠道={} 子渠标识={:?} 预设id={} {} -> {}",
+                ch.id,
+                ch.group_aid,
+                pid,
+                ch.base_url,
+                preset.base_url
             );
             apply_config_base(&mut ch, &preset);
         } else {
-            tracing::warn!(
-                "[SelectChannel Debug] ⚠️ 渠道 {} (group_aid={:?}) 的 preset_id={} 在 channel_configs 表中未找到！将使用渠道自身的 base_url: '{}'",
-                ch.id, ch.group_aid, pid, ch.base_url
+            tracing::debug!(
+                "[SelectChannel] 预设缺失 渠道={} 子渠标识={:?} 预设id={}",
+                ch.id,
+                ch.group_aid,
+                pid
             );
         }
     }
@@ -334,11 +351,14 @@ pub async fn select_channel(
     // 5. 画质增强凭证集成：从 config 中的凭证 ID 实时查询最新密钥（保证插件端修改凭证后渠道分组数据一致）
     apply_volcengine_credential(state, &mut ch).await;
 
-    // 开发者调试日志：最终选中渠道
-    // 不变量：返回的内存 Channel 已含最终 base_url/api_key/yid；下游结算禁止用 DB 空父行覆盖
     tracing::info!(
-        "[SelectChannel Debug] 渠道匹配算法执行完毕. 最终选中渠道: '{}' (ID: {}), Provider: {}, Base URL: {}",
-        ch.name, ch.id, ch.provider_type, ch.base_url
+        "[SelectChannel] 选中 渠道id={} 上游YID={} 名称='{}' 类型={} 子渠标识={:?} 地址={}",
+        ch.id,
+        crate::relay::ha::yid_label(ch.yid.as_deref()),
+        ch.name,
+        ch.provider_type,
+        ch.group_aid,
+        ch.base_url
     );
 
     Ok(ch)

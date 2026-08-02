@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -45,6 +45,7 @@ fn stats_upsert_sql_template(tz_sql: &str) -> String {
             COUNT(*) FILTER (WHERE status_code < 200 OR status_code >= 400)
         FROM logs
         WHERE created_at >= ?::timestamptz AND created_at < ?::timestamptz
+          AND is_completed = 1
         GROUP BY 1, 2, 3, 4, 5, 6
         ON CONFLICT (stat_date, user_id, model, token_id, channel_id, action_type)
         DO UPDATE SET
@@ -318,4 +319,60 @@ pub async fn query_model_stats_by_slices(
     }
 
     Ok(model_map)
+}
+
+/// 按自然日汇总模型消耗（仅 `usage_daily_stats` 归档表）。
+/// 返回 `stat_date -> model -> (count, cost, tokens)`，用于仪表盘明细近几日批量读取，避免按日循环查询。
+pub async fn query_model_daily_stats_history(
+    db: &crate::db::Database,
+    user_id_filter: Option<&str>,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> AppResult<std::collections::HashMap<String, std::collections::HashMap<String, (i64, f64, i64)>>>
+{
+    #[derive(sqlx::FromRow)]
+    struct ModelDayHistRow {
+        date: String,
+        model: String,
+        cost: Option<f64>,
+        tokens: Option<i64>,
+        count: Option<i64>,
+    }
+
+    let mut sql = String::from(
+        "SELECT stat_date::text as date, model, SUM(total_cost) as cost, \
+         CAST(SUM(total_tokens) AS BIGINT) as tokens, \
+         CAST(SUM(total_requests) AS BIGINT) as count \
+         FROM usage_daily_stats WHERE ",
+    );
+    let mut binds = Vec::new();
+    if let Some(uid) = user_id_filter {
+        sql.push_str("user_id = ? AND ");
+        binds.push(uid.to_string());
+    }
+    sql.push_str("stat_date >= ? AND stat_date <= ? GROUP BY stat_date, model");
+
+    let formatted_sql = db.format_query(&sql);
+    let mut q = sqlx::query_as::<_, ModelDayHistRow>(&formatted_sql);
+    for bind_val in &binds {
+        q = q.bind(bind_val);
+    }
+    let rows = q
+        .bind(start_date)
+        .bind(end_date)
+        .fetch_all(&db.pool)
+        .await?;
+
+    let mut by_date: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, (i64, f64, i64)>,
+    > = std::collections::HashMap::new();
+    for row in rows {
+        let day_map = by_date.entry(row.date).or_default();
+        let entry = day_map.entry(row.model).or_insert((0i64, 0.0f64, 0i64));
+        entry.0 += row.count.unwrap_or(0);
+        entry.1 += row.cost.unwrap_or(0.0);
+        entry.2 += row.tokens.unwrap_or(0);
+    }
+    Ok(by_date)
 }

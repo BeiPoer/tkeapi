@@ -5,16 +5,18 @@
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
-//! 火山方舟视频素材 URL→素材ID 自动转换模块
+//! 火山方舟视频素材 URL/base64→素材ID 自动转换模块
 //!
-//! 当转发规则启用 `asset_convert: true` 时，在请求发送到上游前，
-//! 扫描 content 数组中的 image_url/video_url/audio_url，
-//! 将网络 URL 或 base64 数据通过 CreateAsset API 注册并替换为 `asset://<ASSET_ID>` 格式。
+//! 转发规则启用 `asset_convert` 或 `upstream_asset_convert` 时，在请求发往上游前扫描
+//! content 中的 image_url/video_url/audio_url，注册为 `asset://<ASSET_ID>`。
 //!
-//! 去重策略：
-//! - URL 资源：HTTP HEAD 元数据指纹秒级去重（不下载文件）；HEAD 不可用时降级 URL 字符串匹配
-//! - base64 数据：内存 SHA-256 内容哈希去重（零额外 IO）
+//! - http(s) URL：直接 CreateAsset（不下载整文件）
+//! - base64：`data:` URI 或纯 base64 → 解码 → TOS 临时 URL → CreateAsset(URL) → 清理临时对象
+//!   （两路径共用同一套文件处理；CreateAsset 始终只收公网 URL）
+//!
+//! 去重：URL 用 Range 元数据指纹（失败降级 URL 串）；base64 用内容 SHA-256。
 
+use crate::services::upstream_asset_client as uac;
 use crate::AppState;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -26,6 +28,38 @@ const URL_TYPE_MAP: &[(&str, &str, &str)] = &[
     ("video_url", "video_url", "Video"),
     ("audio_url", "audio_url", "Audio"),
 ];
+
+/// 日志用短 URL：data URI / 纯 base64 标注为 base64；过长则按字符边界截断。
+fn shorten_url_for_log(url: &str) -> String {
+    if is_base64_media(url) {
+        return "base64数据".to_string();
+    }
+    if url.len() > 80 {
+        let pos = url
+            .char_indices()
+            .nth(80)
+            .map(|(i, _)| i)
+            .unwrap_or(url.len());
+        format!("{}...", &url[..pos])
+    } else {
+        url.to_string()
+    }
+}
+
+#[inline]
+fn is_http_media_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
+/// data URI，或纯 base64 候选（与 `forward::parse_image_data` 一致：排除含 `.`/`:` 的 URL/路径形态）
+fn is_base64_media(s: &str) -> bool {
+    let s = s.trim();
+    if s.starts_with("data:") {
+        return true;
+    }
+    // http(s)/asset:// 等均含 ':'，自然排除
+    s.len() >= 32 && !s.contains('.') && !s.contains(':')
+}
 
 /// base64 data URI 前缀与文件扩展名的映射
 const BASE64_MIME_EXT: &[(&str, &str)] = &[
@@ -44,10 +78,94 @@ const BASE64_MIME_EXT: &[(&str, &str)] = &[
     ("data:audio/ogg", "ogg"),
 ];
 
+/// CreateAsset 的 Name：取 URL 末段文件名；无则 `tb_{type}_{hash8}`（代理/部分上游要求非空）
+fn derive_create_asset_name(url: &str, asset_type: &str) -> String {
+    let bare = url.split(['?', '#']).next().unwrap_or(url);
+    let name = bare.rsplit('/').find(|s| !s.is_empty()).unwrap_or("");
+    let name = if name.is_empty() || name == bare {
+        let dig = Sha256::digest(url.as_bytes());
+        format!(
+            "tb_{}_{:02x}{:02x}{:02x}{:02x}",
+            asset_type.to_ascii_lowercase(),
+            dig[0],
+            dig[1],
+            dig[2],
+            dig[3]
+        )
+    } else {
+        name.to_string()
+    };
+    crate::services::volcengine::clamp_create_asset_name(&name)
+}
+
+/// 收集 content[] 中待转换项：(索引, url_key, asset_type, url, 日志短串)；跳过 asset://
+fn collect_content_convert_tasks(
+    content_arr: &[serde_json::Value],
+) -> Vec<(usize, String, String, String, String)> {
+    let mut tasks = Vec::new();
+    for (idx, item) in content_arr.iter().enumerate() {
+        let item_type = match item.get("type").and_then(|t| t.as_str()) {
+            Some(t) => t,
+            None => continue,
+        };
+        let (url_key, asset_type) = match URL_TYPE_MAP.iter().find(|(t, _, _)| *t == item_type) {
+            Some((_, uk, at)) => (*uk, *at),
+            None => continue,
+        };
+        let url_val = match item
+            .get(url_key)
+            .and_then(|u| u.get("url"))
+            .and_then(|u| u.as_str())
+        {
+            Some(u) => u,
+            None => continue,
+        };
+        if url_val.starts_with("asset://") {
+            continue;
+        }
+        tasks.push((
+            idx,
+            url_key.to_string(),
+            asset_type.to_string(),
+            url_val.to_string(),
+            shorten_url_for_log(url_val),
+        ));
+    }
+    tasks
+}
+
+/// 写入 asset:// 并追加成功日志（含缓存标记）
+fn push_convert_ok(
+    content_arr: &mut [serde_json::Value],
+    logs: &mut Vec<String>,
+    idx: usize,
+    url_key: &str,
+    asset_type: &str,
+    url_short: &str,
+    asset_id: &str,
+    cached: bool,
+) {
+    if let Some(url_obj) = content_arr
+        .get_mut(idx)
+        .and_then(|item| item.get_mut(url_key))
+        .and_then(|u| u.as_object_mut())
+    {
+        url_obj.insert(
+            "url".to_string(),
+            serde_json::Value::String(format!("asset://{}", asset_id)),
+        );
+    }
+    let tag = if cached { " [命中缓存]" } else { "" };
+    logs.push(format!(
+        "[{}] {} ✓ asset://{}{}",
+        asset_type, url_short, asset_id, tag
+    ));
+}
+
 /// 扫描 upstream_body 的 content 数组，将网络 URL / base64 数据转换为火山方舟素材 ID。
 ///
-/// - http/https URL：HEAD 元数据指纹去重 → URL 去重 → CreateAsset（不下载文件）
-/// - data:base64：解码 → SHA-256 哈希去重 → TOS 临时上传 → CreateAsset → 删除临时文件
+/// - http/https URL：Range 元数据指纹去重 → URL 去重 → CreateAsset（不下载整文件）
+/// - data: / 纯 base64：解码 → SHA-256 哈希去重 → TOS 临时上传 → CreateAsset → 删除临时文件
 /// - 已是 asset:// 前缀的跳过
 /// - 转换失败时记录失败原因，由调用方决定是否拦截
 /// 返回值: (转换日志, 失败原因列表)
@@ -118,44 +236,7 @@ pub async fn convert_content_urls(
     // 预加载 TOS 配置（base64 场景需要）
     let tos_config = crate::api::plugins::get_tos_config(state, plugin_ns).await;
 
-    // 收集需要转换的素材任务：(索引, url_key, asset_type, url_val, url_short)
-    let mut tasks: Vec<(usize, String, String, String, String)> = Vec::new();
-    for (idx, item) in content_arr.iter().enumerate() {
-        let item_type = match item.get("type").and_then(|t| t.as_str()) {
-            Some(t) => t.to_string(),
-            None => continue,
-        };
-        let (url_key, asset_type) = match URL_TYPE_MAP.iter().find(|(t, _, _)| *t == item_type) {
-            Some((_, uk, at)) => (uk.to_string(), at.to_string()),
-            None => continue,
-        };
-        let url_val = match item
-            .get(&url_key)
-            .and_then(|u| u.get("url"))
-            .and_then(|u| u.as_str())
-        {
-            Some(u) => u.to_string(),
-            None => continue,
-        };
-        if url_val.starts_with("asset://") {
-            continue;
-        }
-        let url_short = if url_val.starts_with("data:") {
-            "base64数据".to_string()
-        } else if url_val.len() > 80 {
-            // 按字符边界安全截断，避免中文等多字节字符导致 panic
-            let truncate_pos = url_val
-                .char_indices()
-                .nth(80)
-                .map(|(i, _)| i)
-                .unwrap_or(url_val.len());
-            format!("{}...", &url_val[..truncate_pos])
-        } else {
-            url_val.clone()
-        };
-        tasks.push((idx, url_key, asset_type, url_val, url_short));
-    }
-
+    let tasks = collect_content_convert_tasks(content_arr);
     if tasks.is_empty() {
         return (logs, errors);
     }
@@ -172,35 +253,50 @@ pub async fn convert_content_urls(
 
         let fut = async move {
             // 返回 (asset_id, cached) — cached=true 表示复用了已有素材，未重新提交火山方舟
-            let asset_result: Result<(String, bool), String> =
-                if url_val.starts_with("http://") || url_val.starts_with("https://") {
-                    convert_url_resource(
-                        state_clone,
-                        &client_clone,
-                        &mut volc_config_clone,
-                        &user_id_owned,
-                        &plugin_ns_owned,
-                        &url_val,
-                        &asset_type,
-                        moderation,
-                    )
-                    .await
-                } else if url_val.starts_with("data:") {
-                    convert_base64_resource(
-                        state_clone,
-                        &client_clone,
-                        &mut volc_config_clone,
-                        &tos_config_clone,
-                        &user_id_owned,
-                        &plugin_ns_owned,
-                        &url_val,
-                        &asset_type,
-                        moderation,
-                    )
-                    .await
-                } else {
-                    Err("不支持的格式".to_string())
-                };
+            let asset_result: Result<(String, bool), String> = if is_http_media_url(&url_val) {
+                convert_url_resource(
+                    state_clone,
+                    &client_clone,
+                    &mut volc_config_clone,
+                    &user_id_owned,
+                    &plugin_ns_owned,
+                    &url_val,
+                    &asset_type,
+                    moderation,
+                )
+                .await
+            } else if is_base64_media(&url_val) {
+                convert_base64_with_create(
+                    state_clone,
+                    &tos_config_clone,
+                    &user_id_owned,
+                    &plugin_ns_owned,
+                    "relay_convert",
+                    &url_val,
+                    &asset_type,
+                    |tmp_url| {
+                        let client = client_clone;
+                        let mut volc = volc_config_clone;
+                        let ns = plugin_ns_owned.clone();
+                        let at = asset_type.clone();
+                        async move {
+                            create_asset(
+                                state_clone,
+                                &client,
+                                &mut volc,
+                                &ns,
+                                &tmp_url,
+                                &at,
+                                moderation,
+                            )
+                            .await
+                        }
+                    },
+                )
+                .await
+            } else {
+                Err("不支持的格式".to_string())
+            };
             (idx, url_key, asset_type, url_short, asset_result)
         };
         futures.push(fut);
@@ -211,19 +307,16 @@ pub async fn convert_content_urls(
     for (idx, url_key, asset_type, url_short, asset_result) in results {
         match asset_result {
             Ok((aid, cached)) => {
-                let asset_ref = format!("asset://{}", aid);
-                if let Some(url_obj) = content_arr
-                    .get_mut(idx)
-                    .and_then(|item| item.get_mut(&url_key))
-                    .and_then(|u| u.as_object_mut())
-                {
-                    url_obj.insert("url".to_string(), serde_json::json!(asset_ref));
-                }
-                let cache_tag = if cached { " [命中缓存]" } else { "" };
-                logs.push(format!(
-                    "[{}] {} ✓ {}{}",
-                    asset_type, url_short, asset_ref, cache_tag
-                ));
+                push_convert_ok(
+                    content_arr,
+                    &mut logs,
+                    idx,
+                    &url_key,
+                    &asset_type,
+                    &url_short,
+                    &aid,
+                    cached,
+                );
             }
             Err(reason) => {
                 // 提取火山引擎错误中的 Message 字段用于日志摘要，完整错误由 errors 传递
@@ -248,7 +341,7 @@ pub async fn convert_content_urls(
     (logs, errors)
 }
 
-/// 处理网络 URL 资源：HEAD 元数据指纹去重 → URL 去重 → 直接 CreateAsset（不下载文件）
+/// 处理网络 URL 资源：Range 元数据指纹去重 → URL 去重 → 直接 CreateAsset（不下载整文件）
 /// 返回 (asset_id, cached) — cached=true 表示复用了已有素材
 async fn convert_url_resource(
     state: &AppState,
@@ -260,41 +353,13 @@ async fn convert_url_resource(
     asset_type: &str,
     moderation: bool,
 ) -> Result<(String, bool), String> {
-    // L1: HTTP HEAD 元数据指纹快速去重（<1s，不下载文件）
     let meta_fp = fetch_meta_fingerprint(&state.http_client, url).await;
-    if let Some(ref fp) = meta_fp {
-        if let Some(aid) = query_by_fingerprint(state, fp, plugin_ns).await {
-            tracing::info!(
-                "[AssetConvert] 元数据指纹命中，复用素材: fp={:.16}... -> {}",
-                fp,
-                aid
-            );
-            return Ok((aid, true));
-        }
-        // 指纹有效但未命中 → 内容可能已变化（同 URL 覆盖上传），跳过 L2 URL 兜底
-        let url_short = if url.len() > 80 {
-            let pos = url
-                .char_indices()
-                .nth(80)
-                .map(|(i, _)| i)
-                .unwrap_or(url.len());
-            format!("{}...", &url[..pos])
-        } else {
-            url.to_string()
-        };
-        tracing::info!(
-            "[AssetConvert] 元数据指纹未命中(内容可能已变化)，将重新注册素材: {}",
-            url_short
-        );
-    } else {
-        // L2: HEAD 失败/无有效标识字段时降级 URL 字符串去重（兼容历史数据）
-        if let Some(aid) = query_by_url(state, url, plugin_ns).await {
-            tracing::info!(
-                "[AssetConvert] URL 匹配命中(HEAD 不可用)，复用素材: -> {}",
-                aid
-            );
-            return Ok((aid, true));
-        }
+    if let Some(aid) =
+        lookup_cached_converted_asset(state, url, plugin_ns, "relay_convert", meta_fp.as_deref())
+            .await
+    {
+        tracing::info!("[AssetConvert] 命中缓存，复用素材: {} -> {}", url, aid);
+        return Ok((aid, true));
     }
 
     // 未命中任何去重层，直接提交 URL 给火山方舟 CreateAsset（由火山方舟自行下载处理）
@@ -311,8 +376,16 @@ async fn convert_url_resource(
     {
         Ok(aid) => {
             let fp_ref = meta_fp.as_deref();
-            insert_asset_record_raw(
-                state, user_id, asset_type, url, &aid, None, fp_ref, plugin_ns,
+            insert_asset_record_with_source(
+                state,
+                user_id,
+                asset_type,
+                url,
+                &aid,
+                None,
+                fp_ref,
+                plugin_ns,
+                "relay_convert",
             )
             .await;
             tracing::info!("[AssetConvert] 新素材注册成功: {} -> {}", url, aid);
@@ -325,27 +398,30 @@ async fn convert_url_resource(
     }
 }
 
-/// 处理 base64 数据：解码 → SHA-256 哈希 → 去重 → TOS 临时上传 → CreateAsset → 删除临时文件
-/// 返回 (asset_id, cached) — cached=true 表示复用了已有素材
-async fn convert_base64_resource(
+/// base64 → 哈希去重 → TOS 临时 URL → create(tmp_url) → 落库 → 清理 TOS
+/// CreateAsset 回调只收公网 URL，与官方接口约束一致；插件/上游路径共用本函数。
+async fn convert_base64_with_create<F, Fut>(
     state: &AppState,
-    client: &crate::services::volcengine::VolcClient,
-    volc_config: &mut crate::services::volcengine::VolcConfig,
     tos_config: &Option<crate::services::tos::TosConfig>,
     user_id: &str,
     plugin_ns: &str,
+    source: &str,
     data_uri: &str,
     asset_type: &str,
-    moderation: bool,
-) -> Result<(String, bool), String> {
-    let (bytes, ext) =
-        decode_base64_data(data_uri).ok_or_else(|| "base64 数据解码失败".to_string())?;
+    create_from_url: F,
+) -> Result<(String, bool), String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    let (bytes, ext) = decode_base64_data(data_uri, asset_type)
+        .ok_or_else(|| "base64 数据解码失败".to_string())?;
 
     let content_hash = hex::encode(Sha256::digest(&bytes));
 
-    if let Some(aid) = query_by_hash(state, &content_hash, plugin_ns).await {
+    if let Some(aid) = query_by_hash_with_source(state, &content_hash, plugin_ns, source).await {
         tracing::info!(
-            "[AssetConvert] base64 哈希命中，复用素材: hash={:.16}... -> {}",
+            "[AssetConvert] base64 哈希命中，复用素材: 哈希={:.16}... -> {}",
             content_hash,
             aid
         );
@@ -371,86 +447,88 @@ async fn convert_base64_resource(
 
     tracing::info!("[AssetConvert] base64 临时文件已上传: {}", tmp_url);
 
-    let result = match create_asset(
-        state,
-        client,
-        volc_config,
-        plugin_ns,
-        &tmp_url,
-        asset_type,
-        moderation,
-    )
-    .await
-    {
-        Ok(aid) => {
-            insert_asset_record_raw(
-                state,
-                user_id,
-                asset_type,
-                &tmp_url,
-                &aid,
-                Some(&content_hash),
-                None,
-                plugin_ns,
-            )
-            .await;
-            tracing::info!(
-                "[AssetConvert] base64 素材注册成功: base64_{}.{} -> {}",
-                &content_hash[..8],
-                ext,
-                aid
-            );
-            Ok((aid, false))
-        }
-        Err(reason) => Err(reason),
-    };
+    let create_result = create_from_url(tmp_url.clone()).await;
+    schedule_tos_temp_cleanup(tos_cfg.clone(), tmp_object_key);
 
-    // 异步删除 TOS 临时文件，不阻塞主流程
-    let tos_cfg_clone = tos_cfg.clone();
-    let tmp_key_clone = tmp_object_key.clone();
+    let aid = create_result?;
+    insert_asset_record_with_source(
+        state,
+        user_id,
+        asset_type,
+        &tmp_url,
+        &aid,
+        Some(&content_hash),
+        None,
+        plugin_ns,
+        source,
+    )
+    .await;
+    tracing::info!(
+        "[AssetConvert] base64 素材注册成功: base64_{}.{} -> {}",
+        &content_hash[..8],
+        ext,
+        aid
+    );
+    Ok((aid, false))
+}
+
+fn schedule_tos_temp_cleanup(tos_cfg: crate::services::tos::TosConfig, tmp_object_key: String) {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(3)).await;
-        match crate::services::tos::delete_file(&tos_cfg_clone, &tmp_key_clone).await {
-            Ok(_) => tracing::info!("[AssetConvert] TOS 临时文件已清理: {}", tmp_key_clone),
+        match crate::services::tos::delete_file(&tos_cfg, &tmp_object_key).await {
+            Ok(_) => tracing::info!("[AssetConvert] TOS 临时文件已清理: {}", tmp_object_key),
             Err(e) => tracing::warn!(
                 "[AssetConvert] TOS 临时文件清理失败(非致命): {} - {}",
-                tmp_key_clone,
+                tmp_object_key,
                 e
             ),
         }
     });
-
-    result
 }
 
 // ========== 内部工具函数 ==========
 
-/// 发送 HTTP HEAD 请求获取资源元数据指纹，用于快速去重（不下载文件内容）。
-/// 指纹 = SHA-256(URL域名+路径 | Content-Length | ETag | Last-Modified)
-/// 不含 query/fragment，避免 CDN 签名 URL 每次不同导致无法去重。
-/// 超时 5 秒，失败返回 None（调用方降级到 URL 字符串匹配）。
-async fn fetch_meta_fingerprint(http_client: &reqwest::Client, url: &str) -> Option<String> {
-    let url_short = if url.len() > 80 {
-        let pos = url
-            .char_indices()
-            .nth(80)
-            .map(|(i, _)| i)
-            .unwrap_or(url.len());
-        format!("{}...", &url[..pos])
+/// 从 Content-Range 取整文件总长（`bytes 0-0/N` / `bytes */N`）；`*` 或非数字则 None。
+fn content_range_total(cr: &str) -> Option<&str> {
+    let total = cr.rsplit('/').next()?.trim();
+    if total.is_empty() || total == "*" {
+        return None;
+    }
+    if total.bytes().all(|b| b.is_ascii_digit()) {
+        Some(total)
     } else {
-        url.to_string()
-    };
+        None
+    }
+}
+
+/// GET Range 取元数据指纹（兼容坏 HEAD 的 CDN），指纹公式与历史一致：
+/// SHA-256(URL域名+路径 | 整文件长度 | ETag | Last-Modified)
+/// 整文件长度优先取 Content-Range 总长；源站忽略 Range 回 200 时回退 Content-Length。
+/// 超时 10 秒，失败返回 None（调用方降级到 URL 字符串匹配）。
+async fn fetch_meta_fingerprint(http_client: &reqwest::Client, url: &str) -> Option<String> {
+    let url_short = shorten_url_for_log(url);
 
     let resp = match http_client
-        .head(url)
-        .timeout(Duration::from_secs(5))
+        .get(url)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .timeout(Duration::from_secs(10))
         .send()
         .await
     {
         Ok(r) => r,
         Err(e) => {
+            let kind = if e.is_timeout() {
+                "超时"
+            } else if e.is_connect() {
+                "连接失败"
+            } else if e.is_request() {
+                "请求构造/发送失败"
+            } else {
+                "其它错误"
+            };
             tracing::warn!(
-                "[AssetConvert] HEAD 请求失败，降级 URL 去重: {} - {}",
+                "[AssetConvert] Range 元数据请求失败({}): {} - {}",
+                kind,
                 url_short,
                 e
             );
@@ -458,52 +536,71 @@ async fn fetch_meta_fingerprint(http_client: &reqwest::Client, url: &str) -> Opt
         }
     };
 
-    if !resp.status().is_success() {
+    let status = resp.status();
+    if !status.is_success() {
         tracing::warn!(
-            "[AssetConvert] HEAD 状态码异常({}), 降级 URL 去重: {}",
-            resp.status(),
+            "[AssetConvert] Range 元数据状态码异常({}), 降级 URL 去重: {}",
+            status,
             url_short
         );
         return None;
     }
 
     let headers = resp.headers();
-    let content_length = headers
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
     let etag = headers
-        .get("etag")
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let last_modified = headers
+        .get(reqwest::header::LAST_MODIFIED)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let content_range = headers
+        .get(reqwest::header::CONTENT_RANGE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let last_modified = headers
-        .get("last-modified")
+    let hdr_len = headers
+        .get(reqwest::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    // 至少需要一个有效的标识字段，否则指纹不可靠
-    if content_length.is_empty() && etag.is_empty() && last_modified.is_empty() {
-        tracing::info!("[AssetConvert] HEAD 无有效标识字段(Content-Length/ETag/Last-Modified), 降级 URL 去重: {}", url_short);
+    // 与历史 HEAD 指纹对齐：哈希里的长度必须是整文件大小，不是分片 Content-Length
+    let full_len = content_range_total(content_range)
+        .map(|s| s.to_string())
+        .or_else(|| {
+            if status.as_u16() == 200 && !hdr_len.is_empty() {
+                Some(hdr_len.to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+
+    // 丢弃最多 1 字节 body，避免占用连接
+    let _ = resp.bytes().await;
+
+    if full_len.is_empty() && etag.is_empty() && last_modified.is_empty() {
+        tracing::info!(
+            "[AssetConvert] Range 无有效标识字段(Length/ETag/Last-Modified), 降级 URL 去重: {}",
+            url_short
+        );
         return None;
     }
 
     tracing::info!(
-        "[AssetConvert] HEAD 元数据: Content-Length={}, ETag={}, Last-Modified={} | {}",
-        if content_length.is_empty() {
-            "-"
-        } else {
-            content_length
-        },
-        if etag.is_empty() { "-" } else { etag },
+        "[AssetConvert] Range 元数据: 长度={}, ETag={}, 修改时间={} | {}",
+        if full_len.is_empty() { "-" } else { &full_len },
+        if etag.is_empty() { "-" } else { &etag },
         if last_modified.is_empty() {
             "-"
         } else {
-            last_modified
+            &last_modified
         },
         url_short
     );
 
-    // 提取 URL 域名+路径（不含 query/fragment，避免签名 URL 每次不同）
     let url_base = url
         .split('?')
         .next()
@@ -515,22 +612,13 @@ async fn fetch_meta_fingerprint(http_client: &reqwest::Client, url: &str) -> Opt
     let mut hasher = Sha256::new();
     hasher.update(url_base.as_bytes());
     hasher.update(b"|");
-    hasher.update(content_length.as_bytes());
+    hasher.update(full_len.as_bytes());
     hasher.update(b"|");
     hasher.update(etag.as_bytes());
     hasher.update(b"|");
     hasher.update(last_modified.as_bytes());
 
     Some(hex::encode(hasher.finalize()))
-}
-
-/// 基于 meta_fingerprint 查询已有的素材 ID
-async fn query_by_fingerprint(
-    state: &AppState,
-    fingerprint: &str,
-    plugin_ns: &str,
-) -> Option<String> {
-    query_by_fingerprint_with_source(state, fingerprint, plugin_ns, "relay_convert").await
 }
 
 async fn query_by_fingerprint_with_source(
@@ -554,22 +642,17 @@ async fn query_by_fingerprint_with_source(
     .map(|row| row.0)
 }
 
-/// 基于 file_url 查询已有的素材 ID（兜底去重，兼容历史数据）
-async fn query_by_url(state: &AppState, url: &str, plugin_ns: &str) -> Option<String> {
-    query_by_url_with_source(state, url, plugin_ns, "relay_convert").await
-}
-
+/// 基于 file_url 查询已有素材 ID（仅指纹不可用时的 L2 兜底）
 async fn query_by_url_with_source(
     state: &AppState,
     url: &str,
     plugin_ns: &str,
     source: &str,
 ) -> Option<String> {
-    sqlx::query_as::<_, (String,)>(
-        &state.db.format_query(
-            "SELECT asset_id FROM plugin_assets WHERE file_url = ? AND source = ? AND asset_id IS NOT NULL AND plugin_ns = ? LIMIT 1"
-        )
-    )
+    sqlx::query_as::<_, (String,)>(&state.db.format_query(
+        "SELECT asset_id FROM plugin_assets \
+             WHERE file_url = ? AND source = ? AND asset_id IS NOT NULL AND plugin_ns = ? LIMIT 1",
+    ))
     .bind(url)
     .bind(source)
     .bind(plugin_ns)
@@ -580,35 +663,87 @@ async fn query_by_url_with_source(
     .map(|row| row.0)
 }
 
-/// 解码 base64 data URI，返回 (原始字节, 文件扩展名)
-fn decode_base64_data(data_uri: &str) -> Option<(Vec<u8>, String)> {
-    let comma_pos = data_uri.find(',')?;
-    let header = &data_uri[..comma_pos];
-    let b64_data = super::forward::b64_data(data_uri);
+/// L1 指纹命中则复用；指纹已算出但对不上 → 跳过 URL、重新注册（防同 URL 内容变更误复用）；
+/// 仅指纹算不出时才走 L2 URL。
+async fn lookup_cached_converted_asset(
+    state: &AppState,
+    url: &str,
+    plugin_ns: &str,
+    source: &str,
+    meta_fp: Option<&str>,
+) -> Option<String> {
+    if let Some(fp) = meta_fp {
+        if let Some(aid) = query_by_fingerprint_with_source(state, fp, plugin_ns, source).await {
+            return Some(aid);
+        }
+        tracing::info!(
+            "[AssetConvert] 元数据指纹未命中(内容可能已变化)，跳过 URL 复用并重新注册: {}",
+            shorten_url_for_log(url)
+        );
+        return None;
+    }
 
-    // 根据 MIME 类型推断扩展名
-    let ext = BASE64_MIME_EXT
-        .iter()
-        .find(|(prefix, _)| header.starts_with(prefix))
-        .map(|(_, e)| e.to_string())
-        .unwrap_or_else(|| "bin".to_string());
+    query_by_url_with_source(state, url, plugin_ns, source).await
+}
 
-    // 解码 base64
+/// 解码 base64：支持 `data:*;base64,...` 与纯 base64；返回 (字节, 扩展名)
+fn decode_base64_data(input: &str, asset_type: &str) -> Option<(Vec<u8>, String)> {
     use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64_data.trim())
-        .ok()?;
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+
+    let decode = |s: &str| {
+        base64::engine::general_purpose::STANDARD
+            .decode(s)
+            .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(s))
+            .ok()
+    };
+
+    let default_ext = match asset_type {
+        "Video" => "mp4",
+        "Audio" => "mp3",
+        _ => "png",
+    };
+
+    let (bytes, ext) = if input.starts_with("data:") {
+        let comma_pos = input.find(',')?;
+        let header = &input[..comma_pos];
+        let bytes = decode(super::forward::b64_data(input).trim())?;
+        let ext = BASE64_MIME_EXT
+            .iter()
+            .find(|(prefix, _)| header.starts_with(prefix))
+            .map(|(_, e)| (*e).to_string())
+            .unwrap_or_else(|| ext_from_magic(&bytes, default_ext));
+        (bytes, ext)
+    } else {
+        let bytes = decode(input)?;
+        let ext = ext_from_magic(&bytes, default_ext);
+        (bytes, ext)
+    };
 
     if bytes.is_empty() {
         return None;
     }
-
     Some((bytes, ext))
 }
 
-/// 基于 content_hash 查询已有的素材 ID（仅 base64 流程使用）
-async fn query_by_hash(state: &AppState, content_hash: &str, plugin_ns: &str) -> Option<String> {
-    query_by_hash_with_source(state, content_hash, plugin_ns, "relay_convert").await
+/// 魔数推扩展名；未知则回退到 content.type 对应的默认后缀
+fn ext_from_magic(bytes: &[u8], default_ext: &str) -> String {
+    let ext = match bytes {
+        [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, ..] => "png",
+        [0xFF, 0xD8, 0xFF, ..] => "jpg",
+        [0x47, 0x49, 0x46, 0x38, ..] => "gif",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "webp",
+        [_, _, _, _, b'f', b't', b'y', b'p', ..] => "mp4",
+        [0x1A, 0x45, 0xDF, 0xA3, ..] => "webm",
+        [b'I', b'D', b'3', ..] | [0xFF, 0xFB, ..] | [0xFF, 0xF3, ..] | [0xFF, 0xF2, ..] => "mp3",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'A', b'V', b'E', ..] => "wav",
+        [b'O', b'g', b'g', b'S', ..] => "ogg",
+        _ => default_ext,
+    };
+    ext.to_string()
 }
 
 async fn query_by_hash_with_source(
@@ -632,31 +767,6 @@ async fn query_by_hash_with_source(
     .map(|row| row.0)
 }
 
-/// 写入 plugin_assets 数据库记录（content_hash 和 meta_fingerprint 均可选）
-async fn insert_asset_record_raw(
-    state: &AppState,
-    user_id: &str,
-    asset_type: &str,
-    file_url: &str,
-    asset_id: &str,
-    content_hash: Option<&str>,
-    meta_fingerprint: Option<&str>,
-    plugin_ns: &str,
-) {
-    insert_asset_record_with_source(
-        state,
-        user_id,
-        asset_type,
-        file_url,
-        asset_id,
-        content_hash,
-        meta_fingerprint,
-        plugin_ns,
-        "relay_convert",
-    )
-    .await;
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn insert_asset_record_with_source(
     state: &AppState,
@@ -670,8 +780,8 @@ async fn insert_asset_record_with_source(
     source: &str,
 ) {
     let at_lower = asset_type.to_lowercase();
-    let fname = file_url.rsplit('/').next().unwrap_or("unknown").to_string();
-    let _ = sqlx::query(
+    let fname = derive_create_asset_name(file_url, asset_type);
+    if let Err(e) = sqlx::query(
         &state.db.format_query(
             "INSERT INTO plugin_assets (user_id, asset_type, source, status, file_name, file_url, asset_id, category, content_hash, meta_fingerprint, plugin_ns) \
              VALUES (?, ?, ?, 'approved', ?, ?, ?, '转换素材', ?, ?, ?)"
@@ -687,7 +797,17 @@ async fn insert_asset_record_with_source(
     .bind(meta_fingerprint)
     .bind(plugin_ns)
     .execute(&state.db.pool)
-    .await;
+    .await
+    {
+        tracing::warn!(
+            "[AssetConvert] 写入 plugin_assets 失败(将导致无法复用缓存): {} | URL={} 素材ID={} 命名空间={} 来源={}",
+            e,
+            file_url,
+            asset_id,
+            plugin_ns,
+            source
+        );
+    }
 }
 
 /// 调用 CreateAsset API 注册素材，并轮询等待素材处理完成（Active 状态）
@@ -715,7 +835,7 @@ async fn create_asset(
         group_id: group_id.clone(),
         url: url.to_string(),
         asset_type: asset_type.to_string(),
-        name: None,
+        name: Some(derive_create_asset_name(url, asset_type)),
         project_name: Some(volc_config.project_name.clone()),
         moderation: asset_mod.clone(),
     };
@@ -840,7 +960,7 @@ async fn create_asset(
                 }
                 status => {
                     tracing::debug!(
-                        "[AssetConvert] 素材处理中: {} status={} (第{}/{}次)",
+                        "[AssetConvert] 素材处理中: {} 状态={} (第{}/{}次)",
                         asset_id,
                         status,
                         attempt + 1,
@@ -944,9 +1064,6 @@ async fn ensure_group_id(
     }
 }
 
-const UPSTREAM_SOURCE: &str = "upstream_relay_convert";
-const UPSTREAM_PLUGIN: &str = "upstream_asset_relay";
-
 /// 上游渠道素材转换：扫描 content[]，经绑定渠道 Bearer CreateAsset → asset://
 /// 与 convert_content_urls 正交；插件未启用时 soft-skip（errors 空）。
 pub async fn convert_content_urls_via_upstream(
@@ -958,79 +1075,87 @@ pub async fn convert_content_urls_via_upstream(
     let mut logs: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
-    let plugin_enabled: bool = sqlx::query_scalar::<_, i64>(
-        &state
-            .db
-            .format_query("SELECT is_enabled FROM plugins WHERE name = ?"),
-    )
-    .bind(UPSTREAM_PLUGIN)
-    .fetch_optional(&state.db.pool)
-    .await
-    .ok()
-    .flatten()
-    .map(|v| v == 1)
-    .unwrap_or(false);
-
-    if !plugin_enabled {
-        tracing::debug!("[UpstreamAsset] 插件未启用，跳过素材转换");
-        logs.push("上游素材转换跳过: 插件未启用".to_string());
-        return (logs, errors);
-    }
-
     #[derive(sqlx::FromRow)]
     struct BindingRow {
-        is_active: i32,
-        asset_base_path: String,
+        plugin_enabled: i64,
+        binding_found: Option<i64>,
+        is_active: Option<i32>,
+        asset_base_path: Option<String>,
         group_id: Option<String>,
-        channel_config_id: i64,
-        base_url: String,
-        api_key: String,
+        channel_config_id: Option<i64>,
+        base_url: Option<String>,
+        api_key: Option<String>,
+        #[sqlx(default)]
+        config_status: Option<i32>,
     }
 
+    // 以 plugins 为主表一次取出启用状态与绑定/渠道，语义与「先查插件再查绑定」一致
     let row: Option<BindingRow> = sqlx::query_as(&state.db.format_query(
-        "SELECT b.is_active, b.asset_base_path, b.group_id, b.channel_config_id, \
-                    c.base_url, c.api_key \
-             FROM upstream_asset_bindings b \
-             JOIN channel_configs c ON c.id = b.channel_config_id \
-             WHERE b.id = ?",
+        "SELECT p.is_enabled AS plugin_enabled, b.id AS binding_found, b.is_active, \
+                b.asset_base_path, b.group_id, b.channel_config_id, c.base_url, c.api_key, \
+                c.status AS config_status \
+         FROM plugins p \
+         LEFT JOIN upstream_asset_bindings b ON b.id = ? \
+         LEFT JOIN channel_configs c ON c.id = b.channel_config_id \
+         WHERE p.name = ?",
     ))
     .bind(binding_id)
+    .bind(uac::PLUGIN_NAME)
     .fetch_optional(&state.db.pool)
     .await
     .ok()
     .flatten();
 
     let Some(mut row) = row else {
+        // 插件记录不存在 → 等同未启用
+        tracing::debug!("[UpstreamAsset] 插件未启用，跳过素材转换");
+        logs.push("上游素材转换跳过: 插件未启用".to_string());
+        return (logs, errors);
+    };
+    if row.plugin_enabled != 1 {
+        tracing::debug!("[UpstreamAsset] 插件未启用，跳过素材转换");
+        logs.push("上游素材转换跳过: 插件未启用".to_string());
+        return (logs, errors);
+    }
+    if row.binding_found.is_none() {
         errors.push(format!(
             "上游素材转换失败: 绑定#{} 不存在或上游渠道配置已删除",
             binding_id
         ));
         return (logs, errors);
-    };
-    if row.is_active != 1 {
+    }
+    if row.is_active != Some(1) {
         logs.push(format!("上游素材转换跳过: 绑定#{} 已停用", binding_id));
         return (logs, errors);
     }
-    if row.base_url.trim().is_empty() || row.api_key.trim().is_empty() {
+    if row.config_status.unwrap_or(1) != 1 {
         errors.push(format!(
-            "上游素材转换失败: 上游渠道配置#{} 缺少 base_url 或 api_key",
-            row.channel_config_id
+            "上游素材转换失败: 绑定#{} 关联的上游渠道配置已禁用",
+            binding_id
         ));
         return (logs, errors);
     }
+    let base_url = row.base_url.take().unwrap_or_default();
+    let api_key = row.api_key.take().unwrap_or_default();
+    let channel_config_id = row.channel_config_id.unwrap_or(0);
+    if base_url.trim().is_empty() || api_key.trim().is_empty() {
+        errors.push(format!(
+            "上游素材转换失败: 上游渠道配置#{} 缺少 base_url 或 api_key",
+            channel_config_id
+        ));
+        return (logs, errors);
+    }
+    let asset_base_path = row.asset_base_path.take().unwrap_or_default();
+    let mut group_id_opt = row.group_id.take();
 
     let content_arr = match body.get_mut("content").and_then(|c| c.as_array_mut()) {
         Some(arr) => arr,
         None => return (logs, errors),
     };
 
-    let plugin_ns = format!("uar:{}", binding_id);
-    let endpoint = crate::services::upstream_asset_client::build_asset_endpoint(
-        &row.base_url,
-        &row.asset_base_path,
-    );
-    let api_key = row.api_key.clone();
-    let call_ctx = crate::services::upstream_asset_client::UpstreamCallCtx {
+    let plugin_ns = uac::binding_ns(binding_id);
+    let endpoint = uac::build_asset_endpoint(&base_url, &asset_base_path);
+    let call_ctx = uac::UpstreamCallCtx {
         http: &state.http_client,
         db: &state.db,
         user_id,
@@ -1040,14 +1165,13 @@ pub async fn convert_content_urls_via_upstream(
     };
 
     // 确保 GroupId
-    if row
-        .group_id
+    if group_id_opt
         .as_ref()
         .map(|s| s.trim().is_empty())
         .unwrap_or(true)
     {
         match ensure_upstream_group_id(state, &call_ctx, binding_id).await {
-            Ok(gid) => row.group_id = Some(gid),
+            Ok(gid) => group_id_opt = Some(gid),
             Err(e) => {
                 errors.push(e);
                 return (logs, errors);
@@ -1055,85 +1179,51 @@ pub async fn convert_content_urls_via_upstream(
         }
     }
 
-    let mut tasks: Vec<(usize, String, String, String, String)> = Vec::new();
-    for (idx, item) in content_arr.iter().enumerate() {
-        let item_type = match item.get("type").and_then(|t| t.as_str()) {
-            Some(t) => t,
-            None => continue,
-        };
-        let (url_key, asset_type) = match URL_TYPE_MAP.iter().find(|(t, _, _)| *t == item_type) {
-            Some((_, uk, at)) => (*uk, *at),
-            None => continue,
-        };
-        let url_val = match item
-            .get(url_key)
-            .and_then(|u| u.get("url"))
-            .and_then(|u| u.as_str())
-        {
-            Some(u) => u.to_string(),
-            None => continue,
-        };
-        if url_val.starts_with("asset://") {
-            continue;
-        }
-        let url_short = if url_val.starts_with("data:") {
-            "base64数据".to_string()
-        } else if url_val.len() > 80 {
-            let pos = url_val
-                .char_indices()
-                .nth(80)
-                .map(|(i, _)| i)
-                .unwrap_or(url_val.len());
-            format!("{}...", &url_val[..pos])
-        } else {
-            url_val.clone()
-        };
-        tasks.push((
-            idx,
-            url_key.to_string(),
-            asset_type.to_string(),
-            url_val,
-            url_short,
-        ));
-    }
-
+    let tasks = collect_content_convert_tasks(content_arr);
     if tasks.is_empty() {
         return (logs, errors);
     }
 
-    let group_id = row.group_id.clone().unwrap_or_default();
-    for (idx, url_key, asset_type, url_val, url_short) in tasks {
-        if url_val.starts_with("data:") {
-            let msg = format!(
-                "[{}] {} ✗ 上游素材转换不支持 base64，请使用 http(s) URL",
-                asset_type, url_short
-            );
-            logs.push(msg.clone());
-            errors.push(msg);
-            continue;
-        }
-        if !(url_val.starts_with("http://") || url_val.starts_with("https://")) {
-            let msg = format!("[{}] {} ✗ 不支持的格式", asset_type, url_short);
-            logs.push(msg.clone());
-            errors.push(msg);
-            continue;
-        }
+    // base64 与插件路径相同：依赖系统/插件 TOS（upstream_asset_relay 无独立 TOS 时回退系统配置）
+    let tos_config = crate::api::plugins::get_tos_config(state, uac::PLUGIN_NAME).await;
+    let group_id = group_id_opt.unwrap_or_default();
 
-        match convert_url_via_upstream(state, &call_ctx, &group_id, &url_val, &asset_type).await {
+    for (idx, url_key, asset_type, url_val, url_short) in tasks {
+        let asset_result = if is_http_media_url(&url_val) {
+            convert_url_via_upstream(state, &call_ctx, &group_id, &url_val, &asset_type).await
+        } else if is_base64_media(&url_val) {
+            convert_base64_with_create(
+                state,
+                &tos_config,
+                user_id,
+                &plugin_ns,
+                uac::LOG_SOURCE,
+                &url_val,
+                &asset_type,
+                |tmp_url| {
+                    let ctx = &call_ctx;
+                    let gid = group_id.as_str();
+                    let at = asset_type.as_str();
+                    async move { create_asset_via_upstream(ctx, gid, &tmp_url, at).await }
+                },
+            )
+            .await
+        } else {
+            Err("不支持的格式".to_string())
+        };
+
+        match asset_result {
             Ok((aid, cached)) => {
-                let asset_ref = format!("asset://{}", aid);
-                if let Some(url_obj) = content_arr
-                    .get_mut(idx)
-                    .and_then(|item| item.get_mut(&url_key))
-                    .and_then(|u| u.as_object_mut())
-                {
-                    url_obj.insert("url".to_string(), serde_json::Value::String(asset_ref));
-                }
-                let tag = if cached { " [命中缓存]" } else { "" };
-                logs.push(format!(
-                    "[{}] {} ✓ asset://{}{}",
-                    asset_type, url_short, aid, tag
-                ));
+                push_convert_ok(
+                    content_arr,
+                    &mut logs,
+                    idx,
+                    &url_key,
+                    &asset_type,
+                    &url_short,
+                    &aid,
+                    cached,
+                );
             }
             Err(reason) => {
                 logs.push(format!("[{}] {} ✗ {}", asset_type, url_short, reason));
@@ -1147,20 +1237,19 @@ pub async fn convert_content_urls_via_upstream(
 
 async fn ensure_upstream_group_id(
     state: &AppState,
-    ctx: &crate::services::upstream_asset_client::UpstreamCallCtx<'_>,
+    ctx: &uac::UpstreamCallCtx<'_>,
     binding_id: i64,
 ) -> Result<String, String> {
     let body = serde_json::json!({
         "Name": "tokensbyte_upstream_auto_group",
-        "Description": "由上游素材中转自动创建的素材组",
+        "Description": "由火山视频转素材ID自动创建的素材组",
         "GroupType": "AIGC"
     });
-    let res =
-        crate::services::upstream_asset_client::call_action_logged(ctx, "CreateAssetGroup", &body)
-            .await
-            .map_err(|e| format!("创建上游素材组失败: {}", e))?;
+    let res = uac::call_action_logged(ctx, "CreateAssetGroup", &body)
+        .await
+        .map_err(|e| format!("创建上游素材组失败: {}", e))?;
 
-    let gid = crate::services::upstream_asset_client::extract_result_field(&res, "Id")
+    let gid = uac::extract_result_field(&res, "Id")
         .ok_or_else(|| "创建上游素材组失败: 响应缺少 Id".to_string())?
         .to_string();
 
@@ -1184,45 +1273,26 @@ async fn ensure_upstream_group_id(
 
 async fn convert_url_via_upstream(
     state: &AppState,
-    ctx: &crate::services::upstream_asset_client::UpstreamCallCtx<'_>,
+    ctx: &uac::UpstreamCallCtx<'_>,
     group_id: &str,
     url: &str,
     asset_type: &str,
 ) -> Result<(String, bool), String> {
     let meta_fp = fetch_meta_fingerprint(ctx.http, url).await;
-    if let Some(ref fp) = meta_fp {
-        if let Some(aid) =
-            query_by_fingerprint_with_source(state, fp, ctx.plugin_name, UPSTREAM_SOURCE).await
-        {
-            return Ok((aid, true));
-        }
-    } else if let Some(aid) =
-        query_by_url_with_source(state, url, ctx.plugin_name, UPSTREAM_SOURCE).await
+    if let Some(aid) = lookup_cached_converted_asset(
+        state,
+        url,
+        ctx.plugin_name,
+        uac::LOG_SOURCE,
+        meta_fp.as_deref(),
+    )
+    .await
     {
+        tracing::info!("[UpstreamAsset] 命中缓存，复用素材: {} -> {}", url, aid);
         return Ok((aid, true));
     }
 
-    let mut body = serde_json::json!({
-        "URL": url,
-        "AssetType": asset_type,
-        "GroupId": group_id,
-    });
-    if let Some(obj) = body.as_object_mut() {
-        if group_id.trim().is_empty() {
-            obj.remove("GroupId");
-        }
-    }
-
-    let create_res =
-        crate::services::upstream_asset_client::call_action_logged(ctx, "CreateAsset", &body)
-            .await
-            .map_err(|e| format!("素材注册失败: {}", e))?;
-
-    let asset_id = crate::services::upstream_asset_client::extract_result_field(&create_res, "Id")
-        .ok_or_else(|| "素材注册失败: 响应缺少 Id".to_string())?
-        .to_string();
-
-    poll_upstream_asset_active(ctx, &asset_id, asset_type).await?;
+    let asset_id = create_asset_via_upstream(ctx, group_id, url, asset_type).await?;
 
     insert_asset_record_with_source(
         state,
@@ -1233,15 +1303,46 @@ async fn convert_url_via_upstream(
         None,
         meta_fp.as_deref(),
         ctx.plugin_name,
-        UPSTREAM_SOURCE,
+        uac::LOG_SOURCE,
     )
     .await;
 
     Ok((asset_id, false))
 }
 
+/// 上游 CreateAsset(URL) + 轮询 Active（不含缓存/落库，供 URL 与 base64 共用）
+async fn create_asset_via_upstream(
+    ctx: &uac::UpstreamCallCtx<'_>,
+    group_id: &str,
+    url: &str,
+    asset_type: &str,
+) -> Result<String, String> {
+    let mut body = serde_json::json!({
+        "URL": url,
+        "AssetType": asset_type,
+        "Name": derive_create_asset_name(url, asset_type),
+        "GroupId": group_id,
+    });
+    if let Some(obj) = body.as_object_mut() {
+        if group_id.trim().is_empty() {
+            obj.remove("GroupId");
+        }
+    }
+
+    let create_res = uac::call_action_logged(ctx, "CreateAsset", &body)
+        .await
+        .map_err(|e| format!("素材注册失败: {}", e))?;
+
+    let asset_id = uac::extract_result_field(&create_res, "Id")
+        .ok_or_else(|| "素材注册失败: 响应缺少 Id".to_string())?
+        .to_string();
+
+    poll_upstream_asset_active(ctx, &asset_id, asset_type).await?;
+    Ok(asset_id)
+}
+
 async fn poll_upstream_asset_active(
-    ctx: &crate::services::upstream_asset_client::UpstreamCallCtx<'_>,
+    ctx: &uac::UpstreamCallCtx<'_>,
     asset_id: &str,
     asset_type: &str,
 ) -> Result<(), String> {
@@ -1257,13 +1358,9 @@ async fn poll_upstream_asset_active(
     for attempt in 0..max_attempts {
         tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
         let body = serde_json::json!({ "Id": asset_id });
-        match crate::services::upstream_asset_client::call_action_logged(ctx, "GetAsset", &body)
-            .await
-        {
+        match uac::call_action_logged(ctx, "GetAsset", &body).await {
             Ok(res) => {
-                let status =
-                    crate::services::upstream_asset_client::extract_result_field(&res, "Status")
-                        .unwrap_or("");
+                let status = uac::extract_result_field(&res, "Status").unwrap_or("");
                 if status.eq_ignore_ascii_case("Active") {
                     tracing::info!(
                         "[UpstreamAsset] 素材就绪: {} ({}s)",
@@ -1273,15 +1370,12 @@ async fn poll_upstream_asset_active(
                     return Ok(());
                 }
                 if status.eq_ignore_ascii_case("Failed") {
-                    let reason = crate::services::upstream_asset_client::extract_result_field(
-                        &res,
-                        "FailReason",
-                    )
-                    .or_else(|| {
-                        res.pointer("/Result/Error/Message")
-                            .and_then(|v| v.as_str())
-                    })
-                    .unwrap_or("审核未通过");
+                    let reason = uac::extract_result_field(&res, "FailReason")
+                        .or_else(|| {
+                            res.pointer("/Result/Error/Message")
+                                .and_then(|v| v.as_str())
+                        })
+                        .unwrap_or("审核未通过");
                     return Err(format!("素材处理失败({}): {}", asset_id, reason));
                 }
             }

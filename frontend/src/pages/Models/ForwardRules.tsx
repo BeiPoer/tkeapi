@@ -17,7 +17,7 @@ const { TextArea } = Input;
 const { Text } = Typography;
 const { useBreakpoint } = Grid;
 
-const RES_MUL_KEYS = ['720p', '1080p', '2k', '4k'] as const;
+const RES_MUL_KEYS = ['480p', '720p', '1080p', '2k', '4k'] as const;
 type ResKey = (typeof RES_MUL_KEYS)[number];
 
 const ENHANCE_OPTIONS = [
@@ -36,8 +36,9 @@ const SCENE_OPTIONS = [
   { value: 'old_film', label: '老片修复' },
 ] as const;
 
-/** 各目标分辨率允许的底座（首项为默认一级） */
+/** 各目标分辨率允许的底座（首项为默认一级；单选项即锁定） */
 const BASE_OPTIONS: Record<ResKey, string[]> = {
+  '480p': ['480p'],
   '720p': ['480p'],
   '1080p': ['720p', '480p'],
   '2k': ['1080p', '720p', '480p'],
@@ -517,7 +518,7 @@ const ForwardRules: React.FC = () => {
     {
       n: '5',
       body: <>
-        <CText>asset_convert</CText>：<CText>true</CText> 时将 content 网络 URL 转为方舟素材 ID（<CText>asset://</CText>），需配置素材插件凭证。
+        <CText>asset_convert</CText>：<CText>true</CText> 时将 content 网络 URL / base64（data URI 或纯 base64）转为方舟素材 ID（<CText>asset://</CText>），需配置素材插件凭证；base64 依赖 TOS。
       </>,
     },
     {
@@ -547,7 +548,7 @@ const ForwardRules: React.FC = () => {
     {
       n: '10',
       body: <>
-        <CText>res_mul</CText>：级联分辨率倍率，如 <CText>{`{"720p":1,"1080p":1.5,"2k":2,"4k":3.5}`}</CText>。
+        <CText>res_mul</CText>：级联分辨率倍率，如 <CText>{`{"480p":1.5,"720p":2.15,"1080p":2.25,"2k":2.5,"4k":4}`}</CText>。
         阶段二成功后：若 stage1 有 usage tokens，则 token（返回/列表/计费）× 倍率；否则底座费用 × 倍率。缺省 key 按 <CText>1.0</CText>。
       </>,
     },
@@ -567,7 +568,7 @@ const ForwardRules: React.FC = () => {
       n: '13',
       body: <>
         <CText>res_base</CText>：每目标分辨率的阶段一座底，如 <CText>{`{"1080p":"720p"}`}</CText>。
-        默认取一级（720p→480p、1080p→720p、2k/4k→1080p）；1080p 可调为 480p。
+        默认取一级（480p/720p→480p 锁定、1080p→720p、2k/4k→1080p）；1080p 可调为 480p。
       </>,
     },
   ];
@@ -605,7 +606,7 @@ const ForwardRules: React.FC = () => {
       <Card variant="borderless">
         <div style={{ display: 'flex', flexDirection: screens.xs ? 'column' : 'row', justifyContent: 'space-between', marginBottom: 16, gap: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-            <Typography.Title level={screens.xs ? 4 : 2} style={{ margin: 0 }}>
+            <Typography.Title level={4} style={{ margin: 0, fontSize: screens.xs ? 18 : 20, fontWeight: 600 }}>
               高级转发规则管理
             </Typography.Title>
             <Popover
@@ -776,7 +777,7 @@ const ForwardRules: React.FC = () => {
           >
             {({ getFieldValue }) => getFieldValue('is_cascade') ? (
               <Form.Item
-                label={<Space>级联分辨率配置 <Popover content={<div style={{ maxWidth: 320 }}>每档可设：倍率、增强（默认标准）、场景（仅标准版，默认 common）、底座（默认一级，如 1080p→720p 可改 480p）。阶段二成功：有 usage 时 tokens×倍率，否则底座费用×倍率。</div>}><QuestionCircleOutlined /></Popover></Space>}
+                label={<Space>级联分辨率配置 <Popover content={<div style={{ maxWidth: 320 }}>每档可设：倍率、增强（默认标准）、场景（仅标准版，默认 common）、底座（默认一级；480p/720p 锁定 480p，1080p→720p 可改 480p）。480p 为同画质增强（阶段一/二均为 480p）。阶段二成功：有 usage 时 tokens×倍率，否则底座费用×倍率。</div>}><QuestionCircleOutlined /></Popover></Space>}
                 style={{ marginBottom: 8 }}
               >
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -797,6 +798,7 @@ const ForwardRules: React.FC = () => {
                       <Form.Item name={['res_base', k]} label="底座" style={{ marginBottom: 0 }} rules={[{ required: true }]}>
                         <Select
                           style={{ width: 100 }}
+                          disabled={BASE_OPTIONS[k].length <= 1}
                           options={BASE_OPTIONS[k].map((b) => ({ value: b, label: b }))}
                         />
                       </Form.Item>

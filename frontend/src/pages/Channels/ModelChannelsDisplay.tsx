@@ -398,7 +398,7 @@ const ModelChannelsDisplay: React.FC = () => {
               返回
             </Button>
             <div>
-              <Title level={5} style={{ margin: 0 }}>模型对应可用渠道</Title>
+              <Title level={4} style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>模型对应可用渠道</Title>
               <Text type="secondary" style={{ fontSize: 12 }}>
                 全局概览：清晰查看每个模型当前已分配的所有可用渠道
               </Text>

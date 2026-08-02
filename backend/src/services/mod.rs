@@ -7,12 +7,15 @@
 
 pub mod affiliate;
 pub mod email;
+pub mod http_client;
 pub mod notification;
 pub mod oauth;
 #[cfg(plugin_payment)]
 pub mod payment;
+pub mod runtime_info;
 pub mod sms;
 pub mod tos;
+#[cfg(feature = "commercial_plugins")]
 pub mod upstream_asset_client;
 #[cfg(feature = "commercial_plugins")]
 pub mod volc_ark_monitor;

@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { WechatOutlined, GoogleOutlined } from '@ant-design/icons';
 import request from '../../utils/request';
+import { buildRegisterPath, resolveInviteParams } from '../../utils/inviteTracking';
 import { useTranslation } from 'react-i18next';
 import useAuthStore from '../../store/auth';
 import useSettingsStore from '../../store/settings';
@@ -26,6 +27,7 @@ import AuthLayout from '../../layouts/AuthLayout';
 import type { AuthMethodOption } from '../../layouts/AuthLayout';
 import WechatQR from '../../components/WechatQR';
 import GoogleIcon from '../../components/GoogleIcon';
+import { sanitizeRedirectPath, stripAuthParamsFromUrl } from '../../utils/safeRedirect';
 
 const Login: React.FC = () => {
   const { t, i18n } = useTranslation();
@@ -85,29 +87,61 @@ const Login: React.FC = () => {
 
   // OAuth 回调或管理员代入一键登录
   useEffect(() => {
-    const token = searchParams.get('token');
+    const code = searchParams.get('code');
+    const legacyToken = searchParams.get('token');
+    const handoffKey = searchParams.get('handoff');
     const isImpersonate = searchParams.get('impersonate') === '1';
-    const redirectTo = searchParams.get('redirect') || '/dashboard';
-    
-    if (token) {
-      setToken(token, isImpersonate);
+    const redirectTo = sanitizeRedirectPath(searchParams.get('redirect') || '/dashboard');
+
+    const goAfterAuth = () => {
+      if (isImpersonate) {
+        window.location.replace(redirectTo.startsWith('/') ? redirectTo : '/dashboard');
+      } else {
+        navigate(redirectTo, { replace: true });
+      }
+    };
+
+    const finishWithToken = (tok: string) => {
+      setToken(tok, isImpersonate);
+      stripAuthParamsFromUrl();
       request.get('/user/profile')
-        .then((res: any) => { 
-          setUser(res, isImpersonate); 
-          if (isImpersonate) {
-            window.location.href = redirectTo;
-          } else {
-            navigate(redirectTo); 
-          }
+        .then((res: any) => {
+          setUser(res, isImpersonate);
+          goAfterAuth();
         })
         .catch((e) => {
-          console.error("Auto login failed:", e);
-          if (isImpersonate) {
-            window.location.href = redirectTo;
-          } else {
-            navigate(redirectTo);
-          }
+          console.error('Auto login failed:', e);
+          goAfterAuth();
         });
+    };
+
+    if (handoffKey) {
+      const tok = localStorage.getItem(handoffKey);
+      localStorage.removeItem(handoffKey);
+      if (tok) {
+        finishWithToken(tok);
+        return;
+      }
+    }
+
+    if (code) {
+      request
+        .post('/auth/exchange-login-code', { code })
+        .then((res: any) => {
+          const tok = res?.token || res?.data?.token;
+          if (tok) finishWithToken(tok);
+          else stripAuthParamsFromUrl();
+        })
+        .catch((e) => {
+          console.error('Exchange login code failed:', e);
+          stripAuthParamsFromUrl();
+        });
+      return;
+    }
+
+    if (legacyToken) {
+      // 兼容旧链接；立刻从地址栏清除
+      finishWithToken(legacyToken);
     }
   }, [searchParams, setToken, setUser, navigate]);
 
@@ -209,7 +243,14 @@ const Login: React.FC = () => {
       key: 'google', 
       label: t('login.google_login'), 
       icon: <GoogleIcon className="w-4 h-4" />,
-      onClick: () => { window.location.href = '/api/v1/auth/oauth/google'; } 
+      onClick: () => {
+        const { aff, team } = resolveInviteParams();
+        const params = new URLSearchParams();
+        if (aff) params.set('aff', aff);
+        if (team) params.set('team', team);
+        const qs = params.toString();
+        window.location.href = `/api/v1/auth/oauth/google${qs ? `?${qs}` : ''}`;
+      },
     });
   }
   // 将所有的表单通道以图标形式追加入 layoutMethods
@@ -232,12 +273,16 @@ const Login: React.FC = () => {
   const wechatAppId = settings?.wechat_oauth_app_id || '';
   const wechatRedirectUri = `${window.location.origin}/api/v1/auth/oauth/wechat/callback`;
 
-  // 从后端获取 HMAC 签名的 OAuth state（禁止前端自造）
+  // 从后端获取 HMAC 签名的 OAuth state（嵌入 3 天内邀请参数，禁止前端自造）
   useEffect(() => {
     if (!settings?.login?.enable_wechat_login) return;
     let cancelled = false;
+    const { aff, team } = resolveInviteParams();
+    const params: Record<string, string> = { provider: 'wechat' };
+    if (aff) params.aff = aff;
+    if (team) params.team = team;
     request
-      .get('/auth/oauth/state', { params: { provider: 'wechat' }, skipErrorHandler: true } as any)
+      .get('/auth/oauth/state', { params, skipErrorHandler: true } as any)
       .then((res: any) => {
         if (!cancelled && res?.state) setWechatState(res.state);
       })
@@ -245,28 +290,8 @@ const Login: React.FC = () => {
     return () => { cancelled = true; };
   }, [settings?.login?.enable_wechat_login]);
 
-  // 邀请码处理
-  const getStoredInviteParam = () => {
-    const params = new URLSearchParams();
-    const readLS = (key: string, param: string) => {
-      try {
-        const raw = localStorage.getItem(key);
-        if (raw) { 
-          const d = JSON.parse(raw); 
-          if (Date.now() <= d.expiry) { 
-            params.set(param, d.value); 
-            return; 
-          } 
-        }
-      } catch {}
-      const m = document.cookie.match(new RegExp(`(?:^|;\\s*)${key}=([^;]*)`));
-      if (m) params.set(param, decodeURIComponent(m[1]));
-    };
-    readLS('tokensbyte_affiliate_code', 'aff');
-    readLS('tokensbyte_team_invite', 'team');
-    const qs = params.toString();
-    return qs ? `/register?${qs}` : '/register';
-  };
+  // 邀请码处理：登录页「去注册」带回 3 天内未清缓存的 aff/team
+  const getStoredInviteParam = () => buildRegisterPath();
 
   const bottomLinks = (
     <div className="flex items-center justify-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">

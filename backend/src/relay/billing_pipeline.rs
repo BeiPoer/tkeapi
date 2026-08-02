@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -56,16 +56,6 @@ impl BillingIngress {
         }
         self.tx.try_send(event).is_ok()
     }
-
-    pub async fn enqueue(
-        &self,
-        event: ConsumeEvent,
-    ) -> Result<(), mpsc::error::SendError<ConsumeEvent>> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(mpsc::error::SendError(event));
-        }
-        self.tx.send(event).await
-    }
 }
 
 pub struct BillingPipelineHandle {
@@ -92,9 +82,9 @@ impl BillingPipelineHandle {
     /// 等待 Worker 完成 drain（应在 `shutdown_tx.send(true)` 之后调用）
     pub async fn join(self) {
         match tokio::time::timeout(Duration::from_secs(25), self.worker).await {
-            Ok(Ok(())) => tracing::info!("[BillingPipeline] worker drained and exited"),
-            Ok(Err(e)) => tracing::error!("[BillingPipeline] worker join error: {}", e),
-            Err(_) => tracing::warn!("[BillingPipeline] drain timeout"),
+            Ok(Ok(())) => tracing::info!("[BillingPipeline] 工作协程排空并退出"),
+            Ok(Err(e)) => tracing::error!("[BillingPipeline] 工作协程等待异常: {}", e),
+            Err(_) => tracing::warn!("[BillingPipeline] 排空超时"),
         }
     }
 }
@@ -117,7 +107,7 @@ async fn run_worker(
                 if *shutdown_rx.borrow() {
                     closed.store(true, Ordering::Release);
                     drain_remaining(&db, &mut rx, &mut buf).await;
-                    tracing::info!("[BillingPipeline] shutdown drain complete");
+                    tracing::info!("[BillingPipeline] 停机排空完成");
                     return;
                 }
             }
@@ -133,7 +123,7 @@ async fn run_worker(
                         if !buf.is_empty() {
                             flush_batch(&db, &mut buf).await;
                         }
-                        tracing::info!("[BillingPipeline] channel closed, worker exit");
+                        tracing::info!("[BillingPipeline] 通道已关闭，工作协程退出");
                         return;
                     }
                 }
@@ -205,16 +195,41 @@ async fn flush_batch(db: &Database, buf: &mut HashMap<String, Aggregated>) {
         if token_id <= 0 {
             continue;
         }
-        if let Err(e) = flush_one(db, token_id, &agg).await {
+        // 短暂重试后仍失败则放回缓冲，避免内存已占用但 DB 永久丢账
+        if let Err(e) = flush_one_with_retry(db, token_id, &agg, 3).await {
             tracing::error!(
-                "[BillingPipeline] flush failed token_id={} day={} amount={:.6}: {}",
+                "[BillingPipeline] 刷盘失败 令牌ID={} 日期={} 金额={:.6}: {} (已重新排队)",
                 token_id,
                 agg.day,
                 agg.amount,
                 e
             );
+            buf.entry(agg_key)
+                .and_modify(|a| a.amount = crate::money::round_money(a.amount + agg.amount))
+                .or_insert(agg);
         }
     }
+}
+
+async fn flush_one_with_retry(
+    db: &Database,
+    token_id: i64,
+    agg: &Aggregated,
+    attempts: u32,
+) -> Result<(), sqlx::Error> {
+    let mut last_err = None;
+    for i in 0..attempts {
+        match flush_one(db, token_id, agg).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                if i + 1 < attempts {
+                    tokio::time::sleep(Duration::from_millis(50 * (i as u64 + 1))).await;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| sqlx::Error::Protocol("flush retry exhausted".into())))
 }
 
 async fn flush_one(db: &Database, token_id: i64, agg: &Aggregated) -> Result<(), sqlx::Error> {

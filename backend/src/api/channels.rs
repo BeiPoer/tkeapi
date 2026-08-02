@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -374,6 +374,11 @@ pub async fn test_channel(
                 // 测试指定子上游时校验其额度（站点时区，与线上扣费一致）
                 let (site_tz, _) = crate::relay::get_cached_config(&state).await;
                 let (now_day, now_week, now_month) = crate::models::quota_period_keys(&site_tz);
+                if cfg.status != 1 {
+                    return Err(crate::error::AppError::Forbidden(
+                        "指定的上游渠道配置已禁用，测试请求被拦截".into(),
+                    ));
+                }
                 if !cfg.has_available_quota(&now_day, &now_week, &now_month) {
                     return Err(crate::error::AppError::Forbidden(
                         "指定的上游预设额度已耗尽，测试请求被拦截".into(),
@@ -399,7 +404,7 @@ pub async fn test_channel(
         )));
     }
 
-    // 绑定上游预设时同步校验预设额度
+    // 绑定上游预设时同步校验预设状态与额度
     if let Some(pid) = channel.preset_id {
         if let Ok(Some(preset)) = sqlx::query_as::<_, crate::models::ChannelConfig>(
             &state
@@ -410,6 +415,11 @@ pub async fn test_channel(
         .fetch_optional(&state.db.pool)
         .await
         {
+            if preset.status != 1 {
+                return Err(crate::error::AppError::Forbidden(
+                    "绑定的上游渠道配置已禁用，测试请求被拦截".into(),
+                ));
+            }
             if !preset.has_available_quota(&now_day, &now_week, &now_month) {
                 return Err(crate::error::AppError::Forbidden(
                     "绑定的上游预设额度已耗尽，测试请求被拦截".into(),
@@ -687,13 +697,7 @@ pub async fn test_channel(
     let preview_usage = crate::relay::usage_extractor::UsageTokens {
         prompt: p_tokens,
         completion: c_tokens,
-        total: 0,
-        cached: 0,
-        cache_creation: 0,
-        audio_tokens: 0,
-        audio_cached_tokens: 0,
-        image_tokens: 0,
-        web_search: 0,
+        ..Default::default()
     };
     let (_, calc_detail) = crate::relay::compute_cost(
         db_model.as_ref(),
@@ -723,8 +727,8 @@ pub async fn test_channel(
         "INSERT INTO logs (user_id, channel_id, token_id, model, prompt_tokens, completion_tokens, \
          cost, latency_ms, status_code, endpoint, error_message, upstream_url, \
          request_content, response_content, upstream_req_content, billing_detail, action_type, task_id, \
-         billing_pid, forward_eid, channel_config_id, is_completed) \
-         VALUES (?, ?, 0, ?, ?, ?, 0.0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1) RETURNING id"
+         billing_pid, forward_eid, channel_config_id, is_ha, is_completed) \
+         VALUES (?, ?, 0, ?, ?, ?, 0.0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1) RETURNING id"
     ))
         .bind(&user_id_str).bind(id).bind(&test_model)
         .bind(p_tokens).bind(c_tokens).bind(latency_ms)
@@ -732,6 +736,7 @@ pub async fn test_channel(
         .bind(&sanitized_req).bind(&sanitized_resp)
         .bind(&sanitized_upstream_req).bind(&billing_detail).bind(&category).bind(&task_id)
         .bind(billing_pid).bind(forward_eid).bind(channel_config_id.map(|cid| cid as i32))
+        .bind(crate::relay::ha::channel_is_ha_flag(&channel))
         .fetch_optional(&state.db.pool).await.unwrap_or(None);
 
     // ── 异步任务自动轮询（统一支持所有厂商：火山/腾讯云/DashScope/可灵等）──

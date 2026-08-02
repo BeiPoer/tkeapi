@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -35,277 +35,202 @@ pub async fn chat_completions(
     let is_stream = body["stream"].as_bool().unwrap_or(false);
 
     let ctx = proxy::get_user_context(&state, &token.user_id).await?;
+    proxy::check_model_permission(&state, &token, model, "/v1/chat/completions", Some("聊天"))
+        .await?;
 
-    let original_model = model;
-    let ep_tag: Option<String> = None;
-
-    let resolved_ep_models: Option<Vec<String>> = None;
-
-    let model_list = vec![model.to_string()];
-
-    // 【一条日志原则】循环重试场景下复用同一条日志记录，避免产生多条
+    // 【一条日志原则】HA 重试复用同一条 pending，避免产生多条
     let mut ha = crate::relay::ha::HaAttempt::begin(&state, token.high_availability).await;
 
-    for (retry_idx, current_model) in model_list.iter().enumerate() {
-        let model = current_model.as_str();
-        ha.reset_attempts();
+    while ha.cont() {
+        let start_time = std::time::Instant::now();
 
-        // 1. Token 模型权限校验（渠道选择前快速拦截；EP 已在循环外检查过）
-        if resolved_ep_models.is_none() {
-            if let Err(e) = proxy::check_model_permission(
-                &state,
-                &token,
-                model,
-                "/v1/chat/completions",
-                Some("聊天"),
-            )
-            .await
-            {
-                ha.on_access_err(e);
-                continue;
+        // 1. 选择渠道
+        let channel = match proxy::select_channel_for_model(
+            &state,
+            &token,
+            model,
+            &ctx.user_group,
+            &ctx.level_id,
+            raw_path,
+            &ha.exclude_aids,
+            !ha.had_upstream,
+            Some("聊天"),
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                ha.on_select_err(e);
+                break;
             }
-        }
+        };
 
-        let mut model_success = false;
-        let mut final_response = None;
-
-        while ha.cont() {
-            let start_time = std::time::Instant::now();
-
-            // 2. 选择渠道
-            let channel = match proxy::select_channel_for_model(
-                &state,
-                &token,
-                model,
-                &ctx.user_group,
-                &ctx.level_id,
-                raw_path,
-                &ha.exclude_aids,
-                !ha.had_upstream,
-                Some("聊天"),
-            )
-            .await
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    ha.on_select_err(e);
-                    break;
-                }
-            };
-
-            // 3. 预扣费检查（带 channel 精确匹配同名模型的预扣费金额；EP/非EP 统一调用，同时获取 Model 供下游复用）
-            let (pre_deduction, db_model, resolved_cat) = match proxy::check_access(
-                &state,
-                &token,
-                model,
-                &ctx,
-                Some("聊天"),
-                Some(&channel),
-            )
-            .await
+        // 2. 预扣费检查（带 channel 精确匹配同名模型；同时获取 Model 供下游复用）
+        let (pre_deduction, db_model, resolved_cat) =
+            match proxy::check_access(&state, &token, model, &ctx, Some("聊天"), Some(&channel))
+                .await
             {
                 Ok(v) => v,
                 Err(e) => {
                     ha.on_access_err(e);
-                    break; // 余额不足等，跳出 while 尝试下一个模型
+                    break;
                 }
             };
 
-            // 模型表别名映射：渠道无映射时回落到 db_model.model_id_alias
-            let (resolved_model, mapping_source) =
-                router::resolve_model(&channel, model, db_model.as_ref());
+        // 模型表别名映射：渠道无映射时回落到 db_model.model_id_alias
+        let (resolved_model, mapping_source) =
+            router::resolve_model(&channel, model, db_model.as_ref());
 
-            // 4. 解析转发规则（复用 db_model 避免重查 models 表）
-            let resolved = match forward::resolve_forward_rule(
-                &state,
-                model,
-                &resolved_cat,
-                raw_path,
-                Some(&channel),
-                db_model.as_ref(),
-            )
-            .await
-            {
-                Some(r) => r,
-                None => {
-                    if forward::model_has_forward_rules(&state, model).await {
-                        // 业务侧错误，不可 HA 续试（continue 不 bump 会空转）
-                        ha.on_access_err(AppError::BadRequest(format!(
-                            "模型 '{}' 不支持当前接口，请检查模型对应的转发规则",
-                            model
-                        )));
-                        break;
-                    }
-                    forward::infer_forward_from_base_url(
-                        &channel.base_url,
-                        &resolved_cat,
-                        db_model.as_ref(),
-                    )
+        // 3. 解析转发规则（复用 db_model 避免重查 models 表）
+        let resolved = match forward::resolve_forward_rule(
+            &state,
+            model,
+            &resolved_cat,
+            raw_path,
+            Some(&channel),
+            db_model.as_ref(),
+        )
+        .await
+        {
+            Some(r) => r,
+            None => {
+                if forward::model_has_forward_rules(&state, model).await {
+                    // 业务侧错误，不可 HA 续试（continue 不 bump 会空转）
+                    ha.on_access_err(AppError::BadRequest(format!(
+                        "模型 '{}' 不支持当前接口，请检查模型对应的转发规则",
+                        model
+                    )));
+                    break;
                 }
-            };
+                forward::infer_forward_from_base_url(
+                    &channel.base_url,
+                    &resolved_cat,
+                    db_model.as_ref(),
+                )
+            }
+        };
 
-            let target_type = resolved.target_type.clone();
-            // 转发规则路径含 streamGenerateContent 时上游始终返回 SSE，强制走流式路径
-            let is_stream = is_stream || resolved.upstream_path.contains("streamGenerateContent");
-            let mut db_rule =
-                proxy::get_model_billing_rule(&state, model, Some(&channel), db_model.as_ref())
-                    .await;
-            let upstream_body: serde_json::Value = forward::transform_request_body(
-                &resolved,
-                &resolved_model,
-                &body,
-                "聊天",
-                db_rule.as_ref(),
-                Some(&state.http_client),
-            )
-            .await;
-            let url = forward::build_upstream_url(
-                &channel.base_url,
-                &resolved,
-                &resolved_model,
-                &channel.api_key,
-            );
-            let auth_headers = forward::build_auth_headers(&resolved, &channel.api_key);
+        let target_type = resolved.target_type.clone();
+        // 转发规则路径含 streamGenerateContent 时上游始终返回 SSE，强制走流式路径
+        let is_stream = is_stream || resolved.upstream_path.contains("streamGenerateContent");
+        let mut db_rule =
+            proxy::get_model_billing_rule(&state, model, Some(&channel), db_model.as_ref()).await;
+        let upstream_body: serde_json::Value = forward::transform_request_body(
+            &resolved,
+            &resolved_model,
+            &body,
+            "聊天",
+            db_rule.as_ref(),
+            Some(&state.http_client),
+        )
+        .await;
+        let url = forward::build_upstream_url(
+            &channel.base_url,
+            &resolved,
+            &resolved_model,
+            &channel.api_key,
+        );
+        let auth_headers = forward::build_auth_headers(&resolved, &channel.api_key);
 
-            tracing::info!("[Chat] retry_idx={}, model={}, target_type={}, auth_type={}, url={}, channel_id={}, channel_key={}",
-                retry_idx, model, target_type, resolved.auth_type, url, channel.id,
-                if channel.api_key.len() > 12 { format!("{}***{}", &channel.api_key[..8], &channel.api_key[channel.api_key.len()-4..]) } else { "***".to_string() });
+        tracing::info!(
+            "[Chat] 尝试={} 模型={} 目标类型={} 鉴权={} 地址={} 渠道id={}",
+            ha.attempt,
+            model,
+            target_type,
+            resolved.auth_type,
+            url,
+            channel.id
+        );
 
-            let resolved_upstream_path =
-                resolved.upstream_path.replace("${model}", &resolved_model);
-            let masked_url = forward::mask_key_in_string(&url, &channel.api_key);
-            let ep = format!("{}|{}", raw_path, masked_url);
-            // pending_log_id 将在后续与网络请求一起并发执行
-            if is_stream {
-                let mut stream_body = upstream_body.clone();
-                // Gemini 流式通过 URL 切换为 :streamGenerateContent?alt=sse 实现，请求体不接受 stream 字段
-                if target_type != "gemini" {
-                    stream_body["stream"] = serde_json::json!(true);
-                }
-                let mut final_upstream_path = resolved_upstream_path.clone();
-                let stream_url = if target_type == "gemini" {
-                    final_upstream_path = final_upstream_path
-                        .replace(":generateContent", ":streamGenerateContent")
-                        + "?alt=sse";
-                    let mut final_url =
-                        super::url_utils::join_url(&channel.base_url, &final_upstream_path);
-                    if resolved.auth_type == "query_key" {
-                        if final_url.contains('?') {
-                            final_url = format!("{}&key={}", final_url, channel.api_key);
-                        } else {
-                            final_url = format!("{}?key={}", final_url, channel.api_key);
-                        }
-                    }
-                    final_url
-                } else {
-                    url.clone()
-                };
-
-                let final_upstream_path =
-                    forward::mask_key_in_string(&stream_url, &channel.api_key);
-
-                let stream_builder = state
-                    .http_client
-                    .post(&stream_url)
-                    .header("Content-Type", "application/json");
-                let stream_builder = auth_headers
-                    .into_iter()
-                    .fold(stream_builder, |b, (k, v)| b.header(k, v));
-
-                let pending_log_future = async {
-                    if ha.pending_log_id.is_none() {
-                        proxy::record_pending_log(proxy::PendingLog {
-                            state: &state,
-                            user_id: &token.user_id,
-                            token_id: token.id,
-                            model: model,
-                            endpoint: &ep,
-                            is_stream: 1,
-                            request_content: Some(&request_content_str),
-                            upstream_url: Some(&url),
-                            channel: &channel,
-                            billing_model_hint: None,
-                            plugin_tag: None,
-                            category: Some("聊天"),
-                            db_model: db_model.as_ref(),
-                            forward_eid: Some(&resolved.eid),
-                            requested_log_id: None,
-                        })
-                        .await
+        let resolved_upstream_path = resolved.upstream_path.replace("${model}", &resolved_model);
+        let masked_url = forward::mask_key_in_string(&url, &channel.api_key);
+        let ep = format!("{}|{}", raw_path, masked_url);
+        // pending_log_id 将在后续与网络请求一起并发执行
+        if is_stream {
+            let mut stream_body = upstream_body.clone();
+            // Gemini 流式通过 URL 切换为 :streamGenerateContent?alt=sse 实现，请求体不接受 stream 字段
+            if target_type != "gemini" {
+                stream_body["stream"] = serde_json::json!(true);
+            }
+            let mut final_upstream_path = resolved_upstream_path.clone();
+            let stream_url = if target_type == "gemini" {
+                final_upstream_path = final_upstream_path
+                    .replace(":generateContent", ":streamGenerateContent")
+                    + "?alt=sse";
+                let mut final_url =
+                    super::url_utils::join_url(&channel.base_url, &final_upstream_path);
+                if resolved.auth_type == "query_key" {
+                    if final_url.contains('?') {
+                        final_url = format!("{}&key={}", final_url, channel.api_key);
                     } else {
-                        ha.pending_log_id
+                        final_url = format!("{}?key={}", final_url, channel.api_key);
                     }
-                };
+                }
+                final_url
+            } else {
+                url.clone()
+            };
 
-                let send_future = stream_builder.json(&stream_body).send();
-                let (log_res, resp_res) = tokio::join!(pending_log_future, send_future);
-                ha.pending_log_id = log_res;
+            let final_upstream_path = forward::mask_key_in_string(&stream_url, &channel.api_key);
 
-                let resp = match resp_res {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let err_msg = e.to_string();
-                        let latency_ms = start_time.elapsed().as_millis() as u32;
-                        tracing::warn!("[Chat] stream connect error: {}", err_msg);
-                        if chat_upstream_fail(
-                            &state,
-                            &token,
-                            &channel,
-                            model,
-                            &ep,
-                            502,
-                            &err_msg,
-                            latency_ms,
-                            1,
-                            &request_content_str,
-                            None,
-                            &upstream_body.to_string(),
-                            ep_tag.clone(),
-                            ha.pending_log_id,
-                            db_model.clone(),
-                            ha.failover_on,
-                            &mut ha.exclude_aids,
-                            &mut ha.first_fail,
-                            &mut ha.last_err,
-                            &mut ha.had_upstream,
-                            Some(&url),
-                        )
-                        .await
-                        {
-                            ha.bump();
-                            continue;
-                        }
-                        break;
-                    }
-                };
+            let stream_builder = state
+                .http_client
+                .post(&stream_url)
+                .header("Content-Type", "application/json");
+            let stream_builder = auth_headers
+                .into_iter()
+                .fold(stream_builder, |b, (k, v)| b.header(k, v));
 
-                if !resp.status().is_success() {
-                    let status = resp.status().as_u16();
-                    let err = resp.text().await.unwrap_or_default();
-                    let display_err = proxy::upstream_error_text(status, &err);
+            let pending_log_future = async {
+                if ha.pending_log_id.is_none() {
+                    proxy::record_pending_log(proxy::PendingLog {
+                        state: &state,
+                        user_id: &token.user_id,
+                        token_id: token.id,
+                        model: model,
+                        endpoint: &ep,
+                        is_stream: 1,
+                        request_content: Some(&request_content_str),
+                        upstream_url: Some(&url),
+                        channel: &channel,
+                        billing_model_hint: None,
+                        plugin_tag: None,
+                        category: Some("聊天"),
+                        db_model: db_model.as_ref(),
+                        forward_eid: Some(&resolved.eid),
+                        requested_log_id: None,
+                    })
+                    .await
+                } else {
+                    ha.pending_log_id
+                }
+            };
+
+            let send_future = stream_builder.json(&stream_body).send();
+            let (log_res, resp_res) = tokio::join!(pending_log_future, send_future);
+            ha.pending_log_id = log_res;
+
+            let resp = match resp_res {
+                Ok(r) => r,
+                Err(e) => {
+                    let err_msg = e.to_string();
                     let latency_ms = start_time.elapsed().as_millis() as u32;
-                    tracing::warn!("[Chat] stream upstream error {}: {}", status, display_err);
-                    if chat_upstream_fail(
+                    tracing::warn!("[Chat] 流式连接错误: {}", err_msg);
+                    if chat_on_upstream_fail(
+                        &mut ha,
                         &state,
                         &token,
                         &channel,
                         model,
                         &ep,
-                        status,
-                        &display_err,
+                        502,
+                        &err_msg,
                         latency_ms,
                         1,
                         &request_content_str,
-                        Some(err),
+                        None,
                         &upstream_body.to_string(),
-                        ep_tag.clone(),
-                        ha.pending_log_id,
-                        db_model.clone(),
-                        ha.failover_on,
-                        &mut ha.exclude_aids,
-                        &mut ha.first_fail,
-                        &mut ha.last_err,
-                        &mut ha.had_upstream,
+                        db_model.as_ref(),
                         Some(&url),
                     )
                     .await
@@ -315,8 +240,193 @@ pub async fn chat_completions(
                     }
                     break;
                 }
+            };
 
+            if !resp.status().is_success() {
+                let status = resp.status().as_u16();
+                let err = resp.text().await.unwrap_or_default();
+                let display_err = proxy::upstream_error_text(status, &err);
+                let latency_ms = start_time.elapsed().as_millis() as u32;
+                tracing::warn!("[Chat] 流式上游错误 {}: {}", status, display_err);
+                if chat_on_upstream_fail(
+                    &mut ha,
+                    &state,
+                    &token,
+                    &channel,
+                    model,
+                    &ep,
+                    status,
+                    &display_err,
+                    latency_ms,
+                    1,
+                    &request_content_str,
+                    Some(err),
+                    &upstream_body.to_string(),
+                    db_model.as_ref(),
+                    Some(&url),
+                )
+                .await
+                {
+                    ha.bump();
+                    continue;
+                }
+                break;
+            }
+
+            let prompt_tokens = estimate_prompt_tokens(&body);
+            let pre_deduct_gift = proxy::pre_deduct_or_intercept(
+                &state,
+                &token,
+                &channel,
+                model,
+                pre_deduction,
+                &ep,
+                start_time,
+                1,
+                &request_content_str,
+                &upstream_body.to_string(),
+                None,
+                ha.pending_log_id,
+                db_model.as_ref(),
+                Some("聊天"),
+            )
+            .await?;
+
+            return Ok(stream::handle_chat_stream(
+                state.clone(),
+                token.clone(),
+                channel.clone(),
+                model.to_string(),
+                resp,
+                ctx.clone(),
+                prompt_tokens,
+                request_content_str.clone(),
+                start_time,
+                target_type,
+                final_upstream_path,
+                Some(upstream_body.to_string()),
+                pre_deduction,
+                pre_deduct_gift,
+                raw_path.to_string(),
+                None,
+                ha.pending_log_id,
+                db_model,
+                db_rule,
+            )
+            .await
+            .into_response());
+        } else {
+            let builder = state
+                .http_client
+                .post(&url)
+                .header("Content-Type", "application/json");
+            let builder = auth_headers
+                .into_iter()
+                .fold(builder, |b, (k, v)| b.header(k, v));
+            let builder = crate::services::http_client::with_upstream_timeout(builder);
+
+            let pending_log_future = async {
+                if ha.pending_log_id.is_none() {
+                    proxy::record_pending_log(proxy::PendingLog {
+                        state: &state,
+                        user_id: &token.user_id,
+                        token_id: token.id,
+                        model: model,
+                        endpoint: &ep,
+                        is_stream: 0,
+                        request_content: Some(&request_content_str),
+                        upstream_url: Some(&url),
+                        channel: &channel,
+                        billing_model_hint: None,
+                        plugin_tag: None,
+                        category: Some("聊天"),
+                        db_model: db_model.as_ref(),
+                        forward_eid: Some(&resolved.eid),
+                        requested_log_id: None,
+                    })
+                    .await
+                } else {
+                    ha.pending_log_id
+                }
+            };
+
+            let send_future = builder.json(&upstream_body).send();
+            let (log_res, resp_res) = tokio::join!(pending_log_future, send_future);
+            ha.pending_log_id = log_res;
+
+            let resp = match resp_res {
+                Ok(r) => r,
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    let latency_ms = start_time.elapsed().as_millis() as u32;
+                    tracing::warn!("[Chat] 连接错误: {}", err_msg);
+                    if chat_on_upstream_fail(
+                        &mut ha,
+                        &state,
+                        &token,
+                        &channel,
+                        model,
+                        &ep,
+                        502,
+                        &err_msg,
+                        latency_ms,
+                        0,
+                        &request_content_str,
+                        None,
+                        &upstream_body.to_string(),
+                        db_model.as_ref(),
+                        Some(&url),
+                    )
+                    .await
+                    {
+                        ha.bump();
+                        continue;
+                    }
+                    break;
+                }
+            };
+
+            let status = resp.status().as_u16();
+            if !resp.status().is_success() {
+                let err = resp.text().await.unwrap_or_default();
+                let display_err = proxy::upstream_error_text(status, &err);
+                let latency_ms = start_time.elapsed().as_millis() as u32;
+                tracing::warn!("[Chat] 上游错误 {}: {}", status, display_err);
+                if chat_on_upstream_fail(
+                    &mut ha,
+                    &state,
+                    &token,
+                    &channel,
+                    model,
+                    &ep,
+                    status,
+                    &display_err,
+                    latency_ms,
+                    0,
+                    &request_content_str,
+                    Some(err),
+                    &upstream_body.to_string(),
+                    db_model.as_ref(),
+                    Some(&url),
+                )
+                .await
+                {
+                    ha.bump();
+                    continue;
+                }
+                break;
+            }
+
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if content_type.contains("text/event-stream")
+                || content_type.contains("application/x-ndjson")
+            {
                 let prompt_tokens = estimate_prompt_tokens(&body);
+                let final_upstream_path = resolved_upstream_path.clone();
                 let pre_deduct_gift = proxy::pre_deduct_or_intercept(
                     &state,
                     &token,
@@ -328,377 +438,182 @@ pub async fn chat_completions(
                     1,
                     &request_content_str,
                     &upstream_body.to_string(),
-                    ep_tag.clone(),
+                    None,
                     ha.pending_log_id,
                     db_model.as_ref(),
-                    &ctx.role,
                     Some("聊天"),
                 )
                 .await?;
-
-                let s_ep = ep_tag.as_ref().map(|_| original_model.to_string());
-                final_response = Some(
-                    stream::handle_chat_stream(
-                        state.clone(),
-                        token.clone(),
-                        channel.clone(),
-                        model.to_string(),
-                        resp,
-                        ctx.discount,
-                        ctx.model_discounts.clone(),
-                        prompt_tokens,
-                        request_content_str.clone(),
-                        start_time,
-                        target_type,
-                        final_upstream_path,
-                        Some(upstream_body.to_string()),
-                        pre_deduction,
-                        pre_deduct_gift,
-                        raw_path.to_string(),
-                        s_ep,
-                        ha.pending_log_id,
-                        db_model,
-                        db_rule,
-                    )
-                    .await
-                    .into_response(),
-                );
-                model_success = true;
-                break;
-            } else {
-                let builder = state
-                    .http_client
-                    .post(&url)
-                    .header("Content-Type", "application/json");
-                let builder = auth_headers
-                    .into_iter()
-                    .fold(builder, |b, (k, v)| b.header(k, v));
-
-                let pending_log_future = async {
-                    if ha.pending_log_id.is_none() {
-                        proxy::record_pending_log(proxy::PendingLog {
-                            state: &state,
-                            user_id: &token.user_id,
-                            token_id: token.id,
-                            model: model,
-                            endpoint: &ep,
-                            is_stream: 0,
-                            request_content: Some(&request_content_str),
-                            upstream_url: Some(&url),
-                            channel: &channel,
-                            billing_model_hint: None,
-                            plugin_tag: None,
-                            category: Some("聊天"),
-                            db_model: db_model.as_ref(),
-                            forward_eid: Some(&resolved.eid),
-                            requested_log_id: None,
-                        })
-                        .await
-                    } else {
-                        ha.pending_log_id
-                    }
-                };
-
-                let send_future = builder.json(&upstream_body).send();
-                let (log_res, resp_res) = tokio::join!(pending_log_future, send_future);
-                ha.pending_log_id = log_res;
-
-                let resp = match resp_res {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let err_msg = e.to_string();
-                        let latency_ms = start_time.elapsed().as_millis() as u32;
-                        tracing::warn!("[Chat] connect error: {}", err_msg);
-                        if chat_upstream_fail(
-                            &state,
-                            &token,
-                            &channel,
-                            model,
-                            &ep,
-                            502,
-                            &err_msg,
-                            latency_ms,
-                            0,
-                            &request_content_str,
-                            None,
-                            &upstream_body.to_string(),
-                            ep_tag.clone(),
-                            ha.pending_log_id,
-                            db_model.clone(),
-                            ha.failover_on,
-                            &mut ha.exclude_aids,
-                            &mut ha.first_fail,
-                            &mut ha.last_err,
-                            &mut ha.had_upstream,
-                            Some(&url),
-                        )
-                        .await
-                        {
-                            ha.bump();
-                            continue;
-                        }
-                        break;
-                    }
-                };
-
-                let status = resp.status().as_u16();
-                if !resp.status().is_success() {
-                    let err = resp.text().await.unwrap_or_default();
-                    let display_err = proxy::upstream_error_text(status, &err);
-                    let latency_ms = start_time.elapsed().as_millis() as u32;
-                    tracing::warn!("[Chat] upstream error {}: {}", status, display_err);
-                    if chat_upstream_fail(
-                        &state,
-                        &token,
-                        &channel,
-                        model,
-                        &ep,
-                        status,
-                        &display_err,
-                        latency_ms,
-                        0,
-                        &request_content_str,
-                        Some(err),
-                        &upstream_body.to_string(),
-                        ep_tag.clone(),
-                        ha.pending_log_id,
-                        db_model.clone(),
-                        ha.failover_on,
-                        &mut ha.exclude_aids,
-                        &mut ha.first_fail,
-                        &mut ha.last_err,
-                        &mut ha.had_upstream,
-                        Some(&url),
-                    )
-                    .await
-                    {
-                        ha.bump();
-                        continue;
-                    }
-                    break;
-                }
-
-                let content_type = resp
-                    .headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("");
-                if content_type.contains("text/event-stream")
-                    || content_type.contains("application/x-ndjson")
-                {
-                    let prompt_tokens = estimate_prompt_tokens(&body);
-                    let final_upstream_path = resolved_upstream_path.clone();
-                    let pre_deduct_gift = proxy::pre_deduct_or_intercept(
-                        &state,
-                        &token,
-                        &channel,
-                        model,
-                        pre_deduction,
-                        &ep,
-                        start_time,
-                        1,
-                        &request_content_str,
-                        &upstream_body.to_string(),
-                        ep_tag.clone(),
-                        ha.pending_log_id,
-                        db_model.as_ref(),
-                        &ctx.role,
-                        Some("聊天"),
-                    )
-                    .await?;
-                    let s_ep = ep_tag.as_ref().map(|_| original_model.to_string());
-                    final_response = Some(
-                        stream::handle_chat_stream(
-                            state.clone(),
-                            token.clone(),
-                            channel.clone(),
-                            model.to_string(),
-                            resp,
-                            ctx.discount,
-                            ctx.model_discounts.clone(),
-                            prompt_tokens,
-                            request_content_str.clone(),
-                            start_time,
-                            target_type,
-                            final_upstream_path,
-                            Some(upstream_body.to_string()),
-                            pre_deduction,
-                            pre_deduct_gift,
-                            raw_path.to_string(),
-                            s_ep,
-                            ha.pending_log_id,
-                            db_model,
-                            db_rule,
-                        )
-                        .await
-                        .into_response(),
-                    );
-                    model_success = true;
-                    break;
-                }
-
-                let data = resp.bytes().await.unwrap_or_default();
-                let mut response_content_str = String::from_utf8_lossy(&data).to_string();
-
-                // 上游 body 级错误检测（HTTP 200 但业务失败，在预扣费之前拦截）
-                let (converted, post_err) = forward::check_upstream_post_error(
-                    &target_type,
-                    &response_content_str,
-                    resolved_cat.as_str(),
-                    false,
-                );
-                response_content_str = converted;
-                if let Some(_err_response) = post_err {
-                    let latency_ms = start_time.elapsed().as_millis() as u32;
-                    let err_text = proxy::extract_error_message(&response_content_str);
-                    let err_status = proxy::infer_error_status_code_from_str(&response_content_str);
-                    tracing::warn!("[Chat] upstream body error: {}", err_text);
-                    if chat_upstream_fail(
-                        &state,
-                        &token,
-                        &channel,
-                        model,
-                        &ep,
-                        err_status,
-                        &err_text,
-                        latency_ms,
-                        0,
-                        &request_content_str,
-                        Some(response_content_str),
-                        &upstream_body.to_string(),
-                        ep_tag.clone(),
-                        ha.pending_log_id,
-                        db_model.clone(),
-                        ha.failover_on,
-                        &mut ha.exclude_aids,
-                        &mut ha.first_fail,
-                        &mut ha.last_err,
-                        &mut ha.had_upstream,
-                        Some(&url),
-                    )
-                    .await
-                    {
-                        ha.bump();
-                        continue;
-                    }
-                    break;
-                }
-
-                let usage_tokens = usage_extractor::parse_usage(&response_content_str);
-                let prompt_tokens = usage_tokens.prompt;
-                let completion_tokens = usage_tokens.completion;
-                let cached_tokens = usage_tokens.cached;
-
-                let mut features = usage_extractor::extract_request_features(&body);
-                features.cache_creation = if usage_tokens.cache_creation > 0 {
-                    Some(usage_tokens.cache_creation)
-                } else {
-                    None
-                };
-
-                let pre_deduct_gift = proxy::pre_deduct_or_intercept(
-                    &state,
-                    &token,
-                    &channel,
-                    model,
-                    pre_deduction,
-                    &ep,
-                    start_time,
-                    0,
-                    &request_content_str,
-                    &upstream_body.to_string(),
-                    ep_tag.clone(),
-                    ha.pending_log_id,
-                    db_model.as_ref(),
-                    &ctx.role,
-                    Some("聊天"),
-                )
-                .await?;
-
-                let (quota_used, mut detail) = super::calculate_relay_cost(
-                    &state,
-                    db_model.as_ref(),
-                    db_rule.as_mut(),
-                    &channel,
-                    ctx.discount,
-                    &ctx.model_discounts,
-                    &usage_tokens,
-                    &features,
-                    mapping_source.as_deref(),
-                    &model,
-                    &resolved_model,
-                )
-                .await;
-                if let Some(ref et) = ep_tag {
-                    detail.push_str(&format!(" | {}", et));
-                }
-
-                let latency_ms = start_time.elapsed().as_millis() as u32;
-
-                // 【连接保护】计费放入独立 task，客户端断开后仍完成
-                let (s, t, ch, m, e, rc, rsc, uc) = (
+                return Ok(stream::handle_chat_stream(
                     state.clone(),
                     token.clone(),
                     channel.clone(),
                     model.to_string(),
-                    ep.clone(),
+                    resp,
+                    ctx.clone(),
+                    prompt_tokens,
                     request_content_str.clone(),
-                    response_content_str.clone(),
-                    upstream_body.to_string(),
-                );
-                let dm = db_model.clone();
-                let pending_log_id = ha.pending_log_id;
-                tokio::spawn(async move {
-                    proxy::record_and_bill_inner(proxy::BillRecord {
-                        state: &s,
-                        token: &t,
-                        channel: &ch,
-                        model: &m,
-                        prompt_tokens: prompt_tokens,
-                        completion_tokens: completion_tokens,
-                        cached_tokens: cached_tokens,
-                        cost: quota_used,
-                        pre_deducted: pre_deduction,
-                        pre_deduct_gift: pre_deduct_gift,
-                        status_code: 200,
-                        endpoint: &e,
-                        error_msg: None,
-                        latency_ms: latency_ms,
-                        is_stream: 0,
-                        request_content: Some(rc),
-                        response_content: Some(rsc),
-                        upstream_req_content: Some(uc),
-                        billing_detail: Some(detail),
-                        hint_category: Some("聊天"),
-                        pending_log_id: pending_log_id,
-                        billing_model_hint: None,
-                        plugin_tag: None,
-                        db_model: dm.as_ref(),
-                    })
-                    .await;
-                });
+                    start_time,
+                    target_type,
+                    final_upstream_path,
+                    Some(upstream_body.to_string()),
+                    pre_deduction,
+                    pre_deduct_gift,
+                    raw_path.to_string(),
+                    None,
+                    ha.pending_log_id,
+                    db_model,
+                    db_rule,
+                )
+                .await
+                .into_response());
+            }
 
-                let final_body = if raw_path.ends_with("/messages") {
-                    response_content_str.clone()
-                } else {
-                    transform_chat_response(&response_content_str, &target_type, model)
-                };
+            let data = resp.bytes().await.unwrap_or_default();
+            let mut response_content_str = String::from_utf8_lossy(&data).to_string();
 
-                final_response = Some(
-                    Response::builder()
-                        .header("Content-Type", "application/json")
-                        .body(axum::body::Body::from(final_body))
-                        .unwrap(),
-                );
-                model_success = true;
+            // 上游 body 级错误检测（HTTP 200 但业务失败，在预扣费之前拦截）
+            let (converted, post_err) = forward::check_upstream_post_error(
+                &target_type,
+                &response_content_str,
+                resolved_cat.as_str(),
+                false,
+            );
+            response_content_str = converted;
+            if let Some(_err_response) = post_err {
+                let latency_ms = start_time.elapsed().as_millis() as u32;
+                let err_text = proxy::extract_error_message(&response_content_str);
+                tracing::warn!("[Chat] 上游响应体错误: {}", err_text);
+                let app_err = proxy::record_zero_cost_upstream_fail(proxy::ZeroCostUpstreamFail {
+                    state: &state,
+                    token: &token,
+                    channel: &channel,
+                    model,
+                    prefer_http_status: None,
+                    endpoint: &ep,
+                    latency_ms,
+                    is_stream: 0,
+                    request_content: request_content_str.clone(),
+                    response_body: response_content_str.clone(),
+                    response_content: Some(response_content_str),
+                    upstream_req_content: Some(upstream_body.to_string()),
+                    billing_detail: None,
+                    hint_category: Some("聊天"),
+                    pending_log_id: ha.pending_log_id,
+                    billing_model_hint: None,
+                    db_model: db_model.as_ref(),
+                    // 主路径客户端文案用提取后的短句（与历史行为一致，不用 format 后的 err_response）
+                    client_msg: Some(&err_text),
+                    pre_deducted: 0.0,
+                    pre_deduct_gift: 0.0,
+                })
+                .await;
+                if ha
+                    .on_spawn_result_err(&state, &channel, app_err, Some(&url))
+                    .await
+                {
+                    ha.bump();
+                    continue;
+                }
                 break;
-            } // end if is_stream
-        } // end while ha.cont()
+            }
 
-        if model_success {
-            return Ok(final_response.unwrap());
-        }
-    }
+            let usage_tokens = usage_extractor::parse_usage(&response_content_str);
+            let prompt_tokens = usage_tokens.prompt;
+            let completion_tokens = usage_tokens.completion;
+            let cached_tokens = usage_tokens.cached;
+
+            let mut features = usage_extractor::extract_request_features(&body);
+            usage_extractor::enrich_features_from_usage(&mut features, &usage_tokens);
+
+            let pre_deduct_gift = proxy::pre_deduct_or_intercept(
+                &state,
+                &token,
+                &channel,
+                model,
+                pre_deduction,
+                &ep,
+                start_time,
+                0,
+                &request_content_str,
+                &upstream_body.to_string(),
+                None,
+                ha.pending_log_id,
+                db_model.as_ref(),
+                Some("聊天"),
+            )
+            .await?;
+
+            let (quota_used, detail) = super::calculate_relay_cost(
+                &state,
+                db_model.as_ref(),
+                db_rule.as_mut(),
+                &channel,
+                &ctx,
+                &usage_tokens,
+                &features,
+                mapping_source.as_deref(),
+                &model,
+                &resolved_model,
+            )
+            .await;
+            let latency_ms = start_time.elapsed().as_millis() as u32;
+
+            // 【连接保护】计费放入独立 task，客户端断开后仍完成
+            let (s, t, ch, m, e, rc, rsc, uc) = (
+                state.clone(),
+                token.clone(),
+                channel.clone(),
+                model.to_string(),
+                ep.clone(),
+                request_content_str.clone(),
+                response_content_str.clone(),
+                upstream_body.to_string(),
+            );
+            let dm = db_model.clone();
+            let pending_log_id = ha.pending_log_id;
+            tokio::spawn(async move {
+                proxy::record_and_bill_inner(proxy::BillRecord {
+                    state: &s,
+                    token: &t,
+                    channel: &ch,
+                    model: &m,
+                    prompt_tokens: prompt_tokens,
+                    completion_tokens: completion_tokens,
+                    cached_tokens: cached_tokens,
+                    cost: quota_used,
+                    pre_deducted: pre_deduction,
+                    pre_deduct_gift: pre_deduct_gift,
+                    status_code: 200,
+                    endpoint: &e,
+                    error_msg: None,
+                    latency_ms: latency_ms,
+                    is_stream: 0,
+                    request_content: Some(rc),
+                    response_content: Some(rsc),
+                    upstream_req_content: Some(uc),
+                    billing_detail: Some(detail),
+                    hint_category: Some("聊天"),
+                    pending_log_id: pending_log_id,
+                    billing_model_hint: None,
+                    plugin_tag: None,
+                    db_model: dm.as_ref(),
+                })
+                .await;
+            });
+
+            let final_body = if raw_path.ends_with("/messages") {
+                response_content_str.clone()
+            } else {
+                transform_chat_response(&response_content_str, &target_type, model)
+            };
+
+            return Ok(Response::builder()
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(final_body))
+                .unwrap());
+        } // end if is_stream
+    } // end while ha.cont()
 
     Err(ha.finish())
 }
@@ -795,7 +710,7 @@ pub async fn responses_create(
         let auth_headers = forward::build_auth_headers(&resolved, &channel.api_key);
 
         tracing::info!(
-            "[Responses] model={}, resolved={}, url={}",
+            "[Responses] 模型={} 映射模型={} URL={}",
             model,
             resolved_model,
             url
@@ -809,9 +724,7 @@ pub async fn responses_create(
         let mapping_source = mapping_source.map(|s| s.to_string());
         let mut features = usage_extractor::extract_request_features(&body);
         let upstream_body_str = upstream_body.to_string();
-        let role = ctx.role.clone();
-        let discount = ctx.discount;
-        let model_discounts = ctx.model_discounts.clone();
+        let ctx_c = ctx.clone();
         let raw_path = raw_path.to_string();
         let pending_log_id = ha.pending_log_id;
         let (result_tx, result_rx) =
@@ -878,6 +791,12 @@ pub async fn responses_create(
                 let builder = auth_headers
                     .into_iter()
                     .fold(builder, |b, (k, v)| b.header(k, v));
+                // 流式不设总超时；非流式防挂死
+                let builder = if is_stream {
+                    builder
+                } else {
+                    crate::services::http_client::with_upstream_timeout(builder)
+                };
                 let send_future = builder.json(&req_body).send();
 
                 let (log_res, resp_res) = tokio::join!(pending_log_future, send_future);
@@ -888,73 +807,62 @@ pub async fn responses_create(
                     Err(e) => {
                         let err_msg = e.to_string();
                         let latency_ms = start_time.elapsed().as_millis() as u32;
-                        proxy::record_and_bill_inner(proxy::BillRecord {
-                            state: &state,
-                            token: &token,
-                            channel: &channel,
-                            model: &model,
-                            prompt_tokens: 0,
-                            completion_tokens: 0,
-                            cached_tokens: 0,
-                            cost: 0.0,
-                            pre_deducted: 0.0,
-                            pre_deduct_gift: 0.0,
-                            status_code: 502,
-                            endpoint: &ep,
-                            error_msg: Some(&err_msg),
-                            latency_ms: latency_ms,
-                            is_stream: if is_stream { 1 } else { 0 },
-                            request_content: Some(request_content_str.clone()),
-                            response_content: Some(err_msg.clone()),
-                            upstream_req_content: Some(upstream_body_str.clone()),
-                            billing_detail: None,
-                            hint_category: Some("聊天"),
-                            pending_log_id: pending_log_id,
-                            billing_model_hint: None,
-                            plugin_tag: None,
-                            db_model: db_model.as_ref(),
-                        })
-                        .await;
-                        return (pending_log_id, Err(proxy::upstream_fail(502, &err_msg)));
+                        let err =
+                            proxy::record_zero_cost_upstream_fail(proxy::ZeroCostUpstreamFail {
+                                state: &state,
+                                token: &token,
+                                channel: &channel,
+                                model: &model,
+                                prefer_http_status: Some(502),
+                                endpoint: &ep,
+                                latency_ms,
+                                is_stream: if is_stream { 1 } else { 0 },
+                                request_content: request_content_str.clone(),
+                                response_body: err_msg.clone(),
+                                response_content: Some(err_msg),
+                                upstream_req_content: Some(upstream_body_str.clone()),
+                                billing_detail: None,
+                                hint_category: Some("聊天"),
+                                pending_log_id,
+                                billing_model_hint: None,
+                                db_model: db_model.as_ref(),
+                                client_msg: None,
+                                pre_deducted: 0.0,
+                                pre_deduct_gift: 0.0,
+                            })
+                            .await;
+                        return (pending_log_id, Err(err));
                     }
                 };
 
                 if !resp.status().is_success() {
                     let status = resp.status().as_u16();
-                    let err = resp.text().await.unwrap_or_default();
-                    let display_err = proxy::upstream_error_text(status, &err);
+                    let err_body = resp.text().await.unwrap_or_default();
                     let latency_ms = start_time.elapsed().as_millis() as u32;
-                    proxy::record_and_bill_inner(proxy::BillRecord {
+                    let err = proxy::record_zero_cost_upstream_fail(proxy::ZeroCostUpstreamFail {
                         state: &state,
                         token: &token,
                         channel: &channel,
                         model: &model,
-                        prompt_tokens: 0,
-                        completion_tokens: 0,
-                        cached_tokens: 0,
-                        cost: 0.0,
-                        pre_deducted: 0.0,
-                        pre_deduct_gift: 0.0,
-                        status_code: status,
+                        prefer_http_status: Some(status),
                         endpoint: &ep,
-                        error_msg: Some(&display_err),
-                        latency_ms: latency_ms,
+                        latency_ms,
                         is_stream: if is_stream { 1 } else { 0 },
-                        request_content: Some(request_content_str.clone()),
-                        response_content: Some(err),
+                        request_content: request_content_str.clone(),
+                        response_body: err_body.clone(),
+                        response_content: Some(err_body),
                         upstream_req_content: Some(upstream_body_str.clone()),
                         billing_detail: None,
                         hint_category: Some("聊天"),
-                        pending_log_id: pending_log_id,
+                        pending_log_id,
                         billing_model_hint: None,
-                        plugin_tag: None,
                         db_model: db_model.as_ref(),
+                        client_msg: None,
+                        pre_deducted: 0.0,
+                        pre_deduct_gift: 0.0,
                     })
                     .await;
-                    return (
-                        pending_log_id,
-                        Err(proxy::upstream_fail(status, &display_err)),
-                    );
+                    return (pending_log_id, Err(err));
                 }
 
                 // 判断是否为流式响应（请求流式 或 上游实际返回 SSE）
@@ -981,7 +889,6 @@ pub async fn responses_create(
                         None,
                         pending_log_id,
                         db_model.as_ref(),
-                        &role,
                         Some("聊天"),
                     )
                     .await;
@@ -998,8 +905,7 @@ pub async fn responses_create(
                             channel,
                             model.clone(),
                             resp,
-                            discount,
-                            model_discounts.clone(),
+                            ctx_c.clone(),
                             request_content_str,
                             start_time,
                             resolved_upstream_path,
@@ -1029,40 +935,31 @@ pub async fn responses_create(
                     response_content_str = converted;
                     if let Some(err_response) = post_err {
                         let latency_ms = start_time.elapsed().as_millis() as u32;
-                        let err_text = proxy::extract_error_message(&response_content_str);
-                        let err_status =
-                            proxy::infer_error_status_code_from_str(&response_content_str);
-                        proxy::record_and_bill_inner(proxy::BillRecord {
-                            state: &state,
-                            token: &token,
-                            channel: &channel,
-                            model: &model,
-                            prompt_tokens: 0,
-                            completion_tokens: 0,
-                            cached_tokens: 0,
-                            cost: 0.0,
-                            pre_deducted: 0.0,
-                            pre_deduct_gift: 0.0,
-                            status_code: err_status,
-                            endpoint: &ep,
-                            error_msg: Some(&err_text),
-                            latency_ms: latency_ms,
-                            is_stream: 0,
-                            request_content: Some(request_content_str.clone()),
-                            response_content: Some(response_content_str),
-                            upstream_req_content: Some(upstream_body_str.clone()),
-                            billing_detail: None,
-                            hint_category: Some("聊天"),
-                            pending_log_id: pending_log_id,
-                            billing_model_hint: None,
-                            plugin_tag: None,
-                            db_model: db_model.as_ref(),
-                        })
-                        .await;
-                        return (
-                            pending_log_id,
-                            Err(proxy::upstream_fail(err_status, &err_response)),
-                        );
+                        let err =
+                            proxy::record_zero_cost_upstream_fail(proxy::ZeroCostUpstreamFail {
+                                state: &state,
+                                token: &token,
+                                channel: &channel,
+                                model: &model,
+                                prefer_http_status: None,
+                                endpoint: &ep,
+                                latency_ms,
+                                is_stream: 0,
+                                request_content: request_content_str.clone(),
+                                response_body: response_content_str.clone(),
+                                response_content: Some(response_content_str),
+                                upstream_req_content: Some(upstream_body_str.clone()),
+                                billing_detail: None,
+                                hint_category: Some("聊天"),
+                                pending_log_id,
+                                billing_model_hint: None,
+                                db_model: db_model.as_ref(),
+                                client_msg: Some(&err_response),
+                                pre_deducted: 0.0,
+                                pre_deduct_gift: 0.0,
+                            })
+                            .await;
+                        return (pending_log_id, Err(err));
                     }
 
                     let usage_tokens = usage_extractor::parse_usage(&response_content_str);
@@ -1084,7 +981,6 @@ pub async fn responses_create(
                         None,
                         pending_log_id,
                         db_model.as_ref(),
-                        &role,
                         Some("聊天"),
                     )
                     .await;
@@ -1093,17 +989,14 @@ pub async fn responses_create(
                         Err(e) => return (pending_log_id, Err(e)),
                     };
 
-                    if usage_tokens.web_search > 0 {
-                        features.web_search = Some(usage_tokens.web_search);
-                    }
+                    usage_extractor::enrich_features_from_usage(&mut features, &usage_tokens);
 
                     let (quota_used, detail) = crate::relay::calculate_relay_cost(
                         &state,
                         db_model.as_ref(),
                         db_rule.as_mut(),
                         &channel,
-                        discount,
-                        &model_discounts,
+                        &ctx_c,
                         &usage_tokens,
                         &features,
                         mapping_source.as_deref(),
@@ -1310,8 +1203,9 @@ fn transform_chat_response(response: &str, target_type: &str, model: &str) -> St
 
 // ── 辅助提炼函数（精简冗余、解耦核心流程） ──────────────────────────
 
-/// 聊天上游失败：仅首次落库（全失败保留子渠 1）；成功路径另写成功子渠 yid，不受此快照影响
-async fn chat_upstream_fail(
+/// 上游失败：同步记账后走统一 HA 入口（与 image / responses 同构；非首次由 reinstate 还原 first_fail）
+async fn chat_on_upstream_fail(
+    ha: &mut crate::relay::ha::HaAttempt,
     state: &Arc<AppState>,
     token: &ApiToken,
     channel: &crate::models::Channel,
@@ -1324,154 +1218,33 @@ async fn chat_upstream_fail(
     request_content_str: &str,
     response_content_str: Option<String>,
     upstream_body_str: &str,
-    ep_tag: Option<String>,
-    pending_log_id: Option<i64>,
-    db_model: Option<crate::models::Model>,
-    failover_on: bool,
-    exclude_aids: &mut Vec<String>,
-    first_fail: &mut Option<crate::relay::ha::FirstUpstreamFail>,
-    last_err: &mut AppError,
-    had_upstream: &mut bool,
+    db_model: Option<&crate::models::Model>,
     upstream_url: Option<&str>,
 ) -> bool {
-    *had_upstream = true;
-    let masked_url =
-        upstream_url.map(|u| crate::relay::forward::mask_key_in_string(u, &channel.api_key));
-    let is_first =
-        crate::relay::ha::remember_first(first_fail, channel, status, display_err, masked_url);
-    if is_first {
-        *last_err = proxy::upstream_fail(status, display_err);
-    }
-    let failing_over = crate::relay::ha::try_failover(
+    // status/display_err 已由调用方解析；response_body 用 display_err，保证日志文案与历史一致
+    let app_err = proxy::record_zero_cost_upstream_fail(proxy::ZeroCostUpstreamFail {
         state,
-        failover_on,
-        channel.group_aid.as_deref(),
-        status,
-        display_err,
-        exclude_aids,
-    );
-    if is_first {
-        record_failed_billing(
-            state,
-            token,
-            channel,
-            model,
-            ep,
-            status,
-            display_err,
-            latency_ms,
-            is_stream,
-            request_content_str,
-            response_content_str,
-            upstream_body_str,
-            ep_tag,
-            pending_log_id,
-            db_model,
-            if failing_over {
-                None
-            } else {
-                channel.group_aid.clone()
-            },
-            failing_over,
-        )
-        .await;
-    }
-    failing_over
-}
-
-/// 上游错误记账。`sync=true` 时等待写库完成（HA failover 续试前必须同步，避免与下一轮争用同一 pending_log_id）。
-async fn record_failed_billing(
-    state: &Arc<AppState>,
-    token: &ApiToken,
-    channel: &crate::models::Channel,
-    model: &str,
-    ep: &str,
-    status_code: u16,
-    error_message: &str,
-    latency_ms: u32,
-    is_stream: i32,
-    request_content_str: &str,
-    response_content_str: Option<String>,
-    upstream_body_str: &str,
-    ep_tag: Option<String>,
-    pending_log_id: Option<i64>,
-    db_model: Option<crate::models::Model>,
-    group_aid: Option<String>,
-    sync: bool,
-) {
-    if let Some(aid) = &group_aid {
-        // 400/422/403 为用户侧错误，不熔断
-        if !matches!(status_code, 400 | 403 | 422) {
-            proxy::trigger_ha_meltdown(state, aid, status_code, error_message);
-        }
-    }
-
-    if sync {
-        proxy::record_and_bill_inner(proxy::BillRecord {
-            state: state,
-            token: token,
-            channel: channel,
-            model: model,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cached_tokens: 0,
-            cost: 0.0,
-            pre_deducted: 0.0,
-            pre_deduct_gift: 0.0,
-            status_code: status_code,
-            endpoint: ep,
-            error_msg: Some(error_message),
-            latency_ms: latency_ms,
-            is_stream: is_stream,
-            request_content: Some(request_content_str.to_string()),
-            response_content: response_content_str,
-            upstream_req_content: Some(upstream_body_str.to_string()),
-            billing_detail: ep_tag,
-            hint_category: Some("聊天"),
-            pending_log_id: pending_log_id,
-            billing_model_hint: None,
-            plugin_tag: None,
-            db_model: db_model.as_ref(),
-        })
-        .await;
-        return;
-    }
-
-    let s = state.clone();
-    let t = token.clone();
-    let ch = channel.clone();
-    let m = model.to_string();
-    let e = ep.to_string();
-    let em = error_message.to_string();
-    let rc = request_content_str.to_string();
-    let uc = upstream_body_str.to_string();
-    tokio::spawn(async move {
-        proxy::record_and_bill_inner(proxy::BillRecord {
-            state: &s,
-            token: &t,
-            channel: &ch,
-            model: &m,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cached_tokens: 0,
-            cost: 0.0,
-            pre_deducted: 0.0,
-            pre_deduct_gift: 0.0,
-            status_code: status_code,
-            endpoint: &e,
-            error_msg: Some(&em),
-            latency_ms: latency_ms,
-            is_stream: is_stream,
-            request_content: Some(rc.clone()),
-            response_content: response_content_str,
-            upstream_req_content: Some(uc),
-            billing_detail: ep_tag,
-            hint_category: Some("聊天"),
-            pending_log_id: pending_log_id,
-            billing_model_hint: None,
-            plugin_tag: None,
-            db_model: db_model.as_ref(),
-        })
-        .await;
-    });
+        token,
+        channel,
+        model,
+        prefer_http_status: Some(status),
+        endpoint: ep,
+        latency_ms,
+        is_stream,
+        request_content: request_content_str.to_string(),
+        response_body: display_err.to_string(),
+        response_content: response_content_str,
+        upstream_req_content: Some(upstream_body_str.to_string()),
+        billing_detail: None,
+        hint_category: Some("聊天"),
+        pending_log_id: ha.pending_log_id,
+        billing_model_hint: None,
+        db_model,
+        client_msg: Some(display_err),
+        pre_deducted: 0.0,
+        pre_deduct_gift: 0.0,
+    })
+    .await;
+    ha.on_spawn_result_err(state, channel, app_err, upstream_url)
+        .await
 }

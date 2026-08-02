@@ -100,12 +100,16 @@ const UserLevels: React.FC = () => {
       title: t('user_levels.discount'),
       dataIndex: 'discount',
       key: 'discount',
-      render: (val: number) => {
+      render: (val: number, record: UserLevel) => {
         const off = Math.round((1 - val) * 100);
         const up = Math.round((val - 1) * 100);
+        const dt = record.discount_type ?? 0;
         return (
-          <Space>
+          <Space wrap>
             <Text>{val.toFixed(2)}x</Text>
+            {dt === 2 && <Tag color="blue">等级折扣</Tag>}
+            {dt === 1 && <Tag color="cyan">全站折扣</Tag>}
+            {dt === 0 && <Tag color="default">系统融合</Tag>}
             {off > 0 && <Tag color="green">-{off}% (优惠)</Tag>}
             {up > 0 && <Tag color="volcano">+{up}% (涨价)</Tag>}
           </Space>
@@ -214,8 +218,11 @@ const UserLevels: React.FC = () => {
                   <Tag color="blue">{record.user_count || 0}</Tag>
                 </CardRow>
                 <CardRow label="折扣倍率">
-                  <Space>
+                  <Space wrap>
                     <Text>{record.discount.toFixed(2)}x</Text>
+                    {record.discount_type === 2 && <Tag color="blue">等级折扣</Tag>}
+                    {record.discount_type === 1 && <Tag color="cyan">全站折扣</Tag>}
+                    {record.discount_type === 0 && <Tag color="default">系统融合</Tag>}
                     {off > 0 && <Tag color="green">-{off}%</Tag>}
                     {up > 0 && <Tag color="volcano">+{up}%</Tag>}
                   </Space>

@@ -61,7 +61,7 @@
   "contact_phone": "전화번호",
   "contact_address": "주소",
   "contact_tip": "힌트",
-  "contact_tip_desc": "관리자 백엔드 「포털 관리 → 컬럼 관리」에서 연락처 정보를 입력하십시오",
+  "contact_tip_desc": "관리자 「사이트 포털 → 포털 관리」에서 연락처를 설정하세요",
   "contact_social": "소셜 미디어",
   "models_filter_tasks": "기능 유형",
   "models_filter_providers": "서비스 제공업체",

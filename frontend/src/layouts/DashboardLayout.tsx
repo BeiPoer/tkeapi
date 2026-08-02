@@ -14,7 +14,9 @@ import {
 } from '../utils/notificationPrefs';
 import { Sidebar as SidebarIcon } from 'lucide-react';
 import request from '../utils/request';
+import { persistUserLanguagePreference } from '../utils/language';
 import useSettingsStore from '../store/settings';
+import { hasAdminChildMenuPermission } from '../constants/adminMenuPermissions';
 import { Layout, Menu, Button, Space, Typography, ConfigProvider, theme, Grid } from 'antd';
 import {
   DashboardOutlined,
@@ -115,13 +117,6 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
     }
   }, [isLoggedIn]);
 
-  // 站点默认语言：仅在用户从未手动切换过语言时自动应用
-  useEffect(() => {
-    if (site?.default_language && !localStorage.getItem('i18nextLng')) {
-      i18n.changeLanguage(site.default_language);
-    }
-  }, [site?.default_language]);
-
   const fetchCurrentUser = async () => {
     try {
       const resp: any = await request.get('/user/profile');
@@ -151,7 +146,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
 
   const changeLanguage = (lng: string) => {
     i18n.changeLanguage(lng);
-    localStorage.setItem('i18nextLng', lng);
+    persistUserLanguagePreference(lng);
   };
 
   /** 语言代码 → 显示名称映射 */
@@ -226,6 +221,11 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
         return t('playground:title');
       }
     }
+    if (item.key === '/playground-2026') {
+      if (i18n.exists('playground_2026:title')) {
+        return t('playground_2026:title');
+      }
+    }
     const i18nKey = `menu.${item.key.substring(1).replace(/-/g, '_')}`;
     if (i18n.exists(i18nKey)) {
       return t(i18nKey);
@@ -274,6 +274,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
       const defaultItems = [
         { key: '/dashboard', label_zh: '系统概览', label_en: 'Dashboard', icon: 'DashboardOutlined', enabled: true, sort_order: 1, allowed_levels: 'all' },
         { key: '/playground', label_zh: '创作中心', label_en: 'Playground', icon: 'ExperimentOutlined', enabled: true, sort_order: 2, allowed_levels: 'all' },
+        { key: '/playground-2026', label_zh: '创作中心2026', label_en: 'Playground 2026', icon: 'ExperimentOutlined', enabled: true, sort_order: 2.5, allowed_levels: 'all' },
         { key: '/tokens', label_zh: '令牌管理', label_en: 'Tokens', icon: 'KeyOutlined', enabled: true, sort_order: 4, allowed_levels: 'all' },
         { key: '/logs', label_zh: '日志记录', label_en: 'Logs', icon: 'HistoryOutlined', enabled: true, sort_order: 5, allowed_levels: 'all' },
         { key: '/task-logs', label_zh: '任务列表', label_en: 'Task Logs', icon: 'ScheduleOutlined', enabled: true, sort_order: 6, allowed_levels: 'all' },
@@ -282,7 +283,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
         { key: '/advanced-marketing', label_zh: '高级推广', label_en: 'Advanced Marketing', icon: 'TeamOutlined', enabled: true, sort_order: 10, allowed_levels: 'all' },
 
         { key: '/wallet', label_zh: '我的钱包', label_en: 'Wallet', icon: 'WalletOutlined', enabled: true, sort_order: 11, allowed_levels: 'all' },
-        { key: '/ark-video-monitor', label_zh: '视频监控', label_en: 'Ark Video Monitor', icon: 'VideoCameraOutlined', enabled: false, sort_order: 11.5, allowed_levels: 'all' },
+        { key: '/ark-video-monitor', label_zh: '视频监控', label_en: 'Ark Video Monitor', icon: 'VideoCameraOutlined', enabled: true, sort_order: 11.5, allowed_levels: 'all' },
         { key: '/profile', label_zh: '个人中心', label_en: 'Profile', icon: 'UserOutlined', enabled: true, sort_order: 12, allowed_levels: 'all' },
       ];
 
@@ -308,6 +309,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
 
         if (item.key === '/moderation-query') return;
         if (item.key === '/playground' && !isPluginVisibleForUser('playground')) return;
+        if (item.key === '/playground-2026' && !isPluginVisibleForUser('playground_2026')) return;
         if (item.key === '/assets' && !isPluginVisibleForUser('asset_manager')) return;
         if (item.key === '/assets-intl' && !isPluginVisibleForUser('asset_manager_intl')) return;
         if (item.key === '/advanced-marketing' && !isPluginVisibleForUser('team_marketing')) return;
@@ -315,16 +317,21 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
         if (item.key === '/ark-video-monitor' && !isPluginVisibleForUser('volcengine_ark_monitor')) return;
 
         let labelNode;
-        if (item.key === '/playground') {
+        if (item.key === '/playground' || item.key === '/playground-2026') {
           const isImpersonating = !!sessionStorage.getItem('token');
+          const targetPath = item.key;
           labelNode = isImpersonating ? (
             <a onClick={(e) => {
               e.preventDefault();
               const impToken = sessionStorage.getItem('token');
-              window.location.href = `${window.location.origin}/login?token=${impToken}&impersonate=1&redirect=/playground`;
+              if (!impToken) return;
+              const handoffKey = `imp_handoff_${crypto.randomUUID()}`;
+              localStorage.setItem(handoffKey, impToken);
+              const safePath = targetPath.startsWith('/') && !targetPath.startsWith('//') ? targetPath : '/dashboard';
+              window.location.href = `${window.location.origin}/login?impersonate=1&handoff=${encodeURIComponent(handoffKey)}&redirect=${encodeURIComponent(safePath)}`;
             }}>{getMenuLabel(item)}</a>
           ) : (
-            <Link to="/playground">{getMenuLabel(item)}</Link>
+            <Link to={targetPath}>{getMenuLabel(item)}</Link>
           );
         } else {
           labelNode = <Link to={item.key}>{getMenuLabel(item)}</Link>;
@@ -406,17 +413,27 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
       }
 
       if (!isSubAdmin || user?.permissions?.includes('logs')) {
-        menuItems.push({
-          key: '/admin0755/logs',
-          icon: <HistoryOutlined style={{ fontSize: '18px' }} />,
-          label: <Link to="/admin0755/logs">{t('menu.usage_logs')}</Link>,
-        });
+        if (
+          !isSubAdmin ||
+          hasAdminChildMenuPermission(user?.permissions, 'logs', 'logs.usage', false)
+        ) {
+          menuItems.push({
+            key: '/admin0755/logs',
+            icon: <HistoryOutlined style={{ fontSize: '18px' }} />,
+            label: <Link to="/admin0755/logs">{t('menu.usage_logs')}</Link>,
+          });
+        }
 
-        menuItems.push({
-          key: '/admin0755/task-logs',
-          icon: <ScheduleOutlined style={{ fontSize: '18px' }} />,
-          label: <Link to="/admin0755/task-logs">{t('menu.task_logs')}</Link>,
-        });
+        if (
+          !isSubAdmin ||
+          hasAdminChildMenuPermission(user?.permissions, 'logs', 'logs.tasks', false)
+        ) {
+          menuItems.push({
+            key: '/admin0755/task-logs',
+            icon: <ScheduleOutlined style={{ fontSize: '18px' }} />,
+            label: <Link to="/admin0755/task-logs">{t('menu.task_logs')}</Link>,
+          });
+        }
       }
     }
   }
@@ -427,56 +444,57 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
       if (!user.permissions) return false;
       return user.permissions.includes(key);
     };
+    const hasChildMenu = (parentKey: string, childKey: string) =>
+      hasAdminChildMenuPermission(user?.permissions, parentKey, childKey, isSuperAdmin);
 
     if (hasPermission('dashboard')) {
       // dashboard is already at index 0, but we might want to consolidate menu items here
     }
 
     if (hasPermission('channels')) {
-      const channelChildren = [
-        {
+      const channelChildren = [];
+      if (hasChildMenu('channels', 'channels.groups')) {
+        channelChildren.push({
           key: '/admin0755/channels',
           label: <Link to="/admin0755/channels">{t('menu.channel_groups', '模型渠道分组')}</Link>,
-        },
-        {
-          key: '/admin0755/channel-configs',
-          label: <Link to="/admin0755/channel-configs">{t('menu.channel_configs', '上游渠道配置')}</Link>,
-        },
-      ];
-      /*
-      if (hasPermission('upstreams') || isSuperAdmin) {
-        channelChildren.push({
-          key: '/admin0755/upstreams',
-          label: <Link to="/admin0755/upstreams">{t('menu.upstreams', '上游管理')}</Link>,
         });
       }
-      */
-      menuItems.push({
-        key: 'channels-management-group',
-        icon: <ControlOutlined style={{ fontSize: '18px' }} />,
-        label: t('menu.channels'),
-        children: channelChildren
-      });
+      if (hasChildMenu('channels', 'channels.configs')) {
+        channelChildren.push({
+          key: '/admin0755/channel-configs',
+          label: <Link to="/admin0755/channel-configs">{t('menu.channel_configs', '上游渠道配置')}</Link>,
+        });
+      }
+      if (channelChildren.length > 0) {
+        menuItems.push({
+          key: 'channels-management-group',
+          icon: <ControlOutlined style={{ fontSize: '18px' }} />,
+          label: t('menu.channels'),
+          children: channelChildren
+        });
+      }
     }
 
     if (hasPermission('models') || isSuperAdmin) {
       const modelChildren = [];
 
-      if (hasPermission('models')) {
-        modelChildren.push(
-          {
-            key: '/admin0755/models',
-            label: <Link to="/admin0755/models">{t('menu.model_list')}</Link>,
-          },
-          {
-            key: '/admin0755/billing-rules',
-            label: <Link to="/admin0755/billing-rules">{t('menu.billing_rules')}</Link>,
-          },
-          {
-            key: '/admin0755/forward-rules',
-            label: <Link to="/admin0755/forward-rules">{t('menu.forward_rules')}</Link>,
-          }
-        );
+      if (hasChildMenu('models', 'models.list')) {
+        modelChildren.push({
+          key: '/admin0755/models',
+          label: <Link to="/admin0755/models">{t('menu.model_list')}</Link>,
+        });
+      }
+      if (hasChildMenu('models', 'models.billing_rules')) {
+        modelChildren.push({
+          key: '/admin0755/billing-rules',
+          label: <Link to="/admin0755/billing-rules">{t('menu.billing_rules')}</Link>,
+        });
+      }
+      if (hasChildMenu('models', 'models.forward_rules')) {
+        modelChildren.push({
+          key: '/admin0755/forward-rules',
+          label: <Link to="/admin0755/forward-rules">{t('menu.forward_rules')}</Link>,
+        });
       }
 
       if (modelChildren.length > 0) {
@@ -490,113 +508,149 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
     }
 
     if (hasPermission('marketing')) {
-      menuItems.push({
-        key: 'marketing-management-group',
-        icon: <NotificationOutlined style={{ fontSize: '18px' }} />,
-        label: t('menu.marketing'),
-        children: [
-          {
-            key: '/admin0755/redemptions',
-            label: <Link to="/admin0755/redemptions">{t('menu.redemptions')}</Link>,
-          },
-          {
-            key: '/admin0755/marketing/registration-gifts',
-            label: <Link to="/admin0755/marketing/registration-gifts">{t('menu.registration_gifts')}</Link>,
-          },
-          {
-            key: '/admin0755/marketing/announcements',
-            label: <Link to="/admin0755/marketing/announcements">{t('menu.announcements', '提示通知')}</Link>,
-          }
-        ]
-      });
+      const marketingChildren = [];
+      if (hasChildMenu('marketing', 'marketing.redemptions')) {
+        marketingChildren.push({
+          key: '/admin0755/redemptions',
+          label: <Link to="/admin0755/redemptions">{t('menu.redemptions')}</Link>,
+        });
+      }
+      if (hasChildMenu('marketing', 'marketing.registration_gifts')) {
+        marketingChildren.push({
+          key: '/admin0755/marketing/registration-gifts',
+          label: <Link to="/admin0755/marketing/registration-gifts">{t('menu.registration_gifts')}</Link>,
+        });
+      }
+      if (hasChildMenu('marketing', 'marketing.announcements')) {
+        marketingChildren.push({
+          key: '/admin0755/marketing/announcements',
+          label: <Link to="/admin0755/marketing/announcements">{t('menu.announcements', '提示通知')}</Link>,
+        });
+      }
+      if (marketingChildren.length > 0) {
+        menuItems.push({
+          key: 'marketing-management-group',
+          icon: <NotificationOutlined style={{ fontSize: '18px' }} />,
+          label: t('menu.marketing'),
+          children: marketingChildren
+        });
+      }
     }
 
 
     if (hasPermission('users')) {
-      const userItems = [
-        {
+      const userItems = [];
+      if (hasChildMenu('users', 'users.list')) {
+        userItems.push({
           key: '/admin0755/users',
           label: <Link to="/admin0755/users">{t('menu.user_list')}</Link>,
-        },
-        {
+        });
+      }
+      if (hasChildMenu('users', 'users.admins')) {
+        userItems.push({
           key: '/admin0755/admins',
           label: <Link to="/admin0755/admins">{t('menu.admin_list')}</Link>,
-        },
-        {
+        });
+      }
+      if (hasChildMenu('users', 'users.levels')) {
+        userItems.push({
           key: '/admin0755/user-levels',
           label: <Link to="/admin0755/user-levels">{t('menu.user_levels')}</Link>,
-        }
-      ];
-
-      if (hasPermission('admin_groups')) {
+        });
+      }
+      if (hasChildMenu('users', 'admin_groups')) {
         userItems.push({
           key: '/admin0755/admin-groups',
           label: <Link to="/admin0755/admin-groups">{t('menu.admin_groups')}</Link>,
         });
       }
 
-      menuItems.push({
-        key: 'user-management-group',
-        icon: <TeamOutlined style={{ fontSize: '18px' }} />,
-        label: t('menu.users'),
-        children: userItems
-      });
+      if (userItems.length > 0) {
+        menuItems.push({
+          key: 'user-management-group',
+          icon: <TeamOutlined style={{ fontSize: '18px' }} />,
+          label: t('menu.users'),
+          children: userItems
+        });
+      }
     }
 
     if (hasPermission('finance')) {
-      menuItems.push({
-        key: 'finance-management-group',
-        icon: <WalletOutlined style={{ fontSize: '18px' }} />,
-        label: t('menu.finance'),
-        children: [
-          {
-            key: '/admin0755/finance/recharges',
-            label: <Link to="/admin0755/finance/recharges">{t('menu.finance_recharges')}</Link>,
-          },
-          {
-            key: '/admin0755/finance/gifts',
-            label: <Link to="/admin0755/finance/gifts">{t('menu.finance_gifts')}</Link>,
-          },
-          {
-            key: '/admin0755/finance/orders',
-            label: <Link to="/admin0755/finance/orders">{t('menu.finance_orders')}</Link>,
-          },
-          {
-            key: '/admin0755/finance/analysis',
-            label: <Link to="/admin0755/finance/analysis">{t('menu.finance_analysis', '财务数据分析')}</Link>,
-          }
-        ]
-      });
+      const financeChildren = [];
+      if (hasChildMenu('finance', 'finance.recharges')) {
+        financeChildren.push({
+          key: '/admin0755/finance/recharges',
+          label: <Link to="/admin0755/finance/recharges">{t('menu.finance_recharges')}</Link>,
+        });
+      }
+      if (hasChildMenu('finance', 'finance.gifts')) {
+        financeChildren.push({
+          key: '/admin0755/finance/gifts',
+          label: <Link to="/admin0755/finance/gifts">{t('menu.finance_gifts')}</Link>,
+        });
+      }
+      if (hasChildMenu('finance', 'finance.orders')) {
+        financeChildren.push({
+          key: '/admin0755/finance/orders',
+          label: <Link to="/admin0755/finance/orders">{t('menu.finance_orders')}</Link>,
+        });
+      }
+      if (hasChildMenu('finance', 'finance.analysis')) {
+        financeChildren.push({
+          key: '/admin0755/finance/analysis',
+          label: <Link to="/admin0755/finance/analysis">{t('menu.finance_analysis', '财务数据分析')}</Link>,
+        });
+      }
+      if (financeChildren.length > 0) {
+        menuItems.push({
+          key: 'finance-management-group',
+          icon: <WalletOutlined style={{ fontSize: '18px' }} />,
+          label: t('menu.finance'),
+          children: financeChildren
+        });
+      }
     }
 
     if (hasPermission('settings')) {
-      menuItems.push({
-        key: 'settings-group',
-        icon: <SettingOutlined style={{ fontSize: '18px' }} />,
-        label: t('menu.settings'),
-        children: [
-          {
-            key: '/admin0755/settings?tab=basic',
-            label: <Link to="/admin0755/settings?tab=basic">{t('menu.basic_settings')}</Link>,
-          },
-          {
-            key: '/admin0755/payment-settings',
-            label: <Link to="/admin0755/payment-settings">{t('menu.payment_settings')}</Link>,
-          },
-          {
-            key: '/admin0755/message-notification',
-            label: <Link to="/admin0755/message-notification">{t('menu.message_notification')}</Link>,
-          },
-          {
-            key: '/admin0755/oauth-settings',
-            label: <Link to="/admin0755/oauth-settings">{t('menu.oauth_settings')}</Link>,
-          },
-          {
-            key: '/admin0755/settings?tab=database',
-            label: <Link to="/admin0755/settings?tab=database">{t('menu.database_settings')}</Link>,
-          }
-        ]
-      });
+      const settingsChildren = [];
+      if (hasChildMenu('settings', 'settings.basic')) {
+        settingsChildren.push({
+          key: '/admin0755/settings?tab=basic',
+          label: <Link to="/admin0755/settings?tab=basic">{t('menu.basic_settings')}</Link>,
+        });
+      }
+      if (hasChildMenu('settings', 'settings.payment')) {
+        settingsChildren.push({
+          key: '/admin0755/payment-settings',
+          label: <Link to="/admin0755/payment-settings">{t('menu.payment_settings')}</Link>,
+        });
+      }
+      if (hasChildMenu('settings', 'settings.message_notification')) {
+        settingsChildren.push({
+          key: '/admin0755/message-notification',
+          label: <Link to="/admin0755/message-notification">{t('menu.message_notification')}</Link>,
+        });
+      }
+      if (hasChildMenu('settings', 'settings.oauth')) {
+        settingsChildren.push({
+          key: '/admin0755/oauth-settings',
+          label: <Link to="/admin0755/oauth-settings">{t('menu.oauth_settings')}</Link>,
+        });
+      }
+      if (hasChildMenu('settings', 'settings.database')) {
+        settingsChildren.push({
+          key: '/admin0755/settings?tab=database',
+          label: <Link to="/admin0755/settings?tab=database">{t('menu.database_settings')}</Link>,
+        });
+      }
+      if (settingsChildren.length > 0) {
+        menuItems.push({
+          key: 'settings-group',
+          icon: <SettingOutlined style={{ fontSize: '18px' }} />,
+          label: t('menu.settings'),
+          children: settingsChildren
+        });
+      }
     }
 
     const hasAnyPluginPermission = isSuperAdmin || hasPermission('plugins') || user?.permissions?.some((p: string) => p.startsWith('plugin:'));
@@ -690,6 +744,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
     else if (location.pathname === '/advanced-marketing') pageName = t('menu.advanced_marketing', '团队营销管理') as string;
 
     else if (location.pathname === '/playground') pageName = (i18n.exists('playground:title') ? t('playground:title') : t('menu.playground', '创作中心')) as string;
+    else if (location.pathname === '/playground-2026' || location.pathname.startsWith('/playground-2026/')) pageName = (i18n.exists('playground_2026:title') ? t('playground_2026:title') : t('menu.playground_2026', '创作中心2026')) as string;
   }
 
   useEffect(() => {
@@ -897,9 +952,9 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                   icon={<InfoCircleOutlined style={{ fontSize: '18px' }} />}
                   style={{ color: themeMode === 'light' ? 'rgba(0,0,0,0.65)' : 'rgba(255,255,255,0.65)', width: '100%', display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'flex-start' }}
                   onClick={showSystemAbout}
-                  title={`${t('menu.system_about')}${settings?.is_open_source ? '（开源版）' : ''}`}
+                  title={`${t('menu.system_about')}${settings?.is_open_source ? '（开源版）' : '（商业版）'}`}
                 >
-                  {(!collapsed) && <span style={{ marginLeft: 8 }}>{t('menu.system_about')}{settings?.is_open_source ? '（开源版）' : ''}</span>}
+                  {(!collapsed) && <span style={{ marginLeft: 8 }}>{t('menu.system_about')}{settings?.is_open_source ? '（开源版）' : '（商业版）'}</span>}
                 </Button>
               </div>
             )}
@@ -907,19 +962,35 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
         </Sider>
         <Layout style={{
           marginLeft: (screens.xs || collapsed) ? 0 : 0,
-          background: themeMode === 'light' ? '#f0f4f9' : '#000',
+          background: 'var(--dashboard)',
+          position: 'relative',
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
         }}>
-          <Header style={{
-            padding: '0 12px',
-            background: themeMode === 'light' ? '#ffffff' : '#000000',
-            height: screens.xs ? 48 : 56,
-            lineHeight: (screens.xs ? 48 : 56) + 'px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            paddingRight: screens.xs ? 8 : 24,
-            borderBottom: themeMode === 'light' ? '1px solid #e4e4e7' : '1px solid #1f1f23'
-          }}>
+          <Header
+            className="dashboard-top-nav-glass"
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              zIndex: 20,
+              padding: '0 12px',
+              background: isLight ? 'rgba(255, 255, 255, 0.62)' : 'rgba(0, 0, 0, 0.48)',
+              backdropFilter: 'blur(18px) saturate(180%)',
+              WebkitBackdropFilter: 'blur(18px) saturate(180%)',
+              height: screens.xs ? 48 : 56,
+              lineHeight: (screens.xs ? 48 : 56) + 'px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              paddingRight: screens.xs ? 8 : 24,
+              borderBottom: isLight
+                ? '1px solid rgba(228, 228, 231, 0.45)'
+                : '1px solid rgba(255, 255, 255, 0.08)',
+            }}
+          >
             <div style={{ display: 'flex', alignItems: 'center' }}>
               <Button
                 type="text"
@@ -961,7 +1032,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                 <Tooltip title={t('menu.model_marketplace', '模型广场')} placement="bottom">
                   <Button
                     type="text"
-                    href="/models"
+                    href="/home/models"
                     icon={
                       <svg
                         width="20"
@@ -989,7 +1060,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                     onClick={(e) => {
                       if (!e.metaKey && !e.ctrlKey) {
                         e.preventDefault();
-                        navigate('/models');
+                        navigate('/home/models');
                       }
                     }}
                   >
@@ -998,31 +1069,50 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                 </Tooltip>
               )}
 
-              <Tooltip title={t('menu.relay_api', 'API教程')} placement="bottom">
-                <Button
-                  type="text"
-                  href="/docs"
-                  icon={<RocketOutlined style={{ fontSize: '16px', verticalAlign: 'middle', transform: 'translateY(1.5px)' }} />}
-                  style={{
-                    color: themeMode === 'light' ? '#1f2937' : '#fff',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    fontSize: 14,
-                    fontWeight: 500,
-                    height: 40,
-                    padding: '0 12px',
-                  }}
-                  onClick={(e) => {
-                    if (!e.metaKey && !e.ctrlKey) {
-                      e.preventDefault();
-                      navigate('/docs');
+              {isPluginVisibleForUser('docs_api') && (
+                <Tooltip title={t('menu.relay_api', 'API教程')} placement="bottom">
+                  <Button
+                    type="text"
+                    href="/docs"
+                    icon={
+                      <svg
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        xmlns="http://www.w3.org/2000/svg"
+                        style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}
+                      >
+                        <rect x="8" y="2.5" width="2.6" height="5.8" rx="1.2" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
+                        <rect x="13.4" y="2.5" width="2.6" height="5.8" rx="1.2" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
+                        <path d="M4.5 7.5H19.5V10H4.5V7.5Z" fill={themeMode === 'light' ? '#e0e0e0' : '#2e2e2e'} />
+                        <path d="M5 10H12V21C7.8 21 5 18.6 5 15.2V10Z" fill={themeMode === 'light' ? '#b0b0b0' : '#555555'} />
+                        <path d="M12 10H19V15.2C19 18.6 16.2 21 12 21V10Z" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
+                        <path d="M8.5 12.2V16.8" stroke={themeMode === 'light' ? '#757575' : '#2e2e2e'} strokeWidth="1.4" strokeLinecap="round" />
+                        <path d="M15.5 12.2V16.8" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="1.4" strokeLinecap="round" />
+                      </svg>
                     }
-                  }}
-                >
-                  <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{t('menu.relay_api', 'API教程')}</span>
-                </Button>
-              </Tooltip>
+                    style={{
+                      color: themeMode === 'light' ? '#1f2937' : '#fff',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      fontSize: 14,
+                      fontWeight: 500,
+                      height: 40,
+                      padding: '0 12px',
+                    }}
+                    onClick={(e) => {
+                      if (!e.metaKey && !e.ctrlKey) {
+                        e.preventDefault();
+                        navigate('/docs');
+                      }
+                    }}
+                  >
+                    <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{t('menu.relay_api', 'API教程')}</span>
+                  </Button>
+                </Tooltip>
+              )}
 
               {(enableThemeToggle || !isUserEnd) && (
                 <Tooltip title={themeMode === 'light' ? t('header.switch_dark_mode', '切换暗色模式') : t('header.switch_light_mode', '切换亮色模式')} placement="bottom" color={themeMode === 'light' ? '#fff' : '#2b2b2b'} styles={{ container: { color: themeMode === 'light' ? '#1f2937' : '#fff' } }}>
@@ -1109,12 +1199,16 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
 
           </Header>
           <Content style={{
-            margin: screens.xs ? '8px' : '12px',
+            margin: screens.xs ? '0 8px 8px' : '0 12px 12px',
+            // 顶栏浮层 + 原上边距/内边距，滚动时内容穿过毛玻璃
             padding: screens.xs ? 12 : 16,
+            paddingTop: (screens.xs ? 48 : 56) + (screens.xs ? 8 : 12) + (screens.xs ? 12 : 16),
             minHeight: 280,
             background: 'transparent',
             borderRadius: 8,
-            overflow: 'auto'
+            overflow: 'auto',
+            flex: 1,
+            height: '100%',
           }}>
             <Outlet />
           </Content>

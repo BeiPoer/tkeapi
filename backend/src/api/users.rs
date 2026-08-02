@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -481,7 +481,14 @@ pub async fn update_user(
         .await?;
     }
 
+    let balance_changed = (user.balance - old_balance).abs() > 1e-9
+        || (user.gift_balance - old_gift_balance).abs() > 1e-9;
+
     tx.commit().await?;
+
+    if balance_changed {
+        crate::services::notification::spawn_low_balance_check(Arc::clone(&state), id.clone());
+    }
 
     Ok(Json(user))
 }
@@ -519,7 +526,15 @@ pub async fn delete_user(
     .await
     .unwrap_or_default();
 
-    if !assets.is_empty() || !pg_assets.is_empty() {
+    let pg2026_assets: Vec<String> = sqlx::query_scalar::<_, String>(
+        &state.db.format_query("SELECT tos_object_key FROM playground_2026_assets WHERE user_id = ? AND tos_object_key IS NOT NULL AND tos_object_key != ''")
+    )
+    .bind(&id)
+    .fetch_all(&state.db.pool)
+    .await
+    .unwrap_or_default();
+
+    if !assets.is_empty() || !pg_assets.is_empty() || !pg2026_assets.is_empty() {
         // 并发生成 TOS 文件删除任务
         let mut delete_tasks = Vec::new();
 
@@ -582,6 +597,35 @@ pub async fn delete_user(
                             Err(e) => {
                                 tracing::warn!(
                                     "同步清理用户数据: playground_assets TOS 文件删除失败: {} - {}",
+                                    tos_key,
+                                    e
+                                );
+                            }
+                        }
+                    });
+                    delete_tasks.push(task);
+                }
+            }
+        }
+
+        // 2b. 处理 playground_2026_assets (创作中心2026) 关联的 TOS 文件删除
+        if !pg2026_assets.is_empty() {
+            if let Some(tos_config) =
+                crate::api::plugins::get_tos_config(&state, "playground_2026").await
+            {
+                for tos_key in pg2026_assets {
+                    let tos_config = tos_config.clone();
+                    let task = tokio::spawn(async move {
+                        match crate::services::tos::delete_file(&tos_config, &tos_key).await {
+                            Ok(()) => {
+                                tracing::info!(
+                                    "同步清理用户数据: playground_2026_assets TOS 文件删除成功: {}",
+                                    tos_key
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "同步清理用户数据: playground_2026_assets TOS 文件删除失败: {} - {}",
                                     tos_key,
                                     e
                                 );
@@ -810,6 +854,9 @@ pub async fn recharge_user(
     }
 
     tx.commit().await?;
+
+    // 扣减可能触发提醒；充值回升需清除本轮标记
+    crate::services::notification::spawn_low_balance_check(Arc::clone(&state), id.clone());
 
     let updated_user: User = sqlx::query_as(&state.db.format_query(
         "SELECT u.*, ul.name as level_name FROM users u LEFT JOIN user_levels ul ON u.user_group = ul.group_key WHERE u.id = ?"

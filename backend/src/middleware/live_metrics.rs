@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -62,7 +62,9 @@ impl GlobalMetrics {
             .as_secs()
     }
 
-    /// 跨秒时清零过期桶（CAS，无锁）
+    /// 跨秒时清零即将复用的桶（CAS，无锁）。
+    /// 进入秒 `sec` 时清空 `sec % WINDOW`，该槽原先存的是 `sec - WINDOW` 的数据；
+    /// 不得清空 `now-1`（上一秒），否则 RPM/TPM 会退化成仅当前秒。
     #[inline]
     fn roll_to(&self, now: u64) {
         let prev = self.epoch_sec.load(ATOMIC);
@@ -74,33 +76,50 @@ impl GlobalMetrics {
             .compare_exchange(prev, now, ATOMIC, ATOMIC)
             .is_ok()
         {
-            let gap = (now - prev).min(WINDOW_SECS as u64);
-            for i in 1..=gap {
-                let sec = now.wrapping_sub(i);
-                let idx = (sec as usize) % WINDOW_SECS;
-                self.req_buckets[idx].store(0, ATOMIC);
-                self.tok_buckets[idx].store(0, ATOMIC);
+            if now > prev {
+                let gap = (now - prev).min(WINDOW_SECS as u64);
+                for i in 1..=gap {
+                    let sec = prev + i;
+                    let idx = (sec as usize) % WINDOW_SECS;
+                    self.req_buckets[idx].store(0, ATOMIC);
+                    self.tok_buckets[idx].store(0, ATOMIC);
+                }
+            } else {
+                for b in &self.req_buckets {
+                    b.store(0, ATOMIC);
+                }
+                for b in &self.tok_buckets {
+                    b.store(0, ATOMIC);
+                }
             }
         }
     }
 
     #[inline]
-    pub fn on_request(&self) {
-        let now = Self::now_sec();
+    fn on_request_at(&self, now: u64) {
         self.roll_to(now);
         let idx = (now as usize) % WINDOW_SECS;
         self.req_buckets[idx].fetch_add(1, ATOMIC);
     }
 
     #[inline]
-    pub fn on_tokens(&self, n: u64) {
+    pub fn on_request(&self) {
+        self.on_request_at(Self::now_sec());
+    }
+
+    #[inline]
+    fn on_tokens_at(&self, now: u64, n: u64) {
         if n == 0 {
             return;
         }
-        let now = Self::now_sec();
         self.roll_to(now);
         let idx = (now as usize) % WINDOW_SECS;
         self.tok_buckets[idx].fetch_add(n, ATOMIC);
+    }
+
+    #[inline]
+    pub fn on_tokens(&self, n: u64) {
+        self.on_tokens_at(Self::now_sec(), n);
     }
 
     #[inline]
@@ -110,15 +129,20 @@ impl GlobalMetrics {
     }
 
     #[inline]
-    pub fn snapshot(&self) -> MetricsSnapshot {
-        let now = Self::now_sec();
+    fn snapshot_at(&self, now: u64) -> MetricsSnapshot {
         self.roll_to(now);
         MetricsSnapshot {
             qps: self.req_buckets[(now as usize) % WINDOW_SECS].load(ATOMIC),
+            // 近 60 秒求和 = 按分钟（RPM / TPM）
             rpm: self.req_buckets.iter().map(|b| b.load(ATOMIC)).sum(),
             tpm: self.tok_buckets.iter().map(|b| b.load(ATOMIC)).sum(),
             task: self.inflight.load(ATOMIC),
         }
+    }
+
+    #[inline]
+    pub fn snapshot(&self) -> MetricsSnapshot {
+        self.snapshot_at(Self::now_sec())
     }
 }
 
@@ -168,6 +192,7 @@ impl UserMetrics {
             .store(GlobalMetrics::now_sec() as i64, ATOMIC);
     }
 
+    /// 与 GlobalMetrics::roll_to 同语义：清空即将复用的环槽，保留近 60 秒窗口。
     #[inline]
     fn roll_to(&self, now: u64) {
         let prev = self.epoch_sec.load(ATOMIC);
@@ -179,12 +204,21 @@ impl UserMetrics {
             .compare_exchange(prev, now, ATOMIC, ATOMIC)
             .is_ok()
         {
-            let gap = (now - prev).min(WINDOW_SECS as u64);
-            for i in 1..=gap {
-                let sec = now.wrapping_sub(i);
-                let idx = (sec as usize) % WINDOW_SECS;
-                self.req_buckets[idx].store(0, ATOMIC);
-                self.tok_buckets[idx].store(0, ATOMIC);
+            if now > prev {
+                let gap = (now - prev).min(WINDOW_SECS as u64);
+                for i in 1..=gap {
+                    let sec = prev + i;
+                    let idx = (sec as usize) % WINDOW_SECS;
+                    self.req_buckets[idx].store(0, ATOMIC);
+                    self.tok_buckets[idx].store(0, ATOMIC);
+                }
+            } else {
+                for b in &self.req_buckets {
+                    b.store(0, ATOMIC);
+                }
+                for b in &self.tok_buckets {
+                    b.store(0, ATOMIC);
+                }
             }
         }
     }

@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -73,13 +73,14 @@ pub async fn create_user_level(
     }
 
     let id = sqlx::query(
-        &state.db.format_query(r#"INSERT INTO user_levels (name, group_key, discount, commission_ratio, invite_reward_inviter, invite_reward_invitee, daily_invite_limit, marketing_enabled, is_default, max_token_count, allow_view_log_details, description, sort_order)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        &state.db.format_query(r#"INSERT INTO user_levels (name, group_key, discount, discount_type, commission_ratio, invite_reward_inviter, invite_reward_invitee, daily_invite_limit, marketing_enabled, is_default, max_token_count, allow_view_log_details, description, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#)
     )
     .bind(&req.name)
     .bind(&req.group_key)
     .bind(req.discount)
+    .bind(req.discount_type.unwrap_or(0))
     .bind(req.commission_ratio.unwrap_or(0.0))
     .bind(req.invite_reward_inviter.unwrap_or(0.0))
     .bind(req.invite_reward_invitee.unwrap_or(0.0))
@@ -154,6 +155,17 @@ pub async fn update_user_level(
                 .format_query("UPDATE user_levels SET discount = ? WHERE id = ?"),
         )
         .bind(discount)
+        .bind(id)
+        .execute(&state.db.pool)
+        .await?;
+    }
+    if let Some(discount_type) = req.discount_type {
+        sqlx::query(
+            &state
+                .db
+                .format_query("UPDATE user_levels SET discount_type = ? WHERE id = ?"),
+        )
+        .bind(discount_type)
         .bind(id)
         .execute(&state.db.pool)
         .await?;

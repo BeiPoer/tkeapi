@@ -6,12 +6,10 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { Card, Form, Input, InputNumber, Button, message, Typography, Space } from 'antd';
+import { Form, Input, InputNumber, Button, message, Typography, Space } from 'antd';
 import { useTranslation } from 'react-i18next';
 import request from '../../utils/request';
 import useSettingsStore from '../../store/settings';
-
-const { Text } = Typography;
 
 const EmailNotification: React.FC = () => {
   const { t } = useTranslation();

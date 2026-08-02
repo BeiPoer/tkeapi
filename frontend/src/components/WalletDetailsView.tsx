@@ -44,7 +44,6 @@ const WalletDetailsView: React.FC<WalletDetailsViewProps> = ({
   currencySymbol: customCurrencySymbol,
   useReferralApi = false,
 }) => {
-  console.log('WalletDetailsView render debug:', { user, recharges, loading });
   const { t } = useTranslation('team_marketing');
   
   // 动态读取主题
@@ -162,9 +161,9 @@ const WalletDetailsView: React.FC<WalletDetailsViewProps> = ({
   const giftRecharges = filteredRecharges.filter((r: any) => (r.wallet_type || 'system') === 'gift');
   const creditRecharges = filteredRecharges.filter((r: any) => (r.wallet_type || 'system') === 'credit');
 
-  const totalSystemRecharge = systemRecharges.reduce((sum, r) => sum + (r.amount > 0 ? r.amount : 0), 0);
-  const totalGiftRecharge = giftRecharges.reduce((sum, r) => sum + (r.amount > 0 ? r.amount : 0), 0);
-  const totalCreditRecharge = creditRecharges.reduce((sum, r) => sum + (r.amount > 0 ? r.amount : 0), 0);
+  const totalSystemRecharge = systemRecharges.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+  const totalGiftRecharge = giftRecharges.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+  const totalCreditRecharge = creditRecharges.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
   
   const systemUsed = user.used_quota || 0;
   const giftUsed = user.gift_used_quota || 0;
@@ -396,7 +395,7 @@ const WalletDetailsView: React.FC<WalletDetailsViewProps> = ({
                 </Col>
                 <Col span={12}>
                   <Card size="small" style={{ background: isLight ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.02)', border: 'none' }}>
-                    <Statistic title={<span style={{ color: isLight ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.45)' }}>{(filterRange && filterRange[0] && filterRange[1]) ? '筛选期内信控调整' : '累计信控调增'}</span>} value={totalCreditRecharge} precision={6} prefix={currencySymbol} valueStyle={statisticValueStyle} />
+                    <Statistic title={<span style={{ color: isLight ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.45)' }}>{(filterRange && filterRange[0] && filterRange[1]) ? '筛选期内信控调整' : '累计信控调整'}</span>} value={totalCreditRecharge} precision={6} prefix={currencySymbol} valueStyle={statisticValueStyle} />
                   </Card>
                 </Col>
               </Row>

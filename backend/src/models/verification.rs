@@ -1,13 +1,16 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
 #![allow(dead_code)]
 use crate::time_system::DbTs;
 use serde::{Deserialize, Serialize};
+
+/// 邮箱/短信验证码统一有效期（分钟），与落库 expires_at、邮件正文保持一致
+pub const VERIFICATION_CODE_EXPIRY_MINUTES: i64 = 5;
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::Type)]
 #[sqlx(rename_all = "snake_case")]

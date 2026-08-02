@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -14,6 +14,8 @@ pub struct UserLevel {
     pub name: String,
     pub group_key: String,
     pub discount: f64,
+    #[sqlx(default)]
+    pub discount_type: i32,
     #[sqlx(default)]
     pub commission_ratio: f64,
     #[sqlx(default)]
@@ -44,6 +46,7 @@ pub struct CreateUserLevelRequest {
     pub name: String,
     pub group_key: String,
     pub discount: f64,
+    pub discount_type: Option<i32>,
     pub commission_ratio: Option<f64>,
     pub invite_reward_inviter: Option<f64>,
     pub invite_reward_invitee: Option<f64>,
@@ -61,6 +64,7 @@ pub struct UpdateUserLevelRequest {
     pub name: Option<String>,
     pub group_key: Option<String>,
     pub discount: Option<f64>,
+    pub discount_type: Option<i32>,
     pub commission_ratio: Option<f64>,
     pub invite_reward_inviter: Option<f64>,
     pub invite_reward_invitee: Option<f64>,

@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -29,4 +29,23 @@ pub fn round_money(v: f64) -> f64 {
 #[inline]
 pub fn format_money(v: f64) -> String {
     format!("{:.*}", MONEY_DECIMAL_PLACES as usize, round_money(v))
+}
+
+/// 预扣/扣费：赠送余额优先，返回 `(gift_deducted, balance_deducted)`（均已 round）。
+#[inline]
+pub fn split_gift_first(amount: f64, gift_balance: f64) -> (f64, f64) {
+    let amount = round_money(amount);
+    if amount <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let gift = round_money(amount.min(gift_balance.max(0.0)));
+    (gift, round_money(amount - gift))
+}
+
+/// 结算差额 `(settled_cost, apply_balance)`：应付原样；apply 正补扣、负退多扣。
+#[inline]
+pub fn settlement_delta(cost: f64, pre_deducted: f64) -> (f64, f64) {
+    let settled = round_money(cost);
+    let apply = round_money(settled - round_money(pre_deducted));
+    (settled, apply)
 }

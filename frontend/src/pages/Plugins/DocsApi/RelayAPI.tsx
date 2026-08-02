@@ -18,8 +18,8 @@ import {
   Popover, List, Badge, message, Spin, Empty, Dropdown, Button, Space, Tooltip, Drawer
 } from 'antd';
 import {
-  Sidebar as SidebarIcon, Sun, Moon, Globe, Bell, Folder, FolderOpen,
-  FileText, ChevronRight, Search, ArrowLeft, Copy, Check, ExternalLink,
+  Sidebar as SidebarIcon, Bell, Folder, FolderOpen,
+  FileText, ChevronRight, Search, ArrowLeft, Copy, ExternalLink,
   Terminal, Rocket, BookOpen, Settings, Code, Sparkles, AlertTriangle,
   XCircle, CheckCircle, ChevronDown, Compass, FileCode, CheckCircle2,
   GalleryVerticalEnd, ClipboardList, Palette
@@ -27,10 +27,12 @@ import {
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
-import { RocketOutlined, CompassOutlined } from '@ant-design/icons';
+import { RocketOutlined } from '@ant-design/icons';
 import 'highlight.js/styles/github-dark.css';
+import './DocsApi.css';
 
 import request from '../../../utils/request';
+import { persistUserLanguagePreference } from '../../../utils/language';
 import { useThemeStore } from '../../../store/theme';
 import useSettingsStore from '../../../store/settings';
 import useAuthStore from '../../../store/auth';
@@ -53,6 +55,7 @@ interface DocTreeNode {
   sort_order: number;
   is_active: boolean;
   slug?: string;
+  category_id?: number | null;
   children: DocTreeNode[];
 }
 
@@ -74,28 +77,28 @@ const CodeBlock: React.FC<{ language: string; value: string; children: React.Rea
   };
 
   return (
-    <div className="relative border border-border rounded-lg overflow-hidden my-6 bg-[#09090b] text-[#f4f4f5] dark:bg-zinc-900/30">
-      <div className="flex items-center justify-between px-4 py-1.5 border-b border-border bg-zinc-50 dark:bg-zinc-900/20 text-[10px] font-mono text-zinc-500 dark:text-zinc-400 select-none">
-        <span className="uppercase">{language}</span>
+    <div className="relative border border-slate-700/60 dark:border-zinc-800 rounded-xl overflow-hidden my-6 bg-[#0d1117] text-[#e6edf3] shadow-md">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-slate-800 bg-[#161b22] text-[11px] font-mono text-slate-400 select-none">
+        <span className="uppercase font-semibold tracking-wider text-zinc-400">{language}</span>
         <button
           onClick={handleCopy}
-          className="flex items-center gap-1 hover:text-zinc-950 dark:hover:text-zinc-50 transition-colors cursor-pointer"
+          className="flex items-center gap-1.5 px-2 py-1 rounded hover:bg-slate-800 text-slate-300 hover:text-white transition-colors cursor-pointer text-xs"
         >
           {copied ? (
             <>
-              <CheckCircle className="w-3 h-3 text-emerald-500" />
-              <span className="text-emerald-500">{docsT('copied')}</span>
+              <CheckCircle className="w-3.5 h-3.5 text-zinc-200" />
+              <span className="text-zinc-200">{docsT('copied')}</span>
             </>
           ) : (
             <>
-              <Copy className="w-3 h-3" />
+              <Copy className="w-3.5 h-3.5" />
               <span>{docsT('copy')}</span>
             </>
           )}
         </button>
       </div>
       <pre className="p-4 m-0 overflow-x-auto text-xs leading-relaxed font-mono bg-transparent! border-none!">
-        <code className={`language-${language} hljs bg-transparent! border-none! p-0! text-[#f4f4f5]!`} style={{ color: '#f4f4f5' }}>{children}</code>
+        <code className={`language-${language} hljs bg-transparent! border-none! p-0!`}>{children}</code>
       </pre>
     </div>
   );
@@ -226,7 +229,7 @@ const renderCardIcon = (iconName: string) => {
   if (name === 'rocket' || name === 'quickstart') return <Rocket className="w-4 h-4 text-blue-500" />;
   if (name === 'api' || name === 'code') return <Code className="w-4 h-4 text-purple-500" />;
   if (name === 'settings' || name === 'config') return <Settings className="w-4 h-4 text-zinc-500" />;
-  if (name === 'book' || name === 'guide') return <BookOpen className="w-4 h-4 text-emerald-500" />;
+  if (name === 'book' || name === 'guide') return <BookOpen className="w-4 h-4 text-zinc-500" />;
   if (name === 'terminal' || name === 'cli') return <Terminal className="w-4 h-4 text-amber-500" />;
   return <FileText className="w-4 h-4 text-zinc-400" />;
 };
@@ -234,7 +237,19 @@ const renderCardIcon = (iconName: string) => {
 // ----------------------------------------------------
 // 主组件 RelayAPI
 // ----------------------------------------------------
-const RelayAPI: React.FC = () => {
+/** API 教程（docs_api）与高级门户文档（site_portal_pro）数据源隔离，互不抢读 */
+const DOCS_API_PREFIX = '/plugins/docs-api';
+const SITE_PORTAL_PRO_PREFIX = '/plugins/site-portal-pro';
+
+export interface RelayAPIProps {
+  /** 未传时固定走 docs_api；/home-pro/docs 由路由显式传入 site_portal_pro */
+  apiPrefix?: string;
+  baseRoute?: string;
+}
+
+const RelayAPI: React.FC<RelayAPIProps> = ({ apiPrefix, baseRoute }) => {
+  const resolvedApiPrefix = apiPrefix ?? DOCS_API_PREFIX;
+  const isSitePortalPro = resolvedApiPrefix === SITE_PORTAL_PRO_PREFIX;
   const navigate = useNavigate();
   const { id } = useParams<{ id?: string }>();
   const { themeMode, toggleTheme } = useThemeStore();
@@ -247,6 +262,11 @@ const RelayAPI: React.FC = () => {
   const [openOutlineDrawer, setOpenOutlineDrawer] = useState(false);
   const [announcementsDrawerVisible, setAnnouncementsDrawerVisible] = useState(false);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [activePlugins, setActivePlugins] = useState<any[]>([]);
+  const [isNarrow, setIsNarrow] = useState(
+    typeof window !== 'undefined' ? window.innerWidth <= 768 : false
+  );
 
   // 动态文档状态
   const [treeData, setTreeData] = useState<DocTreeNode[]>([]);
@@ -257,6 +277,10 @@ const RelayAPI: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedMenuKeys, setExpandedMenuKeys] = useState<string[]>([]);
   const [activeAnchor, setActiveAnchor] = useState<string>('');
+
+  // 分类状态
+  const [categories, setCategories] = useState<any[]>([]);
+  const [activeCategoryId, setActiveCategoryId] = useState<number | null>(null);
 
   // 查找某个文档 ID 的父级 slug
   const findParentSlug = (nodes: DocTreeNode[], targetId: number): string | null => {
@@ -295,13 +319,14 @@ const RelayAPI: React.FC = () => {
   }, [id]);
 
   const basePath = useMemo(() => {
+    if (baseRoute) return baseRoute;
     const path = window.location.pathname;
     if (path.includes('/docs')) {
       const idx = path.indexOf('/docs');
       return path.substring(0, idx) + '/docs';
     }
     return '/docs';
-  }, []);
+  }, [baseRoute]);
 
   const isEn = i18n.language === 'en';
   const enableThemeToggle = settings?.site?.enable_theme_toggle !== false;
@@ -323,7 +348,13 @@ const RelayAPI: React.FC = () => {
     document.title = `${docsT('client_doc_title')} - ${siteTitle}`;
   }, [isEn, siteTitle]);
 
-  // 拉取公告
+  useEffect(() => {
+    const onResize = () => setIsNarrow(window.innerWidth <= 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  // 拉取公告 + 已启用插件（对齐控制台右上角）
   useEffect(() => {
     const fetchAnnouncements = async () => {
       const prefs = parseNotificationPreferences(
@@ -332,12 +363,14 @@ const RelayAPI: React.FC = () => {
       );
       if (!shouldShowWebNotifications(prefs, settings?.notification)) {
         setAnnouncements([]);
+        setUnreadCount(0);
         return;
       }
       try {
         const response = await (request.get('/announcements/public') as any);
         if (response.data) {
           setAnnouncements(response.data);
+          setUnreadCount(response.data.length);
           if (response.data.length > 0) {
             const first = response.data[0];
             const seenKey = `notif_push_seen_${first.id}`;
@@ -353,11 +386,38 @@ const RelayAPI: React.FC = () => {
         console.error('Failed to fetch announcements:', error);
       }
     };
+    const fetchActivePlugins = async () => {
+      try {
+        const response = await (request.get('/plugins/active') as any);
+        if (response.active_plugins) {
+          setActivePlugins(response.active_plugins);
+        }
+      } catch (error) {
+        console.error('Failed to fetch active plugins:', error);
+      }
+    };
     fetchAnnouncements();
+    fetchActivePlugins();
   }, [user?.notification_preferences, settings?.notification?.low_balance_threshold, i18n.language]);
 
+  const isPluginVisibleForUser = (pluginName: string) => {
+    const plugin = activePlugins.find((p: any) => p.name === pluginName);
+    if (!plugin) return false;
+    if (plugin.allowed_levels === 'all') return true;
+    const allowed = plugin.allowed_levels.split(',');
+    const userGroup = user?.user_group || '';
+    const levelId = user?.level_id != null ? String(user.level_id) : '';
+    return allowed.includes(userGroup) || (levelId !== '' && allowed.includes(levelId));
+  };
+
   const cleanTitle = (title: string): string => {
-    return title ? title.replace(/^\d+[\s.\-_]+/, '').trim() : '';
+    if (!title) return '';
+    // 去掉排序前缀（如 "1. "），中文/含汉字标题再去掉全部空格
+    let t = title.replace(/^\d+[\s.\-_]+/, '').trim();
+    if (/[\u4e00-\u9fff]/.test(t)) {
+      t = t.replace(/\s+/g, '');
+    }
+    return t;
   };
 
   const findFirstArticle = (nodes: DocTreeNode[]): DocTreeNode | null => {
@@ -381,17 +441,52 @@ const RelayAPI: React.FC = () => {
     }));
   };
 
-  // 拉取文档树
+  // 拉取文档树（按路由绑定的 apiPrefix，不再跨插件回退）
   useEffect(() => {
     const fetchDocTree = async () => {
       try {
-        setLoading(true);
-        const res = await (request.get(`/plugins/docs-api/public/tree?lang=${i18n.language}`) as any);
-        if (res.tree) {
+        const res: any = await request.get(
+          `${resolvedApiPrefix}/public/tree?lang=${i18n.language}`,
+        );
+        if (res && res.tree) {
           const cleanedTree = cleanTreeTitles(res.tree);
           setTreeData(cleanedTree);
           // 默认展开一级目录
           setExpandedMenuKeys(cleanedTree.filter((n: any) => n.is_dir).map((n: any) => `dir-${n.id}`));
+        }
+
+        if (isSitePortalPro) {
+          try {
+            const catRes = await request.get(`${resolvedApiPrefix}/public/docs/categories`, {
+              skipErrorHandler: true,
+            } as any) as any;
+            if (catRes && catRes.categories) {
+              // 同名分类只保留 id 最小的一条，避免「API 参考」重复展示
+              const seen = new Set<string>();
+              const cats = [...catRes.categories]
+                .sort((a: any, b: any) => a.id - b.id)
+                .filter((c: any) => {
+                  if (seen.has(c.name)) return false;
+                  seen.add(c.name);
+                  return true;
+                })
+                .sort((a: any, b: any) => {
+                  const aDef = a.is_default === 1 ? 1 : 0;
+                  const bDef = b.is_default === 1 ? 1 : 0;
+                  if (aDef !== bDef) return bDef - aDef;
+                  return a.sort_order - b.sort_order || a.id - b.id;
+                });
+              setCategories(cats);
+              if (cats.length > 0) {
+                const defCat = cats.find((c: any) => c.is_default === 1) || cats[0];
+                setActiveCategoryId(defCat.id);
+              }
+            }
+          } catch (catErr) {
+            console.warn('加载文档分类失败', catErr);
+            setCategories([]);
+            setActiveCategoryId(null);
+          }
         }
       } catch (error: any) {
         setPluginEnabled(false);
@@ -403,20 +498,6 @@ const RelayAPI: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [basePath, i18n.language]);
 
-  // 如果 URL 里没有带 ID，且 treeData 已加载，则自动跳转到第一篇文章
-  useEffect(() => {
-    if (!id && treeData.length > 0) {
-      const firstArticle = findFirstArticle(treeData);
-      if (firstArticle) {
-        const parentSlug = findParentSlug(treeData, firstArticle.id);
-        const path = parentSlug 
-          ? `${basePath}/${parentSlug}/${idToSlug(firstArticle.id)}`
-          : `${basePath}/${idToSlug(firstArticle.id)}`;
-        navigate(path, { replace: true });
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, treeData, basePath, navigate]);
 
   // 监听选中的文档 ID 并获取内容
   useEffect(() => {
@@ -454,11 +535,49 @@ const RelayAPI: React.FC = () => {
     }
   }, [selectedDocId, treeData]);
 
+  // 当选中文档改变时，同步分类状态（例如直接访问某文档 URL）
+  useEffect(() => {
+    if (selectedDocId && treeData.length > 0 && categories.length > 0) {
+      // 沿父链向上解析 category_id（子文档通常自身为空，需继承根目录分类）
+      const resolveCategoryId = (targetId: number): number | null => {
+        const byId = new Map<number, DocTreeNode>();
+        const index = (nodes: DocTreeNode[]) => {
+          nodes.forEach(n => {
+            byId.set(n.id, n);
+            if (n.children?.length) index(n.children);
+          });
+        };
+        index(treeData);
+        const visited = new Set<number>();
+        let current: number | null = targetId;
+        while (current != null && !visited.has(current)) {
+          visited.add(current);
+          const node = byId.get(current);
+          if (!node) break;
+          if (node.category_id != null && node.category_id !== undefined) {
+            return node.category_id;
+          }
+          current = node.parent_id ?? null;
+        }
+        const defCat = categories.find(c => c.is_default === 1)
+          || categories.find(c => c.name === 'API 参考' || c.name === 'API参考')
+          || categories[0];
+        return defCat?.id ?? null;
+      };
+      const catId = resolveCategoryId(selectedDocId);
+      if (catId) {
+        setActiveCategoryId(catId);
+      }
+    }
+  }, [selectedDocId, treeData, categories]);
+
   const fetchDocContent = async (id: number) => {
     try {
       setDetailLoading(true);
-      const res = await (request.get(`/plugins/docs-api/public/docs/${id}?lang=${i18n.language}`) as any);
-      if (res.doc) {
+      const res: any = await request.get(
+        `${resolvedApiPrefix}/public/docs/${id}?lang=${i18n.language}`,
+      );
+      if (res && res.doc) {
         setDocDetail({
           ...res.doc,
           title: cleanTitle(res.doc.title)
@@ -486,7 +605,7 @@ const RelayAPI: React.FC = () => {
 
   const changeLanguage = (lng: string) => {
     i18n.changeLanguage(lng);
-    localStorage.setItem('i18nextLng', lng);
+    persistUserLanguagePreference(lng);
   };
 
   const langNameMap: Record<string, string> = {
@@ -504,8 +623,6 @@ const RelayAPI: React.FC = () => {
       label: langNameMap[lng] || lng,
       onClick: () => changeLanguage(lng),
     }));
-
-
 
   const announcementContent = (
     <div style={{ width: 360, display: 'flex', flexDirection: 'column' }}>
@@ -560,8 +677,42 @@ const RelayAPI: React.FC = () => {
   const [openSearch, setOpenSearch] = useState(false);
   const [searchFocusIndex, setSearchFocusIndex] = useState(0);
 
+  const defaultCategoryId = useMemo(() => {
+    const defCat = categories.find(c => c.is_default === 1);
+    if (defCat) return defCat.id;
+    const apiRef = categories.find(c => c.name === 'API 参考' || c.name === 'API参考');
+    return apiRef?.id ?? categories[0]?.id ?? null;
+  }, [categories]);
+
+  const handleCategoryChange = (categoryId: number) => {
+    setActiveCategoryId(categoryId);
+    const categoryDocs = treeData.filter(node =>
+      node.category_id === categoryId ||
+      ((node.category_id == null || node.category_id === undefined) && categoryId === defaultCategoryId)
+    );
+    const firstArticle = findFirstArticle(categoryDocs);
+    if (firstArticle) {
+      const parentSlug = findParentSlug(treeData, firstArticle.id);
+      const path = parentSlug 
+        ? `${basePath}/${parentSlug}/${idToSlug(firstArticle.id)}`
+        : `${basePath}/${idToSlug(firstArticle.id)}`;
+      navigate(path);
+    } else {
+      navigate(basePath);
+    }
+  };
+
   const filteredTree = useMemo(() => {
-    if (!searchQuery) return treeData;
+    let sourceData = treeData;
+    // 有二级分类时按分类过滤根节点；无 category_id 的旧文档归入「API 参考」
+    if (isSitePortalPro && categories.length > 0 && activeCategoryId !== null) {
+      sourceData = treeData.filter(node =>
+        node.category_id === activeCategoryId ||
+        ((node.category_id == null || node.category_id === undefined) &&
+          activeCategoryId === defaultCategoryId)
+      );
+    }
+    if (!searchQuery) return sourceData;
     const filter = (nodes: DocTreeNode[]): DocTreeNode[] => {
       return nodes
         .map(node => {
@@ -579,8 +730,23 @@ const RelayAPI: React.FC = () => {
         })
         .filter((n): n is DocTreeNode => n !== null);
     };
-    return filter(treeData);
-  }, [treeData, searchQuery]);
+    return filter(sourceData);
+  }, [treeData, searchQuery, activeCategoryId, isSitePortalPro, categories.length, defaultCategoryId]);
+
+  // 如果 URL 里没有带 ID，且 filteredTree 已加载，则自动跳转到第一篇文章
+  useEffect(() => {
+    if (!id && filteredTree.length > 0) {
+      const firstArticle = findFirstArticle(filteredTree);
+      if (firstArticle) {
+        const parentSlug = findParentSlug(treeData, firstArticle.id);
+        const path = parentSlug 
+          ? `${basePath}/${parentSlug}/${idToSlug(firstArticle.id)}`
+          : `${basePath}/${idToSlug(firstArticle.id)}`;
+        navigate(path, { replace: true });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, filteredTree, treeData, basePath, navigate]);
 
   const flatList = useMemo(() => {
     const list: { id: number; title: string; is_dir: boolean }[] = [];
@@ -802,8 +968,8 @@ const RelayAPI: React.FC = () => {
             style={{ paddingLeft: showIcon ? '4px' : '10px' }}
             className={`group flex items-center gap-2 w-full h-7 text-left text-[13px] rounded-md transition-all cursor-pointer mb-0.5 select-none pl-1 pr-2 ${
               isSelected
-                ? 'bg-zinc-200/60 dark:bg-zinc-800 text-zinc-900 dark:text-white font-medium shadow-2xs'
-                : 'text-zinc-500 dark:text-zinc-200 hover:bg-zinc-100/50 dark:hover:bg-zinc-900/30 hover:text-zinc-900 dark:hover:text-white'
+                ? 'bg-zinc-900/5 dark:bg-zinc-50/10 text-zinc-900 dark:text-zinc-50 font-semibold border-l-2 border-zinc-900 dark:border-zinc-100 shadow-2xs'
+                : 'text-zinc-500 dark:text-zinc-300 hover:bg-zinc-100/60 dark:hover:bg-zinc-900/40 hover:text-zinc-900 dark:hover:text-white'
             }`}
           >
             {showIcon && getSidebarIcon(node.title)}
@@ -932,9 +1098,9 @@ const RelayAPI: React.FC = () => {
             icon: <XCircle className="w-4 h-4" />
           },
           success: {
-            bg: 'bg-emerald-500/5 dark:bg-emerald-500/5',
-            border: 'border-emerald-500/20 dark:border-emerald-400/20',
-            text: 'text-emerald-600 dark:text-emerald-400',
+            bg: 'bg-zinc-500/5 dark:bg-zinc-500/5',
+            border: 'border-zinc-500/20 dark:border-zinc-400/20',
+            text: 'text-zinc-700 dark:text-zinc-300',
             title: 'SUCCESS',
             icon: <CheckCircle2 className="w-4 h-4" />
           }
@@ -1140,203 +1306,42 @@ const RelayAPI: React.FC = () => {
     });
   };
 
+  const isCyberHacker = isSitePortalPro;
+  const systemClass = isCyberHacker ? 'cyber-hacker-docs' : 'docs-api-system';
+
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground font-sans">
-      <style>{`
-        /* 极致的 Fumadocs 科技风 Markdown 文章渲染 */
-        #docs-main-content {
-          scroll-behavior: smooth;
-        }
-        .docs-content-article h1 {
-          font-size: 2.2rem;
-          font-weight: 800;
-          letter-spacing: -0.03em;
-          margin-top: 0;
-          margin-bottom: 0;
-          padding-bottom: 0;
-          border-bottom: none;
-          color: var(--foreground);
-        }
-        .docs-content-article h2 {
-          font-size: 1.5rem;
-          font-weight: 700;
-          letter-spacing: -0.02em;
-          margin-top: 2.5rem;
-          margin-bottom: 1rem;
-          color: var(--foreground);
-        }
-        .docs-content-article h3 {
-          font-size: 1.15rem;
-          font-weight: 600;
-          letter-spacing: -0.01em;
-          margin-top: 1.8rem;
-          margin-bottom: 0.75rem;
-          color: var(--foreground);
-        }
-        .docs-content-article p {
-          margin-top: 0;
-          margin-bottom: 1.25rem;
-          line-height: 1.7;
-          color: var(--foreground);
-          opacity: 0.85;
-        }
-        .docs-content-article :not(pre) > code {
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-          font-size: 0.85em;
-          padding: 0.2rem 0.4rem;
-          border-radius: 4px;
-          background: rgba(0, 0, 0, 0.05);
-          border: 1px solid var(--border-custom);
-          color: var(--foreground);
-        }
-        body[data-theme='dark'] .docs-content-article :not(pre) > code {
-          background: rgba(255, 255, 255, 0.08);
-        }
-        .docs-content-article table {
-          width: 100%;
-          border-collapse: collapse;
-          margin-top: 1.5rem;
-          margin-bottom: 1.5rem;
-          font-size: 13.5px;
-        }
-        .docs-content-article th {
-          background: var(--muted);
-          border: 1px solid var(--border-custom);
-          padding: 8px 12px;
-          font-weight: 600;
-          text-align: left;
-        }
-        .docs-content-article td {
-          border: 1px solid var(--border-custom);
-          padding: 8px 12px;
-        }
-        .docs-content-article blockquote {
-          border-left: 3px solid var(--primary);
-          background: var(--muted);
-          padding: 10px 16px;
-          margin: 1.5rem 0;
-          border-radius: 0 6px 6px 0;
-        }
-        .docs-content-article blockquote p {
-          margin: 0;
-          font-style: italic;
-        }
-        .docs-content-article a {
-          color: #3b82f6;
-          text-decoration: none;
-        }
-        .docs-content-article a:hover {
-          text-decoration: underline;
-        }
-        .docs-content-article ul, .docs-content-article ol {
-          margin-bottom: 16px;
-          padding-left: 20px;
-        }
-        .docs-content-article li {
-          margin-bottom: 6px;
-          line-height: 1.6;
-        }
-
-        .docs-sidebar-scroll::-webkit-scrollbar {
-          width: 4px;
-          height: 4px;
-        }
-        .docs-sidebar-scroll::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        .docs-sidebar-scroll::-webkit-scrollbar-thumb {
-          background: rgba(0, 0, 0, 0.08);
-          border-radius: 10px;
-        }
-        body[data-theme='dark'] .docs-sidebar-scroll::-webkit-scrollbar-thumb {
-          background: rgba(255, 255, 255, 0.08);
-        }
-        .no-scrollbar::-webkit-scrollbar {
-          display: none !important;
-        }
-        .no-scrollbar {
-          -ms-overflow-style: none !important;
-          scrollbar-width: none !important;
-        }
-
-        /* Steps (步骤条) PURE CSS 样式 */
-        .docs-steps-container {
-          counter-reset: step-counter;
-          border-left: 2px solid var(--border-custom);
-          margin-left: 1rem;
-          padding-left: 1.5rem;
-          position: relative;
-          margin-top: 1.5rem;
-          margin-bottom: 1.5rem;
-        }
-        .docs-steps-container h3 {
-          counter-increment: step-counter;
-          position: relative;
-        }
-        .docs-steps-container h3::before {
-          content: counter(step-counter);
-          position: absolute;
-          left: -2.25rem;
-          top: 0.15rem;
-          width: 1.5rem;
-          height: 1.5rem;
-          background: var(--background);
-          border: 2px solid var(--border-custom);
-          border-radius: 50%;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 0.75rem;
-          font-weight: 700;
-          color: var(--foreground);
-        }
-        .docs-steps-container h2 {
-          counter-increment: step-counter;
-          position: relative;
-        }
-        .docs-steps-container h2::before {
-          content: counter(step-counter);
-          position: absolute;
-          left: -2.25rem;
-          top: 0.25rem;
-          width: 1.5rem;
-          height: 1.5rem;
-          background: var(--background);
-          border: 2px solid var(--border-custom);
-          border-radius: 50%;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 0.75rem;
-          font-weight: 700;
-          color: var(--foreground);
-        }
-      `}</style>
+    <div className={`flex h-screen w-screen overflow-hidden bg-background text-foreground font-sans ${systemClass}`}>
 
       {/* 左侧侧边栏 */}
       <aside
         className={`flex-shrink-0 flex flex-col h-full bg-[#f8f9fa] dark:bg-[#141414] border-r border-border transition-all duration-300 ${
-          collapsed ? 'w-0 border-r-0 overflow-hidden' : 'w-[260px]'
+          collapsed ? 'w-0 border-r-0 overflow-hidden' : 'w-[240px]'
         }`}
       >
         {/* Logo 与站点名 */}
         <div
-          className="h-[56px] flex items-center px-4 border-b border-border cursor-pointer select-none gap-2"
-          onClick={() => navigate('/dashboard')}
+          style={{
+            height: 56,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '0 8px',
+            borderBottom: isLight ? '1px solid #e4e4e7' : '1px solid #1f1f23',
+            cursor: 'pointer',
+            transition: 'all 0.2s'
+          }}
+          onClick={() => navigate(isCyberHacker ? '/home-pro' : '/dashboard')}
         >
           {siteLogo ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', justifyContent: 'flex-start' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', justifyContent: 'center' }}>
               <img src={siteLogo} alt="logo" style={{ width: 28, height: 28, objectFit: 'contain', flexShrink: 0 }} />
-              <div style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', margin: 0, fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18, fontWeight: 700, lineHeight: 1.2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-all' }}>
+              <div style={{ color: isLight ? '#1f2937' : '#fff', margin: 0, fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18, fontWeight: 700, lineHeight: 1.2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-all' }}>
                 {siteName}
               </div>
             </div>
           ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', justifyContent: 'flex-start' }}>
-              <Rocket className="w-5 h-5 text-zinc-900 dark:text-zinc-50 flex-shrink-0" />
-              <div style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', margin: 0, fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18, fontWeight: 700, lineHeight: 1.2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-all' }}>
-                {siteName}
-              </div>
+            <div style={{ color: isLight ? '#1f2937' : '#fff', margin: 0, fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18, fontWeight: 700, lineHeight: 1.2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-all', textAlign: 'center' }}>
+              {siteName}
             </div>
           )}
         </div>
@@ -1371,87 +1376,169 @@ const RelayAPI: React.FC = () => {
       </aside>
 
       {/* 右侧主体布局 */}
-      <div className="flex-1 flex flex-col h-full overflow-hidden bg-background">
-        {/* 顶栏 Header */}
-        <header className="h-[56px] px-4 flex items-center justify-between bg-background/80 backdrop-blur-md border-b border-border z-10 select-none">
-          <div className="flex items-center">
-            <button
+      <div className="flex-1 flex flex-col h-full overflow-hidden bg-slate-50/70 dark:bg-[#0a0c10] relative">
+        {/* 顶栏 Header（毛玻璃，浮于内容之上） */}
+        <header
+          className="docs-top-nav-glass select-none"
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            zIndex: 20,
+            padding: '0 12px',
+            // 更透一些，滚动时标题/正文穿过顶栏才看得出模糊
+            background: themeMode === 'light' ? 'rgba(255, 255, 255, 0.62)' : 'rgba(10, 12, 16, 0.48)',
+            backdropFilter: 'blur(18px) saturate(180%)',
+            WebkitBackdropFilter: 'blur(18px) saturate(180%)',
+            height: 56,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            paddingRight: isNarrow ? 8 : 24,
+            borderBottom: themeMode === 'light'
+              ? '1px solid rgba(228, 228, 231, 0.45)'
+              : '1px solid rgba(255, 255, 255, 0.08)',
+          }}
+        >
+          {/* 左侧：侧边栏折叠按钮 + 分类导航菜单 */}
+          <div style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
+            <Button
+              type="text"
+              icon={<SidebarIcon size={16} />}
               onClick={() => setCollapsed(!collapsed)}
-              className="flex items-center justify-center w-8 h-8 rounded-md text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-900 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer"
-            >
-              <SidebarIcon className="w-4 h-4" />
-            </button>
+              style={{
+                width: 32,
+                height: 32,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: themeMode === 'light' ? '#71717a' : '#a1a1aa',
+                borderRadius: 6
+              }}
+            />
+
+            {categories.length > 0 && (
+              <div className="flex items-center gap-3.5 overflow-x-auto no-scrollbar py-2 px-3 ml-[8px]">
+                {categories.map(c => (
+                  <button
+                    key={c.id}
+                    className={`docs-category-btn px-3.5 py-1 text-sm rounded-full transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
+                      activeCategoryId === c.id ? 'active' : ''
+                    }`}
+                    onClick={() => handleCategoryChange(c.id)}
+                  >
+                    {/[\u4e00-\u9fff]/.test(c.name) ? c.name.replace(/\s+/g, '') : c.name}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
-          <div className="flex items-center gap-3">
-            <Space size="middle" align="center">
-              <Tooltip title={_t('menu.model_marketplace', '模型广场')} placement="bottom">
-                <Button
-                  type="text"
-                  href="/models"
-                  icon={
-                    <svg
-                      width="20"
-                      height="20"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      xmlns="http://www.w3.org/2000/svg"
-                      style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}
-                    >
-                      <path d="M12 2L19.5 6.2L12 10.5L4.5 6.2Z" fill={themeMode === 'light' ? '#e0e0e0' : '#2e2e2e'} />
-                      <path d="M3.5 7.8L11 12V21L3.5 16.8Z" fill={themeMode === 'light' ? '#b0b0b0' : '#555555'} />
-                      <path d="M13 12L20.5 7.8V16.8L13 21Z" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
-                    </svg>
-                  }
-                  style={{
-                    color: themeMode === 'light' ? '#1f2937' : '#fff',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    fontSize: 14,
-                    fontWeight: 500,
-                    height: 40,
-                    padding: '0 12px',
-                  }}
-                  onClick={(e) => {
-                    if (!e.metaKey && !e.ctrlKey) {
-                      e.preventDefault();
-                      navigate('/models');
+          {/* 右侧：对齐控制台顶栏功能按钮 */}
+          <div className="flex items-center flex-shrink-0">
+            <style>{`
+              .docs-api-system .header-badge.ant-badge {
+                display: flex !important;
+                align-items: center;
+                justify-content: center;
+                height: 40px;
+              }
+            `}</style>
+            <Space size={isNarrow ? 4 : 8} align="center">
+              {!isNarrow && isPluginVisibleForUser('model_marketplace') && (
+                <Tooltip title={_t('menu.model_marketplace', '模型广场')} placement="bottom">
+                  <Button
+                    type="text"
+                    href="/home/models"
+                    icon={
+                      <svg
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        xmlns="http://www.w3.org/2000/svg"
+                        style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}
+                      >
+                        <path d="M12 2L19.5 6.2L12 10.5L4.5 6.2Z" fill={themeMode === 'light' ? '#e0e0e0' : '#2e2e2e'} />
+                        <path d="M3.5 7.8L11 12V21L3.5 16.8Z" fill={themeMode === 'light' ? '#b0b0b0' : '#555555'} />
+                        <path d="M13 12L20.5 7.8V16.8L13 21Z" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
+                      </svg>
                     }
-                  }}
-                >
-                  <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{_t('menu.model_marketplace', '模型广场')}</span>
-                </Button>
-              </Tooltip>
+                    style={{
+                      color: themeMode === 'light' ? '#1f2937' : '#fff',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      fontSize: 14,
+                      fontWeight: 500,
+                      height: 40,
+                      padding: '0 12px',
+                    }}
+                    onClick={(e) => {
+                      if (!e.metaKey && !e.ctrlKey) {
+                        e.preventDefault();
+                        navigate('/home/models');
+                      }
+                    }}
+                  >
+                    <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{_t('menu.model_marketplace', 'Models')}</span>
+                  </Button>
+                </Tooltip>
+              )}
 
-              <Tooltip title={_t('menu.relay_api', 'API教程')} placement="bottom">
-                <Button
-                  type="text"
-                  href="/docs"
-                  icon={<RocketOutlined style={{ fontSize: '16px', verticalAlign: 'middle', transform: 'translateY(1.5px)' }} />}
-                  style={{
-                    color: themeMode === 'light' ? '#1f2937' : '#fff',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    fontSize: 14,
-                    fontWeight: 500,
-                    height: 40,
-                    padding: '0 12px',
-                  }}
-                  onClick={(e) => {
-                    if (!e.metaKey && !e.ctrlKey) {
-                      e.preventDefault();
-                      navigate('/docs');
+              {!isNarrow && (
+                <Tooltip title={_t('menu.relay_api', 'API教程')} placement="bottom">
+                  <Button
+                    type="text"
+                    href="/docs"
+                    icon={
+                      <svg
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        xmlns="http://www.w3.org/2000/svg"
+                        style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}
+                      >
+                        <rect x="8" y="2.5" width="2.6" height="5.8" rx="1.2" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
+                        <rect x="13.4" y="2.5" width="2.6" height="5.8" rx="1.2" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
+                        <path d="M4.5 7.5H19.5V10H4.5V7.5Z" fill={themeMode === 'light' ? '#e0e0e0' : '#2e2e2e'} />
+                        <path d="M5 10H12V21C7.8 21 5 18.6 5 15.2V10Z" fill={themeMode === 'light' ? '#b0b0b0' : '#555555'} />
+                        <path d="M12 10H19V15.2C19 18.6 16.2 21 12 21V10Z" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
+                        <path d="M8.5 12.2V16.8" stroke={themeMode === 'light' ? '#757575' : '#2e2e2e'} strokeWidth="1.4" strokeLinecap="round" />
+                        <path d="M15.5 12.2V16.8" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="1.4" strokeLinecap="round" />
+                      </svg>
                     }
-                  }}
-                >
-                  <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{_t('menu.relay_api', 'API教程')}</span>
-                </Button>
-              </Tooltip>
+                    style={{
+                      color: themeMode === 'light' ? '#1f2937' : '#fff',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      fontSize: 14,
+                      fontWeight: 500,
+                      height: 40,
+                      padding: '0 12px',
+                    }}
+                    onClick={(e) => {
+                      if (!e.metaKey && !e.ctrlKey) {
+                        e.preventDefault();
+                        navigate('/docs');
+                      }
+                    }}
+                  >
+                    <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{_t('menu.relay_api', 'API教程')}</span>
+                  </Button>
+                </Tooltip>
+              )}
 
               {enableThemeToggle && (
-                <Tooltip title={themeMode === 'light' ? _t('header.switch_dark_mode', '切换暗色模式') : _t('header.switch_light_mode', '切换亮色模式')} placement="bottom" color={themeMode === 'light' ? '#fff' : '#2b2b2b'} overlayInnerStyle={{ color: themeMode === 'light' ? '#1f2937' : '#fff' }}>
+                <Tooltip
+                  title={themeMode === 'light' ? _t('header.switch_dark_mode', '切换暗色模式') : _t('header.switch_light_mode', '切换亮色模式')}
+                  placement="bottom"
+                  color={themeMode === 'light' ? '#fff' : '#2b2b2b'}
+                  styles={{ container: { color: themeMode === 'light' ? '#1f2937' : '#fff' } }}
+                >
                   <Button
                     type="text"
                     shape="circle"
@@ -1503,8 +1590,13 @@ const RelayAPI: React.FC = () => {
                 motion={{ motionName: '' }}
                 arrow={false}
               >
-                <Tooltip title={_t('header.notifications', '通知')} placement="bottom" color={themeMode === 'light' ? '#fff' : '#2b2b2b'} overlayInnerStyle={{ color: themeMode === 'light' ? '#1f2937' : '#fff' }}>
-                  <Badge count={announcements.length} overflowCount={99} offset={[-4, 4]} className="header-badge">
+                <Tooltip
+                  title={_t('header.notifications', '通知')}
+                  placement="bottom"
+                  color={themeMode === 'light' ? '#fff' : '#2b2b2b'}
+                  styles={{ container: { color: themeMode === 'light' ? '#1f2937' : '#fff' } }}
+                >
+                  <Badge count={unreadCount} overflowCount={99} offset={[-4, 4]} className="header-badge">
                     <Button
                       type="text"
                       shape="circle"
@@ -1522,21 +1614,29 @@ const RelayAPI: React.FC = () => {
                         </svg>
                       }
                       style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 40, height: 40 }}
+                      onClick={() => {
+                        setUnreadCount(0);
+                      }}
                     />
                   </Badge>
                 </Tooltip>
               </Popover>
 
-              <UserAvatarMenu isUserEnd={true} agreement={agreement} />
+              {user && (
+                <UserAvatarMenu isUserEnd={true} agreement={agreement} />
+              )}
             </Space>
           </div>
         </header>
 
-        {/* 主体自适应布局 */}
-        <div className="flex-1 flex overflow-hidden">
+        {/* 主体自适应布局：铺满整列高度，滚动内容可穿过顶栏毛玻璃 */}
+        <div className="flex-1 flex overflow-hidden min-h-0">
           {/* 中间主要文章展示区 */}
-          <main id="docs-main-content" className="flex-1 overflow-y-auto p-6 md:p-8 xl:pr-20 xl:pl-10 no-scrollbar">
-            <div className="max-w-[760px] mx-auto pb-20">
+          <main
+            id="docs-main-content"
+            className="flex-1 overflow-y-auto px-6 pb-6 pt-[80px] md:px-10 md:pb-10 md:pt-[96px] xl:pr-16 xl:pl-8 no-scrollbar"
+          >
+            <div className="max-w-[820px] mx-auto pb-20">
               {pluginEnabled ? (
                 <>
                   {/* 面包屑导航 Breadcrumbs */}
@@ -1552,7 +1652,10 @@ const RelayAPI: React.FC = () => {
                       ))}
                     </nav>
                   )}
-                  {renderDocBody()}
+                  {/* 主区域无最外层边框 */}
+                  <div className="py-2 px-1">
+                    {renderDocBody()}
+                  </div>
                 </>
               ) : (
                 <div className="max-w-md mx-auto text-center border border-border bg-card p-10 rounded-xl mt-16 shadow-sm">
@@ -1562,7 +1665,7 @@ const RelayAPI: React.FC = () => {
                     {docsT('client_plugin_disabled_desc')}
                   </p>
                   <button
-                    onClick={() => navigate('/dashboard')}
+                    onClick={() => navigate(isCyberHacker ? '/home-pro' : '/dashboard')}
                     className="px-4 h-9 text-xs font-medium bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-50 dark:hover:bg-zinc-100 dark:text-zinc-950 rounded-md transition-colors cursor-pointer"
                   >
                     {docsT('client_back_to_dashboard')}
@@ -1574,7 +1677,7 @@ const RelayAPI: React.FC = () => {
 
           {/* 右侧 TOC 目录导航栏 - On This Page */}
           {pluginEnabled && tocList.length > 0 && (
-            <aside className="hidden xl:block w-[280px] flex-shrink-0 py-8 pl-4 pr-4 select-none overflow-y-auto no-scrollbar">
+            <aside className="hidden xl:block w-[280px] flex-shrink-0 pt-[88px] pb-8 pl-4 pr-4 select-none overflow-y-auto no-scrollbar">
               <div className="sticky top-0">
                 <div className="flex items-center gap-2 text-zinc-500 dark:text-zinc-400 mb-5">
                   <GalleryVerticalEnd className="w-4 h-4 text-zinc-400 dark:text-zinc-500" />

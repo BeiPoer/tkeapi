@@ -30,5 +30,11 @@
   "no_access_desc": "現在のユーザー レベルには、モデル スクエアを参照する権限がありません。管理者に連絡するか、レベルをアップグレードしてください。",
   "back_dashboard": "戻る",
   "back_list": "リストに戻る",
-  "pricing_count": "{{count}} 個の価格"
+  "pricing_count": "{{count}} 個の価格",
+  "unavailable": "利用不可",
+  "default_pricing": "標準料金",
+  "other_category": "その他",
+  "unknown_provider": "プロバイダー",
+  "upstream": "アップストリーム",
+  "default_group": "デフォルトグループ"
 }

@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -12,8 +12,6 @@ pub struct AppConfig {
     pub database_url: String,
     pub jwt_secret: String,
     pub encryption_key: String,
-    pub admin_username: String,
-    pub admin_password: String,
     pub default_user_quota: f64,
     pub register_enabled: bool,
     /// 站点域名（OAuth 回调等场景使用）
@@ -22,6 +20,8 @@ pub struct AppConfig {
     pub data_dir: String,
     /// 门户静态文件保存目录
     pub portal_dir: String,
+    /// 站点门户增强版静态文件保存目录（商业插件，与 portal_dir 隔离）
+    pub portal_pro_dir: String,
     /// 图标和素材的发布目录路径
     pub assets_dir: String,
 }
@@ -53,6 +53,10 @@ impl AppConfig {
             std::env::var("PORTAL_DIR").unwrap_or_else(|_| format!("{}/portal", data_dir));
         // 确保门户静态目录存在
         let _ = std::fs::create_dir_all(&portal_dir);
+
+        let portal_pro_dir =
+            std::env::var("PORTAL_PRO_DIR").unwrap_or_else(|_| format!("{}/portal_pro", data_dir));
+        let _ = std::fs::create_dir_all(&portal_pro_dir);
 
         let assets_dir =
             std::env::var("ASSETS_DIR").unwrap_or_else(|_| format!("{}/assets", data_dir));
@@ -110,12 +114,6 @@ impl AppConfig {
             generated
         });
 
-        // 3. ADMIN_PASSWORD：优先环境变量（排除空值），默认密码为 "admin"
-        let admin_password = std::env::var("ADMIN_PASSWORD")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "admin".to_string());
-
         Self {
             host: std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: std::env::var("PORT")
@@ -125,8 +123,6 @@ impl AppConfig {
             database_url,
             jwt_secret,
             encryption_key,
-            admin_username: std::env::var("ADMIN_USERNAME").unwrap_or_else(|_| "admin".to_string()),
-            admin_password,
             default_user_quota: std::env::var("DEFAULT_USER_QUOTA")
                 .unwrap_or_else(|_| "0".to_string())
                 .parse()
@@ -139,6 +135,7 @@ impl AppConfig {
                 .unwrap_or_else(|_| "http://localhost:3000".to_string()),
             data_dir,
             portal_dir,
+            portal_pro_dir,
             assets_dir,
         }
     }

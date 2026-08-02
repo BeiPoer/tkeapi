@@ -6,8 +6,9 @@
  */
 
 use crate::api::logs::{
-    deferred_join_page_sql, fetch_logs_count, push_created_at_bound, resolve_user_filter,
-    SQL_BILLING_SETTLE_FLAGS, SQL_VISION_ACTION_FILTER,
+    deferred_join_page_sql, fetch_logs_count, push_created_at_bound, redact_log_match_ids_for_user,
+    resolve_user_filter, user_allow_view_log_details, SQL_BILLING_SETTLE_FLAGS,
+    SQL_VISION_ACTION_FILTER,
 };
 use crate::auth;
 use crate::error::{AppError, AppResult};
@@ -80,7 +81,10 @@ fn build_task_log_where(claims: &auth::Claims, query: &TaskLogQuery) -> (String,
 
     if let Some(ref keyword) = query.search_keyword {
         if !keyword.is_empty() {
-            where_clause.push_str(" AND (l.log_id = ? OR l.task_id = ?)");
+            where_clause.push_str(
+                " AND (l.log_id = ? OR l.task_id = ? OR EXISTS (SELECT 1 FROM channels xc WHERE xc.id = l.channel_id AND xc.group_aid = ?))",
+            );
+            binds.push(keyword.clone());
             binds.push(keyword.clone());
             binds.push(keyword.clone());
         }
@@ -133,19 +137,11 @@ pub async fn list_task_logs(
     let (where_clause, binds) = build_task_log_where(&claims, &q);
 
     // allow_details 仅告知前端可否展开完整详情；媒体预览走下方 preview_urls，不依赖该开关
-    let mut allow_details = true;
-    if claims.role != "admin" {
-        let perm: Option<i32> = sqlx::query_scalar(
-            &state.db.format_query(
-                "SELECT ul.allow_view_log_details FROM users u LEFT JOIN user_levels ul ON u.user_group = ul.group_key WHERE u.id = ?",
-            ),
-        )
-        .bind(&claims.sub)
-        .fetch_optional(&state.db.pool)
-        .await?
-        .flatten();
-        allow_details = perm.unwrap_or(1) == 1;
-    }
+    let allow_details = if claims.role == "admin" {
+        true
+    } else {
+        user_allow_view_log_details(&state.db, &claims.sub).await?
+    };
 
     // 仅媒体类读 response_content，内存抽 preview_urls 后丢弃大字段（一次查询、不回传正文）
     let data_sql = state.db.format_query(&deferred_join_page_sql(
@@ -155,9 +151,9 @@ pub async fn list_task_logs(
              l.error_message, \
              CASE WHEN l.action_type IN ('图片','视频','视频增强') THEN l.response_content ELSE NULL END AS response_content, \
              {SQL_BILLING_SETTLE_FLAGS}, \
-             c.name AS channel_name, c.group_aid AS channel_group_aid, c.provider_type AS channel_provider_type, \
+             c.name AS channel_name, c.group_aid AS channel_group_aid, \
              COALESCE(u.nickname, u.username) AS user_nickname, u.uid AS user_uid, \
-             l.task_id, l.action_type, cc.yid AS yid, l.billing_pid, l.forward_eid, l.created_at"
+             l.task_id, l.action_type, cc.yid AS yid, l.billing_pid, l.forward_eid, l.is_completed, l.is_ha, l.created_at"
         ),
         TASK_LIST_JOINS,
         &where_clause,
@@ -181,7 +177,10 @@ pub async fn list_task_logs(
     let is_admin = claims.role == "admin";
     for log in &mut data {
         if let Some(raw) = log.response_content.take() {
-            log.preview_urls = preview_urls_from_response(&raw);
+            // 普通用户未完成任务不暴露预览（避免级联 S1 产物 URL）
+            if is_admin || log.is_completed == 1 {
+                log.preview_urls = preview_urls_from_response(&raw);
+            }
         }
         if !is_admin {
             if let Some(ref err) = log.error_message {
@@ -190,6 +189,7 @@ pub async fn list_task_logs(
             log.channel_id = None;
             log.channel_name = None;
             log.channel_group_aid = None;
+            redact_log_match_ids_for_user(&mut log.billing_pid, &mut log.forward_eid, &mut log.yid);
         }
     }
 
@@ -254,8 +254,6 @@ struct ExportRow {
     created_at: DbTs,
     channel_name: Option<String>,
     channel_group_aid: Option<String>,
-    #[allow(dead_code)]
-    channel_provider_type: Option<String>,
     user_nickname: Option<String>,
     user_uid: Option<String>,
 }
@@ -291,7 +289,7 @@ pub async fn export_task_logs(
         "SELECT l.id, l.user_id, l.model, l.prompt_tokens, l.completion_tokens, l.cached_tokens, \
          l.cost, l.latency_ms, l.status_code, l.action_type, l.task_id, \
          l.billing_detail, l.created_at, \
-         c.name as channel_name, c.group_aid as channel_group_aid, c.provider_type as channel_provider_type, \
+         c.name as channel_name, c.group_aid as channel_group_aid, \
          COALESCE(u.nickname, u.username) as user_nickname, u.uid as user_uid \
          FROM logs l{TASK_EXPORT_JOINS} \
          {where_clause} ORDER BY l.created_at DESC LIMIT {TASK_EXPORT_LIMIT}"

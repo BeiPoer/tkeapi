@@ -1,7 +1,7 @@
 /*
  * tokensbyte opensource
  * (c) 2026 tokensbyte.ai
- * @copyright      Copyright netbcloud/wstianxia 
+ * @copyright      Copyright netbcloud/wstianxia
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
@@ -38,7 +38,7 @@ impl OAuthService {
             "https://open.weixin.qq.com/connect/qrconnect?appid={}&redirect_uri={}&response_type=code&scope=snsapi_login&state={}#wechat_redirect",
             app_id,
             urlencoding::encode(redirect_uri),
-            state,
+            urlencoding::encode(state),
         )
     }
 
@@ -110,7 +110,7 @@ impl OAuthService {
             "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email%20profile&state={}&access_type=offline",
             client_id,
             urlencoding::encode(redirect_uri),
-            state,
+            urlencoding::encode(state),
         )
     }
 

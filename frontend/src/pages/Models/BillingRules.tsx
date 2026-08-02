@@ -42,6 +42,7 @@ const RULES_WITH_PRICING_TIERS = new Set([
   'video_resolution',
   'video_quality',
   'volc_seedream_pro',
+  'minimax_h3',
 ]);
 
 interface RuleContainerProps {
@@ -535,11 +536,6 @@ const BillingRules: React.FC = () => {
           without_video: ext.resolution_rates[res].without_video || 0,
         });
       });
-      ['480p', '720p', '1080p', '4k'].forEach(res => {
-        if (!sd2_resolutions.find(r => r.resolution === res)) {
-          sd2_resolutions.push({ resolution: res, enabled: false, with_video: 0, without_video: 0 });
-        }
-      });
     } else {
       sd2_resolutions = [
         { resolution: '480p', enabled: false, with_video: 0, without_video: 0 },
@@ -561,6 +557,7 @@ const BillingRules: React.FC = () => {
       image_prompt_rate: ext.image_prompt_rate || 0,
       prompt_extend_multiplier: ext.prompt_extend_multiplier || 1,
       image_ref_multiplier: ext.image_ref_multiplier ?? 1,
+      free_image_count: ext.free_image_count ?? 5,
       quality_pricing_enabled: !!ext.quality_pricing_enabled
         || (item.billing_rule === 'image_size_pixel' && tiers.some((t: any) => t.quality_pricing)),
       doubao_fast_enabled: !!ext.doubao_fast_enabled,
@@ -787,6 +784,12 @@ const BillingRules: React.FC = () => {
       } else if (values.billing_rule === 'doubao_chat') {
         const fastEnabled = form.getFieldValue('doubao_fast_enabled') === true;
         extConfig = { ...extConfig, doubao_fast_enabled: fastEnabled };
+      } else if (values.billing_rule === 'minimax_h3') {
+        const freeCount = Number(values.free_image_count);
+        extConfig = {
+          ...extConfig,
+          free_image_count: Number.isFinite(freeCount) && freeCount >= 0 ? freeCount : 5,
+        };
       }
       if (Array.isArray(values.supported_models) && values.supported_models.length > 0) {
         extConfig.supported_models = values.supported_models;
@@ -833,6 +836,7 @@ const BillingRules: React.FC = () => {
       delete values.quality_pricing_enabled;
       delete values.doubao_fast_enabled;
       delete values.vidu_offpeak_discount;
+      delete values.free_image_count;
       // 开关关闭时清零对应费率，防止旧值残留
       if (!values.enable_cached_rate) values.cached_rate = 0;
       if (!values.enable_claude_cache_creation) values.claude_cache_creation_rate = 0;
@@ -853,7 +857,11 @@ const BillingRules: React.FC = () => {
         claude_cache_creation_rate: values.claude_cache_creation_rate || 0,
         claude_cache_read_rate: values.claude_cache_read_rate || 0,
         pricing_tiers: values.pricing_tiers?.map((tier: any) => {
-          const t = { ...tier, cached_rate: tier.cached_rate || 0 };
+          const t = {
+            ...tier,
+            cached_rate: tier.cached_rate || 0,
+            cache_write_rate: tier.cache_write_rate || 0,
+          };
           t.enabled ??= true;
           if (values.billing_rule === 'image_size_pixel') {
             t.quality_pricing = form.getFieldValue('quality_pricing_enabled') === true;
@@ -933,7 +941,7 @@ const BillingRules: React.FC = () => {
           <Space size={[4, 4]} wrap>
             {p && <Tag color="default" style={{ margin: 0 }}>{p.name}</Tag>}
             {tObj && <Tag color="processing" style={{ margin: 0 }}>{tObj.name}</Tag>}
-            <Tag color={record.pricing_type === 'official' ? 'orange' : 'green'} style={{ margin: 0 }}>{record.pricing_type === 'official' ? '官方计价' : '自定义计价'}</Tag>
+            <Tag color={record.pricing_type === 'official' ? 'orange' : 'green'} style={{ margin: 0 }}>{record.pricing_type === 'official' ? '官方计费' : '自定义计费'}</Tag>
             <Tag color={colors[record.billing_type]} style={{ margin: 0 }}>{t(`models.type_${record.billing_type}`)}</Tag>
           </Space>
         );
@@ -1017,7 +1025,7 @@ const BillingRules: React.FC = () => {
       {!isModalVisible && (
         <Card variant="borderless">
           <div style={{ display: 'flex', flexDirection: screens.xs ? 'column' : 'row', justifyContent: 'space-between', marginBottom: 16, gap: 12 }}>
-            <Typography.Title level={screens.xs ? 4 : 2} style={{ margin: 0 }}>
+            <Typography.Title level={4} style={{ margin: 0, fontSize: screens.xs ? 18 : 20, fontWeight: 600 }}>
               计费规则管理
             </Typography.Title>
             <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>
@@ -1227,8 +1235,8 @@ const BillingRules: React.FC = () => {
                 <Col span={12}>
                   <Form.Item name="pricing_type" label={<Text type="secondary">定价类型</Text>} style={{ marginBottom: 16 }}>
                     <Radio.Group size="small" optionType="button" buttonStyle="solid" style={{ display: 'flex', gap: 8 }}>
-                      <Radio value="custom">自定义计价</Radio>
-                      <Radio value="official">官方计价</Radio>
+                      <Radio value="custom">自定义计费</Radio>
+                      <Radio value="official">官方计费</Radio>
                     </Radio.Group>
                   </Form.Item>
                 </Col>
@@ -1255,7 +1263,7 @@ const BillingRules: React.FC = () => {
                     <Radio.Group optionType="button" buttonStyle="solid">
                       <Radio value="standard">{t('models.rule_standard')}</Radio>
                       <Radio value="multimodal">{t('models.rule_multimodal')}</Radio>
-                      <Radio value="gpt_billing">GPT官方计费</Radio>
+                      <Radio value="gpt_billing">GPT图片计费</Radio>
                       <Radio value="tiered">{t('models.rule_tiered')}</Radio>
                       <Radio value="doubao_chat">豆包聊天阶梯</Radio>
                       <Radio value="seedance2.0">Seedance 2.0</Radio>
@@ -1280,7 +1288,7 @@ const BillingRules: React.FC = () => {
                         ];
 
                         return (
-                          <RuleContainer isLight={_isLight} title="GPT官方计费配置" description="每一项计费可分别开启或关闭，开启后对应的 Token 消耗将按照设定单价（每 1M tokens）计费。对于只返回图片的模型，输出部分将直接使用输出图片进行计费，无需配置输出文本。">
+                          <RuleContainer isLight={_isLight} title="GPT图片计费配置" description="面向 GPT 图片/生图模型：文本输入、图片输入、图片输出及缓存可分别开关，按每 1M tokens 计价。仅出图时用「输出图片」项即可，无需配置输出文本。">
                             <Row gutter={16}>
                               {items.map(item => (
                                 <Col span={12} key={item.key}>
@@ -1465,36 +1473,41 @@ const BillingRules: React.FC = () => {
                           <RuleContainer
                             isLight={_isLight}
                             title={t('models.pricing_tiers')}
-                            description='界定说明：输入上限与输出上限填写的数值单位是以"千(K)"为步长判定的。例如输入 128 即表示 ≤128K Token 命中此阶梯；输出上限不填则表示不限制输出。缓存费率用于对命中输入缓存的 Token 独立定价（属于输入的子集），未填写则缓存按输入费率计。命中落区后，最终费用将结合配置的费率采用 1M (一百万) 定标结算。'
+                            description="上限单位千(K)，如 272=≤272K。读/写缓存选填，空则按输入价。费用=(未缓存入×入价 + 读缓存×读价 + 写缓存×写价 + 出×出价)/1M。"
                           >
                             <Form.List name="pricing_tiers" initialValue={[]}>
                               {(fields, { add, remove }) => (
                                 <>
                                   {fields.map(({ key, name, ...restField }) => (
-                                    <Row key={key} gutter={12} align="middle" style={{ marginBottom: 12 }}>
-                                      <Col span={7}>
+                                    <Row key={key} gutter={[8, 8]} align="middle" style={{ marginBottom: 12 }}>
+                                      <Col span={6}>
                                         <Space.Compact style={{ width: '100%' }}>
                                           <Form.Item {...restField} name={[name, 'max_prompt_tokens']} rules={[{ required: true, message: '' }]} noStyle>
-                                            <InputNumber placeholder="输入上限(如:128)" style={{ width: '50%' }} />
+                                            <InputNumber placeholder="输入上限(K)" style={{ width: '50%' }} />
                                           </Form.Item>
                                           <Form.Item {...restField} name={[name, 'max_completion_tokens']} noStyle>
-                                            <InputNumber placeholder="输出上限(如:16)" style={{ width: '50%' }} />
+                                            <InputNumber placeholder="输出上限(K)" style={{ width: '50%' }} />
                                           </Form.Item>
                                         </Space.Compact>
                                       </Col>
-                                      <Col span={5}>
+                                      <Col span={4}>
                                         <Form.Item {...restField} name={[name, 'prompt_rate']} rules={[{ required: true }]} noStyle>
                                           <InputNumber placeholder={t('models.input_rate')} style={{ width: '100%' }} precision={6} />
                                         </Form.Item>
                                       </Col>
-                                      <Col span={5}>
+                                      <Col span={4}>
                                         <Form.Item {...restField} name={[name, 'completion_rate']} rules={[{ required: true }]} noStyle>
                                           <InputNumber placeholder={t('models.output_rate')} style={{ width: '100%' }} precision={6} />
                                         </Form.Item>
                                       </Col>
-                                      <Col span={5}>
+                                      <Col span={4}>
                                         <Form.Item {...restField} name={[name, 'cached_rate']} noStyle>
-                                          <InputNumber placeholder="缓存费率(选填)" style={{ width: '100%' }} precision={6} />
+                                          <InputNumber placeholder="读缓存" style={{ width: '100%' }} precision={6} />
+                                        </Form.Item>
+                                      </Col>
+                                      <Col span={4}>
+                                        <Form.Item {...restField} name={[name, 'cache_write_rate']} noStyle>
+                                          <InputNumber placeholder="写缓存" style={{ width: '100%' }} precision={6} />
                                         </Form.Item>
                                       </Col>
                                       <Col span={2} style={{ textAlign: 'right' }}>
@@ -1509,7 +1522,7 @@ const BillingRules: React.FC = () => {
                                     icon={<PlusOutlined />}
                                     style={{ marginTop: 8, height: '40px' }}
                                   >
-                                    添加一条上下文费用阶梯设定
+                                    添加阶梯
                                   </Button>
                                 </>
                               )}
@@ -1536,7 +1549,7 @@ const BillingRules: React.FC = () => {
                                       </Form.Item>
                                     </div>
                                   }
-                                  description={`界定说明：输入与输出上限填写的数值单位是"千(K)"。例如输入 8 即表示 ≤8K Token，输出不填则表示不限制。匹配时需同时满足输入与输出上限。对齐官方公式：费用 = 输入(非音频)×费率 + 输入(音频)×费率 + 缓存(非音频)×费率 + 缓存(音频)×费率 + 输出×费率，费率单位 /1M Tokens。${fastEnabled ? '开启低延迟后，service_tier=fast 的请求将使用低延迟费率组计费，未设置的低延迟费率自动降级为常规费率。' : ''}`}
+                                  description={`上限单位千(K)，入/出同时命中（出不填=不限）。费用=(非音频入×价 + 音频入×价 + 非音频缓存×价 + 音频缓存×价 + 出×价)/1M。${fastEnabled ? '低延迟开启后：service_tier=fast 用低延迟费率，未填则回退常规。' : ''}`}
                                 >
                                   <Form.List name="pricing_tiers" initialValue={[]}>
                                     {(fields, { add, remove }) => (
@@ -2020,6 +2033,7 @@ const BillingRules: React.FC = () => {
                     <Radio.Group optionType="button" buttonStyle="solid">
                       <Radio value="standard">按固定时长收费 (单价/秒)</Radio>
                       <Radio value="video_resolution">按视频分辨率阶梯表</Radio>
+                      <Radio value="minimax_h3">MiniMax H3 (分辨率秒单价+输入素材)</Radio>
                       <Radio value="video_quality">按视频画质及帧率阶梯表</Radio>
                       <Radio value="kling_video">可灵视频 (倍率计费)</Radio>
                       <Radio value="vidu_video">Vidu 视频</Radio>
@@ -2130,6 +2144,98 @@ const BillingRules: React.FC = () => {
                                 </>
                               )}
                             </Form.List>
+                          </RuleContainer>
+                        );
+                      }
+
+                      if (rule === 'minimax_h3') {
+                        return (
+                          <RuleContainer
+                            isLight={_isLight}
+                            title="MiniMax H3 计费配置"
+                            description={
+                              <div>
+                                <Text type="secondary" style={{ fontSize: '13px', display: 'block', marginBottom: '8px' }}>
+                                  计费说明：结算以官方 usage 为准——total_seconds（含输入参考视频+输出视频秒）× 分辨率秒单价，输入图超过免费张数后按张累加。文本/音频不计费。
+                                </Text>
+                                <Alert
+                                  type="info"
+                                  showIcon
+                                  message={
+                                    <span>
+                                      <strong>配置建议：</strong>
+                                      分辨率阶梯示例 2k=0.80 元/秒、768p=0.50 元/秒；输入图额外单价 0.20 元/张；免费张数默认 5。
+                                    </span>
+                                  }
+                                  style={{ marginBottom: '12px' }}
+                                />
+                              </div>
+                            }
+                          >
+                            <Row gutter={16} style={{ marginBottom: 16 }}>
+                              <Col span={12}>
+                                <Form.Item name="prompt_rate" label="输入图额外单价" rules={[{ required: true, message: '请输入输入图额外单价' }]} style={{ marginBottom: 0 }}>
+                                  <InputNumber placeholder="超出免费张数后每张价格" style={{ width: '100%' }} precision={6} min={0} addonAfter="元/张" />
+                                </Form.Item>
+                              </Col>
+                              <Col span={12}>
+                                <Form.Item
+                                  name="free_image_count"
+                                  label="输入图免费张数"
+                                  tooltip="不超过该数量的输入参考图不计费；默认 5 张"
+                                  initialValue={5}
+                                  rules={[{ required: true, message: '请输入免费张数' }]}
+                                  style={{ marginBottom: 0 }}
+                                >
+                                  <InputNumber style={{ width: '100%' }} precision={0} min={0} step={1} addonAfter="张" />
+                                </Form.Item>
+                              </Col>
+                            </Row>
+
+                            <Form.Item label="视频分辨率秒单价（对应 usage.total_seconds）" required style={{ marginBottom: 0 }}>
+                              <Form.List name="pricing_tiers" initialValue={[]}>
+                                {(fields, { add, remove }) => (
+                                  <>
+                                    <Row gutter={12} style={{ marginBottom: 8, opacity: 0.5, fontSize: 12 }}>
+                                      <Col span={7}>分辨率</Col>
+                                      <Col span={7}>秒单价</Col>
+                                      <Col span={5}>状态</Col>
+                                    </Row>
+                                    {fields.map(({ key, name, ...restField }) => (
+                                      <Row key={key} gutter={12} align="middle" style={{ marginBottom: 12 }}>
+                                        <Col span={7}>
+                                          <Form.Item {...restField} name={[name, 'resolution']} rules={[{ required: true }]} noStyle>
+                                            <Input placeholder="如: 2k / 768p" style={{ width: '100%' }} />
+                                          </Form.Item>
+                                        </Col>
+                                        <Col span={7}>
+                                          <Form.Item {...restField} name={[name, 'rate']} rules={[{ required: true }]} noStyle>
+                                            <InputNumber placeholder="秒单价" style={{ width: '100%' }} precision={6} addonAfter="/秒" />
+                                          </Form.Item>
+                                        </Col>
+                                        <Col span={5}>
+                                          <Form.Item {...restField} name={[name, 'enabled']} valuePropName="checked" style={{ marginBottom: 0 }}>
+                                            <Switch size="small" />
+                                          </Form.Item>
+                                        </Col>
+                                        <Col span={2} style={{ textAlign: 'right' }}>
+                                          <Button type="text" danger icon={<DeleteOutlined />} onClick={() => remove(name)} />
+                                        </Col>
+                                      </Row>
+                                    ))}
+                                    <Button
+                                      type="dashed"
+                                      onClick={() => add({ resolution: '2k', rate: 0.8, enabled: true })}
+                                      block
+                                      icon={<PlusOutlined />}
+                                      style={{ marginTop: 8, height: '40px' }}
+                                    >
+                                      增加一个分辨率价格档位
+                                    </Button>
+                                  </>
+                                )}
+                              </Form.List>
+                            </Form.Item>
                           </RuleContainer>
                         );
                       }
