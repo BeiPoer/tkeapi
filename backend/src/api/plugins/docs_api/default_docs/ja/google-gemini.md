@@ -1,6 +1,6 @@
 # Google Gemini ネイティブ API 説明
 
-Google 公式 SDK をご使用の場合、またはプロトコル変換レイヤーをスキップして Gemini ネイティブの Multi-modal、System Instruction、または JSON Mode を使用したい場合は、ゲートウェイの Google ネイティブ ルーティングを直接呼び出すことができます。
+Google SDK または Gemini 形式を使う場合は、下記パスと本プラットフォームの API キーで呼び出してください。
 
 ### 1. テキスト生成 (Non-stream)
 * **パス**: `/v1beta/models/{model}:generateContent`

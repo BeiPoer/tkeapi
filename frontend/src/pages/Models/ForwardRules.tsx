@@ -27,6 +27,9 @@ const ENHANCE_OPTIONS = [
   { value: 'ai', label: '大模型' },
 ] as const;
 
+/** 大模型增强仅允许的目标分辨率（与后端 cascade_resolve_enhance 对齐） */
+const AI_ENHANCE_RES = new Set<ResKey>(['720p', '1080p', '2k']);
+
 /** 标准版场景（仅 standard 生效），默认 common */
 const SCENE_OPTIONS = [
   { value: 'common', label: '通用' },
@@ -39,8 +42,8 @@ const SCENE_OPTIONS = [
 /** 各目标分辨率允许的底座（首项为默认一级；单选项即锁定） */
 const BASE_OPTIONS: Record<ResKey, string[]> = {
   '480p': ['480p'],
-  '720p': ['480p'],
-  '1080p': ['720p', '480p'],
+  '720p': ['480p', '720p'],
+  '1080p': ['720p', '480p', '1080p'],
   '2k': ['1080p', '720p', '480p'],
   '4k': ['1080p', '720p', '480p'],
 };
@@ -48,8 +51,13 @@ const BASE_OPTIONS: Record<ResKey, string[]> = {
 const ENHANCE_VALUES = new Set<string>(ENHANCE_OPTIONS.map((o) => o.value));
 const SCENE_VALUES = new Set<string>(SCENE_OPTIONS.map((o) => o.value));
 type SelectOpt = { value: string; label: string };
-const ENHANCE_SELECT = ENHANCE_OPTIONS as unknown as SelectOpt[];
 const SCENE_SELECT = SCENE_OPTIONS as unknown as SelectOpt[];
+
+const isEnhanceValid = (k: ResKey, v: string) =>
+  ENHANCE_VALUES.has(v) && (v !== 'ai' || AI_ENHANCE_RES.has(k));
+
+const enhanceSelectOpts = (k: ResKey): SelectOpt[] =>
+  ENHANCE_OPTIONS.filter((o) => o.value !== 'ai' || AI_ENHANCE_RES.has(k)) as unknown as SelectOpt[];
 
 const mapResKeys = <T,>(fn: (k: ResKey) => T): Record<string, T> =>
   Object.fromEntries(RES_MUL_KEYS.map((k) => [k, fn(k)]));
@@ -100,7 +108,7 @@ const parseResMul = (raw: unknown): Record<string, number> => {
   return out;
 };
 
-const parseResEnhance = (raw: unknown) => parseStrMap(raw, defaultResEnhance, ENHANCE_VALUES);
+const parseResEnhance = (raw: unknown) => parseStrMap(raw, defaultResEnhance, isEnhanceValid);
 const parseResScene = (raw: unknown) => parseStrMap(raw, defaultResScene, SCENE_VALUES);
 const parseResBase = (raw: unknown) =>
   parseStrMap(raw, defaultResBase, (k, v) => BASE_OPTIONS[k].includes(v));
@@ -183,7 +191,7 @@ const ForwardRules: React.FC = () => {
     // 动态加载模型分类类型（用于新增/编辑弹窗的分类选择）
     (request.get('/model-types') as any).then((types: any[]) => {
       setModelTypes(types.filter((t: any) => t.is_active === 1));
-    }).catch(() => {});
+    }).catch(() => { });
   }, []);
 
   const handleAdd = () => {
@@ -194,6 +202,7 @@ const ForwardRules: React.FC = () => {
       config_json: '{\n  \n}',
       sort_order: 0,
       is_cascade: false,
+      crop_480p: true,
       res_mul: defaultResMul(),
       res_enhance: defaultResEnhance(),
       res_scene: defaultResScene(),
@@ -205,6 +214,7 @@ const ForwardRules: React.FC = () => {
   const handleEdit = (item: ForwardRule) => {
     let pollPath = '';
     let isCascade = false;
+    let crop480p = true;
     let resMul = defaultResMul();
     let resEnhance = defaultResEnhance();
     let resScene = defaultResScene();
@@ -213,6 +223,8 @@ const ForwardRules: React.FC = () => {
       const config = JSON.parse(item.config_json);
       pollPath = config.poll_path || '';
       isCascade = !!config.is_cascade;
+      // 缺省 true；与后端 unwrap_or(true) 一致
+      crop480p = config.crop_480p !== false;
       resMul = parseResMul(config.res_mul);
       resEnhance = parseResEnhance(config.res_enhance);
       resScene = parseResScene(config.res_scene);
@@ -225,6 +237,7 @@ const ForwardRules: React.FC = () => {
       category: item.category ? [item.category] : ['聊天'],
       poll_path: pollPath,
       is_cascade: isCascade,
+      crop_480p: crop480p,
       res_mul: resMul,
       res_enhance: resEnhance,
       res_scene: resScene,
@@ -288,8 +301,15 @@ const ForwardRules: React.FC = () => {
         putOpt('res_enhance', compactResEnhance(enhanceMap));
         putOpt('res_scene', compactResScene(enhanceMap, parseResScene(values.res_scene)));
         putOpt('res_base', compactResBase(parseResBase(values.res_base)));
+        // 缺省 true 不落库；仅显式关闭时写入 false
+        if (values.crop_480p === false) {
+          configObj.crop_480p = false;
+        } else {
+          delete configObj.crop_480p;
+        }
       } else {
         delete configObj.is_cascade;
+        delete configObj.crop_480p;
         delete configObj.res_mul;
         delete configObj.res_enhance;
         delete configObj.res_scene;
@@ -305,6 +325,7 @@ const ForwardRules: React.FC = () => {
       // 表单辅助字段已合并进 config_json，不单独提交
       delete payload.poll_path;
       delete payload.is_cascade;
+      delete payload.crop_480p;
       delete payload.res_mul;
       delete payload.res_enhance;
       delete payload.res_scene;
@@ -407,7 +428,7 @@ const ForwardRules: React.FC = () => {
       render: (active: number) => {
         const isActive = active === 1;
         return (
-          <span style={{ 
+          <span style={{
             display: 'inline-flex', alignItems: 'center', gap: 4,
             padding: '2px 6px', borderRadius: 4, fontSize: 12,
             background: isActive ? 'rgba(128,128,128,0.06)' : 'transparent',
@@ -482,8 +503,11 @@ const ForwardRules: React.FC = () => {
       n: '1',
       body: <>
         <CText>target_type</CText>：目标协议类型。常用 <CText>openai</CText>、<CText>anthropic</CText>、
-        <CText>gemini</CText>、<CText>volcengine</CText>、<CText>dashscope</CText>、<CText>kling</CText>、
+        <CText>gemini</CText>、<CText>volcengine</CText>、<CText>dashscope</CText>、<CText>kling</CText>、<CText>kling_video</CText>、
+        <CText>minimax_image</CText>、<CText>minimax_video</CText>、
         <CText>tencent_vod_video</CText>、<CText>tencent_vod_image</CText> 等。
+        <CText>kling_video</CText> 渠道密钥填官方 API Key（Bearer 直传，不生成 JWT）；
+        <CText>kling</CText> 仍为 <CText>access_key:secret_key</CText> 自动签 JWT。
       </>,
     },
     {
@@ -555,7 +579,8 @@ const ForwardRules: React.FC = () => {
     {
       n: '11',
       body: <>
-        <CText>res_enhance</CText>：每目标分辨率的增强版本（<CText>fast|standard|pro|ai</CText>），缺省 <CText>standard</CText>。
+        <CText>res_enhance</CText>：每目标分辨率的增强版本（<CText>fast|standard|pro|ai</CText>），缺省 <CText>standard</CText>；
+        <CText>ai</CText>（大模型）仅允许 <CText>720p</CText>/<CText>1080p</CText>/<CText>2k</CText>。
       </>,
     },
     {
@@ -568,7 +593,14 @@ const ForwardRules: React.FC = () => {
       n: '13',
       body: <>
         <CText>res_base</CText>：每目标分辨率的阶段一座底，如 <CText>{`{"1080p":"720p"}`}</CText>。
-        默认取一级（480p/720p→480p 锁定、1080p→720p、2k/4k→1080p）；1080p 可调为 480p。
+        默认取一级（480p 锁定 480p、720p→480p 可改 720p、1080p→720p 可改 480p/1080p、2k/4k→1080p）。
+      </>,
+    },
+    {
+      n: '14',
+      body: <>
+        <CText>crop_480p</CText>：目标 <CText>720p</CText> 且底座为 <CText>480p</CText> 时，是否 MediaKit 居中裁成标准 480p。
+        缺省 <CText>true</CText>（兼容现网）；显式 <CText>false</CText> 跳过裁剪。其它目标分辨率不受影响。
       </>,
     },
   ];
@@ -592,7 +624,7 @@ const ForwardRules: React.FC = () => {
           <ParamNo key={p.n} n={p.n}>{p.body}</ParamNo>
         ))}
       </div>
-      <b>可选参数（4–13）</b>
+      <b>可选参数（4–14）</b>
       <div style={{ marginTop: 8 }}>
         {helpParams.slice(3).map((p) => (
           <ParamNo key={p.n} n={p.n}>{p.body}</ParamNo>
@@ -671,24 +703,24 @@ const ForwardRules: React.FC = () => {
               };
               const categoryColor = mobileColorMap[record.category] || 'cyan';
               return (
-                  <MobileCard
-                    title={<Space><Text strong>{record.name}</Text></Space>}
-                    extra={(() => {
-                      const isActive = record.is_active === 1;
-                      return (
-                        <span style={{ 
-                          display: 'inline-flex', alignItems: 'center', gap: 4,
-                          padding: '2px 6px', borderRadius: 4, fontSize: 12,
-                          background: isActive ? 'rgba(128,128,128,0.06)' : 'transparent',
-                          color: isActive ? 'var(--text-color, inherit)' : '#8c8c8c',
-                          border: isActive ? '1px solid rgba(128,128,128,0.15)' : '1px dashed rgba(128,128,128,0.3)'
-                        }}>
-                          <span style={{ width: 6, height: 6, borderRadius: '50%', background: isActive ? '#8c8c8c' : 'transparent', border: isActive ? 'none' : '1px solid #8c8c8c' }} />
-                          {isActive ? t('common.active') : t('common.disabled')}
-                        </span>
-                      );
-                    })()}
-                  >
+                <MobileCard
+                  title={<Space><Text strong>{record.name}</Text></Space>}
+                  extra={(() => {
+                    const isActive = record.is_active === 1;
+                    return (
+                      <span style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 4,
+                        padding: '2px 6px', borderRadius: 4, fontSize: 12,
+                        background: isActive ? 'rgba(128,128,128,0.06)' : 'transparent',
+                        color: isActive ? 'var(--text-color, inherit)' : '#8c8c8c',
+                        border: isActive ? '1px solid rgba(128,128,128,0.15)' : '1px dashed rgba(128,128,128,0.3)'
+                      }}>
+                        <span style={{ width: 6, height: 6, borderRadius: '50%', background: isActive ? '#8c8c8c' : 'transparent', border: isActive ? 'none' : '1px solid #8c8c8c' }} />
+                        {isActive ? t('common.active') : t('common.disabled')}
+                      </span>
+                    );
+                  })()}
+                >
                   <CardRow label="转发 (EID)"><Tag color="blue">{record.eid || '-'}</Tag></CardRow>
                   <CardRow label="来源类型">{record.is_system === 1 ? <Tag color="blue">系统内置</Tag> : <Tag color="default">自定义</Tag>}</CardRow>
                   <CardRow label="模式"><Tag color="purple">{record.rule_type}</Tag></CardRow>
@@ -737,7 +769,7 @@ const ForwardRules: React.FC = () => {
           </Form.Item>
 
           <Form.Item name="rule_type" label="映射厂商及模式 (类型标识)" rules={[{ required: true }]}>
-            <Input placeholder="如: openai, anthropic, gemini, passthrough" />
+            <Input placeholder="如: openai, anthropic, gemini, kling, kling_video, minimax, passthrough" />
           </Form.Item>
 
           <Form.Item name="category" label={'模型分类属类'} rules={[{ required: true }]} initialValue={['聊天']}>
@@ -776,8 +808,17 @@ const ForwardRules: React.FC = () => {
             }
           >
             {({ getFieldValue }) => getFieldValue('is_cascade') ? (
+              <>
               <Form.Item
-                label={<Space>级联分辨率配置 <Popover content={<div style={{ maxWidth: 320 }}>每档可设：倍率、增强（默认标准）、场景（仅标准版，默认 common）、底座（默认一级；480p/720p 锁定 480p，1080p→720p 可改 480p）。480p 为同画质增强（阶段一/二均为 480p）。阶段二成功：有 usage 时 tokens×倍率，否则底座费用×倍率。</div>}><QuestionCircleOutlined /></Popover></Space>}
+                name="crop_480p"
+                label={<Space>720p←480 裁剪 <Popover content={<div style={{ maxWidth: 300 }}>仅当目标分辨率为 720p 且阶段一座底为 480p 时生效：开启则 MediaKit 居中裁成标准 480p 再超分；关闭则直接用底座原片。其它分辨率（480p/1080p/2k/4k）不受此开关影响。缺省开启以兼容现网。</div>}><QuestionCircleOutlined /></Popover></Space>}
+                valuePropName="checked"
+                initialValue={true}
+              >
+                <Switch />
+              </Form.Item>
+              <Form.Item
+                label={<Space>级联分辨率配置 <Popover content={<div style={{ maxWidth: 320 }}>每档可设：倍率、增强（默认标准；大模型仅 720p/1080p/2k）、场景（仅标准版，默认 common）、底座（默认一级；480p 锁定 480p，720p 可选 480p/720p，1080p 可选 720p/480p/1080p；2k/4k 不变）。阶段二成功：有 usage 时 tokens×倍率，否则底座费用×倍率。</div>}><QuestionCircleOutlined /></Popover></Space>}
                 style={{ marginBottom: 8 }}
               >
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -788,7 +829,7 @@ const ForwardRules: React.FC = () => {
                         <InputNumber min={0.01} step={0.1} precision={2} style={{ width: 88 }} />
                       </Form.Item>
                       <Form.Item name={['res_enhance', k]} label="增强" style={{ marginBottom: 0 }}>
-                        <Select style={{ width: 100 }} options={ENHANCE_SELECT} />
+                        <Select style={{ width: 100 }} options={enhanceSelectOpts(k)} />
                       </Form.Item>
                       {getFieldValue(['res_enhance', k]) === 'standard' ? (
                         <Form.Item name={['res_scene', k]} label="场景" style={{ marginBottom: 0 }}>
@@ -806,6 +847,7 @@ const ForwardRules: React.FC = () => {
                   ))}
                 </div>
               </Form.Item>
+              </>
             ) : null}
           </Form.Item>
 

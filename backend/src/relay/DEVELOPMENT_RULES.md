@@ -1,7 +1,7 @@
 # TokensByte Relay 中枢开发规范
 
 > **适用范围**: `backend/src/relay/` 目录下的所有模块。  
-> **最后更新**: 2026-07-15  
+> **最后更新**: 2026-08-07  
 > **目的**: 确保模型转发、计费、日志、异步任务、HA 逻辑一致，防止扩展时引入遗漏。
 
 ---
@@ -52,7 +52,7 @@
 
 1. 请求前：`proxy::record_pending_log(PendingLog { ... })` → `status_code=0`
 2. 完成后：`proxy::record_and_bill_inner(BillRecord { ... })` 传入同一 `pending_log_id`（UPDATE，禁止再 INSERT）
-3. HA 重试复用同一条 pending；非首次失败由 `on_spawn_result_err` 内 reinstate 还原首次子渠快照
+3. HA 重试复用同一条 pending；**中间失败不 UPDATE logs**；环结束由 `ha.fail` / 成功路径一次落库；过程写入 `ha_usage_logs`
 
 ### PendingLog / BillRecord
 
@@ -84,8 +84,9 @@ proxy::pre_deduct_or_intercept(..., category).await
 
 | API | 用途 |
 |-----|------|
-| `record_zero_cost_upstream_fail` | 记账 + `upstream_fail`（上游失败主路径，可进 HA） |
-| `record_zero_cost_fail` | **只记账**，调用方自行 `BadRequest` / `PaymentRequired` 等（业务侧停 HA） |
+| `record_zero_cost_fail` | **只记账**；HA 终态 / 业务侧停切；调用方自行 `upstream_fail` / `BadRequest` / `PaymentRequired` |
+| `HaAttempt::park` + `FailBill::transport|http|biz` | 上游失败暂存（不写 logs）→ 外环 `ha.fail`；中间失败不记账 |
+| `spawn_protected` | 连接保护：独立 task 跑完上游/预扣/落库，oneshot 回传 |
 
 `pre_deducted`/`pre_deduct_gift`：尚未预扣传 `0.0`；预扣后失败退费传已扣金额。  
 成功计费、异步冻结、流结束结算：**不要**走上述 API。
@@ -100,21 +101,26 @@ proxy::pre_deduct_or_intercept(..., category).await
 let mut ha = HaAttempt::begin(&state, token.high_availability).await;
 while ha.cont() {
     // select → ha.on_select_err / access → ha.on_access_err
-    // spawn 内失败：record_zero_cost_upstream_fail / record_zero_cost_fail 后 return Err(e)
-    if ha.on_spawn_result_err(&state, &channel, e, Some(&url)).await {
+    // spawn 内：HaAttempt::park(&buf, FailBill::transport|http|biz(...), headers)
+    let ctx = HaBillCtx::new(&state, &token, model, &ep).category("聊天").db(db_model.as_ref());
+    if ha.fail(&ctx, &channel, e, Some(&url)).await {
         ha.bump(); continue;
     }
     break;
 }
-Err(ha.finish())
+Err(ha.finish(&HaBillCtx::new(&state, &token, model, entry_path).category("聊天")).await)
 ```
 
-- `on_spawn_result_err`：唯一失败入口——业务侧 `on_access_err`；上游失败在同一方法内完成 first_fail / 熔断或 skip-melt / reinstate
-- `finish()`：若 `last_err` 为业务侧则对外返回业务错误，否则全失败保留 first_fail
-- 不可 failover（余额不足、转发规则不匹配等）：`ha.on_access_err(e); break`（禁止 `return Err` 绕过 `finish`）
-- HA 重载（轮询/取消/列表）：必须 `router::fetch_channel(state, channel_id, channel_config_id)`，禁止只读父渠 + preset
-- 日志子配快照只存 `channel_config_id`；展示 YID 由 JOIN `channel_configs` 得到
-- 对外表面：`HaAttempt` + `policy` / `yid_label` / `channel_is_ha_flag` / `resolve_log_config_id` / `is_melted_down` / `scrub_failed_channels`（熔断写入在 `ha` 内私有，不经 `proxy`）
+- `FailBill::transport` / `http` / `biz`：三类上游失败账单；可选 `.stream` / `.detail` / `.pre` / `.content` / `.client`
+- `spawn_protected(fut)`：连接保护（oneshot 回传）；fire-and-forget 计费仍用普通 `tokio::spawn`
+- `park`：spawn 暂存 `FailBill` + 对外错误（不写 logs）
+- `fail`：记 snap / 首败；续试则退预扣并清零首败预扣；末次强制停切后 `settle_first`+`save`
+- `settle_first`：首败渠 + 首败 `endpoint` + `FailBill`；category 用当前 `HaBillCtx`
+- `finish`：pending 仍处理中则补记；返回首败/`last_err`；再 `save`
+- 业务侧：`record_zero_cost_*` + `on_access_err`（预扣失败勿 `?` 跳出）
+- `ok`/`save`：仅真实 HA 渠写 `ha_usage_logs`
+- `set_pending`：禁止 `None` 覆盖已有 id
+- 对外：`HaAttempt` + `HaBillCtx::new` + `FailBill` + `spawn_protected` + `policy` / …
 
 ---
 
@@ -148,7 +154,9 @@ POST 冻结（`billing_detail` 含「冻结」）→ GET 成功结算 / 失败�
 - Usage：`usage_extractor::parse_usage`（OpenAI / Gemini / 火山 / SSE）
 - 转发：`forward.rs`（`ResolvedForward`、`target_type`、白名单透传）
 - 素材：`asset_convert.rs`（仅 `asset_convert==true`；失败不阻塞主请求）
-- 异步任务：状态归一化 + `already_billed` + 从 `request_content` 回溯特征；轮询逻辑在 `task.rs`
+- 异步任务：`poll_task_result` + `PollTaskOpts`（查询前 5→4→3→2→1s，`POLL_FAIL_LIMIT=15`）；级联裁剪/抽帧经 `CascadeMk`→`cascade_mk_url`；增强状态仍由 GET/TaskPoller
+- 级联增强：S2 成功走 `cascade_on_s2_succeeded`（usage×res_mul + 按需抽帧写 stage2）；对外/用户端经 `cascade_s1_with_s2_url` 叠尾帧；落库 stage1 保持原尾帧
+- 级联裁剪：`crop_480p`（缺省 true）控制 720p←480 是否 MediaKit 裁剪；其它分辨率忽略
 - 宽日志查询（>16 列）：用 `TaskRelayLogRow` + `FromRow` 一次查出，禁止拆成二次 query / 超长元组
 
 ---
@@ -157,7 +165,7 @@ POST 冻结（`billing_detail` 含「冻结」）→ GET 成功结算 / 失败�
 
 - [ ] 兼容层 + Native 对等审查
 - [ ] PendingLog/BillRecord 命名字段 + 一条日志
-- [ ] HA 用 `HaAttempt`，错误路径走 `on_spawn_result_err`
+- [ ] HA 用 `HaAttempt`，上游失败走 `fail`（中间不写 logs）
 - [ ] 预扣费用 `pre_deduct_or_intercept`
 - [ ] features / usage / 异步冻结结算完整
 - [ ] HA 重载（轮询/取消/列表）用 `fetch_channel(..., channel_config_id)`
@@ -171,7 +179,7 @@ POST 冻结（`billing_detail` 含「冻结」）→ GET 成功结算 / 失败�
 |------|--------|
 | 计费 | `calculate_relay_cost`, `compute_cost` |
 | 日志 | `PendingLog`, `BillRecord`, `record_pending_log` |
-| HA | `HaAttempt::on_spawn_result_err`, `finish` |
+| HA | `FailBill::transport|http|biz`, `park` / `fail` / `ok` / `finish`, `spawn_protected` |
 | 预扣费 | `pre_deduct_or_intercept` |
 | Usage / 特征 | `parse_usage`, `extract_request_features` |
 | 异步 | `already_billed`, `"冻结"`, `TaskRelayLogRow` |

@@ -71,9 +71,9 @@ const ClassificationFilter: React.FC<ClassificationFilterProps> = ({
     onManage?: () => void,
     isLast: boolean = false
   ) => (
-    <div style={{ display: 'flex', alignItems: 'center', marginBottom: isLast ? 0 : 6, padding: 0 }}>
-      <Text type="secondary" style={{ width: 76, flexShrink: 0, fontSize: '13px', fontWeight: 500 }}>{label}</Text>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 6px', flexGrow: 1, alignItems: 'center' }}>
+    <div style={{ display: 'flex', alignItems: 'flex-start', marginBottom: isLast ? 0 : 10, padding: 0 }}>
+      <Text type="secondary" style={{ width: 76, flexShrink: 0, fontSize: '13px', fontWeight: 500, paddingTop: 3, lineHeight: '20px' }}>{label}</Text>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 8px', flexGrow: 1, alignItems: 'center' }}>
         <div
           onClick={() => onSelect(null)}
           style={{ 
@@ -154,12 +154,12 @@ const ClassificationFilter: React.FC<ClassificationFilterProps> = ({
   return (
     <div style={{ 
       backgroundColor: isLight ? '#fafafa' : '#141414', 
-      padding: '8px 12px', 
+      padding: '10px 12px', 
       borderRadius: 8, 
       marginBottom: 12,
       border: isLight ? '1px solid #e8e8e8' : '1px solid #282828'
     }}>
-      {renderFilterRow(t('models.provider', '官方服务商'), providers, selectedProvider, onProviderChange, onManageProviders, !hasApiProviders)}
+      {renderFilterRow(t('models.provider', '官方服务商'), providers, selectedProvider, onProviderChange, onManageProviders, false)}
       {hasApiProviders && renderFilterRow(t('models.api_provider', 'API服务商'), apiProviders!, selectedApiProvider ?? null, onApiProviderChange!, onManageApiProviders, false)}
       {renderFilterRow(t('models.type', '类型'), types, selectedType, onTypeChange, onManageTypes, true)}
     </div>

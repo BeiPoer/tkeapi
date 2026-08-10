@@ -59,6 +59,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{name}/toggle", post(toggle_plugin))
         .route("/{name}/config", post(update_plugin_config))
         .route("/{name}/ha-config", get(get_ha_config).post(save_ha_config))
+        .route("/{name}/ha-logs", get(get_ha_logs))
         .route(
             "/{name}/storage-config",
             get(get_storage_config).post(save_storage_config),
@@ -97,7 +98,12 @@ pub fn router() -> Router<Arc<AppState>> {
                 "/{name}/test-volcengine-connection",
                 post(test_volcengine_connection),
             )
-            .route("/{name}/enhance-logs", get(get_volcengine_enhance_logs));
+            .route("/{name}/enhance-logs", get(get_volcengine_enhance_logs))
+            .route(
+                "/{name}/enhance-logs/recover",
+                get(get_volcengine_enhance_logs_recover_status)
+                    .post(start_volcengine_enhance_logs_recover),
+            );
     }
 
     r
@@ -105,7 +111,8 @@ pub fn router() -> Router<Arc<AppState>> {
 
 /// 开源白名单：playground / docs_api / model_marketplace / site_portal / site_icons / high_availability_channel
 /// 其余商业插件由 feature 门控；未知插件仅在商业版放行。
-fn is_plugin_compiled(name: &str) -> bool {
+/// 转发规则等列表展示可复用此门控，与插件中心保持一致。
+pub fn is_plugin_compiled(name: &str) -> bool {
     match name {
         "site_icons" => cfg!(feature = "plugin_site_icons"),
         "site_portal" => cfg!(feature = "plugin_site_portal"),
@@ -256,7 +263,7 @@ pub struct ConfigRequest {
     pub docs_api_allow_guest: Option<bool>, // 文档API是否允许免登录访问
 }
 
-/// 判断用户是否允许调用素材 API（纯逻辑，便于单测）
+/// 判断用户是否允许调用素材 API（纯逻辑，与 HTTP 层解耦）
 /// - mode=level：按等级开关，缺省回落到 default_api_enabled（默认 false，需显式开启）
 /// - mode=user：include=仅列表内可调用；exclude=列表外可调用
 /// 注意：调用方须先校验插件 enabled + allowed_levels，本函数只做 API 细分闸
@@ -975,8 +982,13 @@ struct HaConfigRequest {
     pub ha_cooldown_network: i64,
     pub ha_cooldown_auth: i64,
     pub ha_cooldown_404: i64,
+    /// 整次 HA 墙钟预算（秒）；0=自动
+    #[serde(default)]
+    pub ha_total_timeout_secs: i64,
     #[serde(default)]
     pub ha_meltdown_whitelist: Vec<String>,
+    #[serde(default)]
+    pub ha_meltdown_blacklist: Vec<String>,
 }
 
 async fn get_ha_config(
@@ -1014,9 +1026,20 @@ async fn get_ha_config(
         .get("ha_cooldown_404")
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(3);
+    let ha_total_timeout_secs = configs
+        .get("ha_total_timeout_secs")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0)
+        .max(0);
     let ha_meltdown_whitelist: Vec<String> = configs
         .get("ha_meltdown_whitelist")
         .and_then(|v| serde_json::from_str(v).ok())
+        .map(normalize_ha_keywords)
+        .unwrap_or_default();
+    let ha_meltdown_blacklist: Vec<String> = configs
+        .get("ha_meltdown_blacklist")
+        .and_then(|v| serde_json::from_str(v).ok())
+        .map(normalize_ha_keywords)
         .unwrap_or_default();
 
     Ok(Json(json!({
@@ -1025,7 +1048,9 @@ async fn get_ha_config(
         "ha_cooldown_network": ha_cooldown_network,
         "ha_cooldown_auth": ha_cooldown_auth,
         "ha_cooldown_404": ha_cooldown_404,
+        "ha_total_timeout_secs": ha_total_timeout_secs,
         "ha_meltdown_whitelist": ha_meltdown_whitelist,
+        "ha_meltdown_blacklist": ha_meltdown_blacklist,
     })))
 }
 
@@ -1044,19 +1069,17 @@ async fn save_ha_config(
         return Err(AppError::Forbidden("需要管理员权限".to_string()));
     }
 
-    // Issue 6 修复：参数合法性校验
-    if payload.ha_max_retries < 1 || payload.ha_max_retries > 100 {
-        return Err(AppError::BadRequest(
-            "最大备用切换次数需在 1～100 之间".to_string(),
-        ));
+    if payload.ha_max_retries < 1 {
+        return Err(AppError::BadRequest("最大备用切换次数至少为 1".to_string()));
     }
     if payload.ha_cooldown_429 < 0
         || payload.ha_cooldown_network < 0
         || payload.ha_cooldown_auth < 0
         || payload.ha_cooldown_404 < 0
+        || payload.ha_total_timeout_secs < 0
     {
         return Err(AppError::BadRequest(
-            "燔断冷却时间不能为负数，请输入 0 或更大的整数".to_string(),
+            "熔断冷却时间与 HA 墙钟预算不能为负数，请输入 0 或更大的整数".to_string(),
         ));
     }
 
@@ -1095,14 +1118,176 @@ async fn save_ha_config(
         &payload.ha_cooldown_404.to_string(),
     )
     .await?;
+    upsert_config(
+        &state,
+        &name,
+        "ha_total_timeout_secs",
+        &payload.ha_total_timeout_secs.to_string(),
+    )
+    .await?;
     let whitelist_json =
-        serde_json::to_string(&payload.ha_meltdown_whitelist).unwrap_or_else(|_| "[]".to_string());
+        serde_json::to_string(&normalize_ha_keywords(payload.ha_meltdown_whitelist))
+            .unwrap_or_else(|_| "[]".to_string());
     upsert_config(&state, &name, "ha_meltdown_whitelist", &whitelist_json).await?;
+    let blacklist_json =
+        serde_json::to_string(&normalize_ha_keywords(payload.ha_meltdown_blacklist))
+            .unwrap_or_else(|_| "[]".to_string());
+    upsert_config(&state, &name, "ha_meltdown_blacklist", &blacklist_json).await?;
 
     // 重新加载配置，确保内存中及时生效
     state.load_ha_configs().await?;
 
     Ok(Json(json!({ "message": "高可用配置已保存并重载" })))
+}
+
+/// trim、去空、按小写去重（保留首次出现的原始大小写，便于后台展示）
+fn normalize_ha_keywords(list: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(list.len());
+    for s in list {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(trimmed.to_lowercase()) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+#[derive(Debug, Deserialize)]
+struct HaLogQuery {
+    page: Option<i64>,
+    page_size: Option<i64>,
+    keyword: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct HaLogRow {
+    log_id: i64,
+    group_aid: Option<String>,
+    attempt_count: i16,
+    final_ok: i16,
+    final_status_code: i32,
+    attempts: sqlx::types::Json<serde_json::Value>,
+    created_at: DbTs,
+    biz_log_id: Option<String>,
+    model: Option<String>,
+    status_code: Option<i32>,
+    error_message: Option<String>,
+    user_uid: Option<String>,
+    user_nickname: Option<String>,
+    channel_name: Option<String>,
+}
+
+/// 高可用插件使用日志（单表 + JOIN logs）
+async fn get_ha_logs(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<HaLogQuery>,
+    Extension(claims): Extension<auth::Claims>,
+) -> AppResult<Json<serde_json::Value>> {
+    if name != "high_availability_channel" {
+        return Err(AppError::BadRequest("仅高可用插件支持此接口".into()));
+    }
+    let role: String =
+        sqlx::query_scalar(&state.db.format_query("SELECT role FROM users WHERE id = ?"))
+            .bind(&claims.sub)
+            .fetch_one(&state.db.pool)
+            .await?;
+    if role != "admin" {
+        return Err(AppError::Forbidden("需要管理员权限".into()));
+    }
+
+    let page_size = query.page_size.unwrap_or(15).clamp(1, 100);
+    let keyword = query.keyword.as_deref().unwrap_or("").trim();
+    let kw = (!keyword.is_empty()).then(|| format!("%{keyword}%"));
+    let where_sql = if kw.is_some() {
+        " WHERE (l.log_id LIKE ? OR l.model LIKE ? OR h.group_aid LIKE ? \
+         OR EXISTS (SELECT 1 FROM users u2 WHERE u2.id = l.user_id AND (u2.uid LIKE ? OR u2.username LIKE ?)))"
+    } else {
+        ""
+    };
+
+    let total: i64 = if let Some(ref k) = kw {
+        let sql = state.db.format_query(&format!(
+            "SELECT COUNT(*) FROM ha_usage_logs h INNER JOIN logs l ON l.id = h.log_id{where_sql}"
+        ));
+        let mut q = sqlx::query_scalar::<_, i64>(&sql);
+        for _ in 0..5 {
+            q = q.bind(k);
+        }
+        q.fetch_one(&state.db.pool).await?
+    } else {
+        sqlx::query_scalar("SELECT COUNT(*) FROM ha_usage_logs")
+            .fetch_one(&state.db.pool)
+            .await?
+    };
+    if total == 0 {
+        return Ok(Json(json!({
+            "logs": [],
+            "total": 0,
+            "page": 1,
+            "page_size": page_size,
+        })));
+    }
+
+    let max_page = (total + page_size - 1) / page_size;
+    let page = query.page.unwrap_or(1).max(1).min(max_page);
+    let offset = (page - 1) * page_size;
+    let join = if kw.is_some() {
+        "INNER JOIN"
+    } else {
+        "LEFT JOIN"
+    };
+    let list_sql = state.db.format_query(&format!(
+        "SELECT h.log_id, h.group_aid, h.attempt_count, h.final_ok, h.final_status_code, \
+                h.attempts, h.created_at, l.log_id AS biz_log_id, l.model, \
+                l.status_code, l.error_message, u.uid AS user_uid, \
+                u.username AS user_nickname, c.name AS channel_name \
+         FROM ha_usage_logs h \
+         {join} logs l ON l.id = h.log_id \
+         LEFT JOIN users u ON l.user_id = u.id \
+         LEFT JOIN channels c ON l.channel_id = c.id \
+         {where_sql} \
+         ORDER BY h.created_at DESC LIMIT {page_size} OFFSET {offset}"
+    ));
+    let mut data_q = sqlx::query_as::<_, HaLogRow>(&list_sql);
+    if let Some(ref k) = kw {
+        for _ in 0..5 {
+            data_q = data_q.bind(k);
+        }
+    }
+    let rows = data_q.fetch_all(&state.db.pool).await?;
+    let logs: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "log_id": r.log_id,
+                "biz_log_id": r.biz_log_id,
+                "group_aid": r.group_aid,
+                "attempt_count": r.attempt_count,
+                "final_ok": r.final_ok,
+                "final_status_code": r.final_status_code,
+                "attempts": r.attempts.0,
+                "created_at": r.created_at,
+                "user_uid": r.user_uid,
+                "user_nickname": r.user_nickname,
+                "channel_name": r.channel_name,
+                "model": r.model,
+                "status_code": r.status_code,
+                "error_message": r.error_message,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "logs": logs,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    })))
 }
 
 /// 公开辅助：加载插件的 Volcengine 配置（供 assets 模块调用）
@@ -1278,7 +1463,7 @@ async fn get_plugin_api_logs(
 
 /// 系统内置体验方案默认种子（仅当 DB 中无自定义方案时用作初始化）
 fn get_default_schemes() -> Vec<serde_json::Value> {
-    vec![
+    let mut schemes = vec![
         json!({
             "id": "seedance2.0",
             "name": "Seedance 2.0 方案",
@@ -1351,19 +1536,26 @@ fn get_default_schemes() -> Vec<serde_json::Value> {
             ]
         }),
         json!({
-            "id": "gpt_image_2",
-            "name": "GPT Image 官方图片生成方案",
+            "id": "openai_image",
+            "name": "OpenAI 图片生成方案",
             "type": "image",
             "is_system": true,
-            "description": "OpenAI 最新旗舰图像生成模型，支持任意分辨率（WIDTHxHEIGHT）最高达 4K、背景控制（background）、内容审核等级调整（moderation）等全新特性",
+            "description": "OpenAI gpt-image / DALL·E 兼容图片方案，支持文生图与图生图（画布参考图自动走 /v1/images/edits）；含尺寸、画质、背景、审核与输出格式等官方参数",
             "params": [
-                {"key": "size", "label": "图片尺寸", "type": "radio", "options": ["auto", "1024x1024", "1536x1024", "1024x1536", "1536x864", "864x1536", "2560x1440", "1440x2560", "3840x2160", "2160x3840"], "default": "1024x1024", "hint": "支持自定义 WIDTHxHEIGHT 分辨率（如1536x864），宽高需为16的倍数且比例在1:3至3:1之间，最大支持4K"},
-                {"key": "quality", "label": "图片质量", "type": "select", "options": ["auto", "low", "medium", "high"], "default": "auto", "hint": "auto为自适应，high为最高画质，low为低画质，medium为标准画质"},
-                {"key": "output_format", "label": "输出格式", "type": "select", "options": ["png", "jpeg", "webp"], "default": "png"},
-                {"key": "output_compression", "label": "输出压缩率", "type": "slider", "default": 100, "min": 0, "max": 100, "step": 1, "hint": "仅在选择 webp 或 jpeg 格式时生效，默认 100 表示无损或最高画质"},
-                {"key": "background", "label": "背景控制", "type": "select", "options": ["auto", "opaque"], "default": "auto", "hint": "控制背景属性，auto为自适应，opaque为不透明"},
-                {"key": "moderation", "label": "内容审核等级", "type": "select", "options": ["auto", "low"], "default": "auto", "hint": "设置为 low 可以降低内容审核过滤的限制度"},
-                {"key": "n", "label": "生成数量", "type": "select", "options": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "default": 1, "unit": "张"}
+                {"key": "size", "label": "图片尺寸", "type": "radio", "options": ["auto", "1024x1024", "1536x1024", "1024x1536", "1792x1024", "1024x1792", "1536x864", "864x1536", "2560x1440", "1440x2560", "3840x2160", "2160x3840"], "default": "1024x1024"},
+                {"key": "n", "label": "生成数量", "type": "radio", "options": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "default": 1, "unit": "张"}
+            ]
+        }),
+        json!({
+            "id": "openai_video",
+            "name": "OpenAI 视频生成方案",
+            "type": "video",
+            "is_system": true,
+            "description": "OpenAI 兼容视频通道（含 Sora 等），支持文生视频与图生视频；画布参考图自动写入 images。字段对齐本站 /v1/video/generations 透传协议",
+            "params": [
+                {"key": "duration", "label": "视频时长", "type": "radio", "options": [4, 5, 8, 10, 12, 15], "default": 4, "unit": "秒", "hint": "本站 OpenAI 兼容协议使用 duration"},
+                {"key": "resolution", "label": "输出分辨率", "type": "radio", "options": ["480p", "720p", "1080p"], "default": "480p", "hint": "兼容通道兜底字段，与计费对齐"},
+                {"key": "ratio", "label": "画面比例", "type": "radio", "options": ["16:9", "9:16", "1:1"], "default": "16:9"},
             ]
         }),
         json!({
@@ -1495,7 +1687,31 @@ fn get_default_schemes() -> Vec<serde_json::Value> {
                 {"key": "seed", "label": "随机种子", "type": "number", "default": -1, "min": -1, "max": 4294967295_i64, "hint": "-1 表示随机"},
             ]
         }),
-    ]
+    ];
+    for s in &mut schemes {
+        ensure_scheme_max_reference_images(s);
+    }
+    schemes
+}
+
+/// 方案固定字段：最大参考图数量（与 name / description 同级）
+/// 缺省：Gemini 图生 14；对话 0；其余图/视频 7
+fn ensure_scheme_max_reference_images(s: &mut serde_json::Value) {
+    if s.get("max_reference_images").is_some() {
+        return;
+    }
+    let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let ty = s.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let n = if id == "gemini_flash_image" {
+        14
+    } else if ty == "chat" {
+        0
+    } else {
+        7
+    };
+    if let Some(obj) = s.as_object_mut() {
+        obj.insert("max_reference_images".into(), json!(n));
+    }
 }
 
 /// 从 DB 加载方案列表（优先使用 DB 存储，DB 为空时 fallback 到内置默认）
@@ -1540,16 +1756,29 @@ async fn load_schemes_from_db(state: &AppState, plugin_name: &str) -> Vec<serde_
                             if !existing_ids.contains(id) {
                                 schemes.push(d);
                             } else {
-                                // 替换为最新的系统内置方案以同步参数配置
+                                // 替换为最新的系统内置方案以同步参数配置；
+                                // 保留管理员已配置的固定字段 max_reference_images
                                 if let Some(pos) = schemes
                                     .iter()
                                     .position(|s| s.get("id").and_then(|v| v.as_str()) == Some(id))
                                 {
-                                    schemes[pos] = d;
+                                    let saved_max =
+                                        schemes[pos].get("max_reference_images").cloned();
+                                    let mut merged = d;
+                                    if let Some(v) = saved_max {
+                                        if let Some(obj) = merged.as_object_mut() {
+                                            obj.insert("max_reference_images".into(), v);
+                                        }
+                                    }
+                                    ensure_scheme_max_reference_images(&mut merged);
+                                    schemes[pos] = merged;
                                 }
                             }
                         }
                     }
+                }
+                for s in &mut schemes {
+                    ensure_scheme_max_reference_images(s);
                 }
                 return schemes;
             }
@@ -2155,6 +2384,10 @@ async fn get_playground_public_config(
             "scheme_id": scheme_id,
             "scheme_name": scheme.and_then(|s| s.get("name")).and_then(|v| v.as_str()).unwrap_or(""),
             "scheme_type": scheme_type,
+            "max_reference_images": scheme
+                .and_then(|s| s.get("max_reference_images"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(7),
             "endpoint": scheme.and_then(|s| s.get("endpoint")).and_then(|v| v.as_str()).unwrap_or(""),
             "poll_endpoint": scheme.and_then(|s| s.get("poll_endpoint")).and_then(|v| v.as_str()).unwrap_or(""),
             "billing": billing_info,
@@ -3179,23 +3412,30 @@ pub struct VolcEnhanceLog {
     pub channel_name: Option<String>,
     pub model_name: Option<String>,
     pub task_id: Option<String>,
-    /// 列表不选大字段（默认 None）；详情弹窗走 `/logs/{id}/detail`
-    #[sqlx(default)]
-    pub request_content: Option<String>,
-    #[sqlx(default)]
-    pub response_content: Option<String>,
-    #[sqlx(default)]
-    pub upstream_req_content: Option<String>,
     pub error_message: Option<String>,
 }
 
-/// 解析 MediaKit 预置 mid + model_id，供 logs.model = ANY(...) 走索引过滤
+/// 写入 MediaKit 关联：`volcengine_enhance_logs.log_id` = `logs.id`（幂等）
+#[cfg(feature = "plugin_volcengine_enhance")]
+pub async fn link_volcengine_enhance_log(state: &AppState, logs_pk: i64) {
+    if logs_pk <= 0 {
+        return;
+    }
+    let _ = sqlx::query(&state.db.format_query(
+        "INSERT INTO volcengine_enhance_logs (log_id) VALUES (?) ON CONFLICT (log_id) DO NOTHING",
+    ))
+    .bind(logs_pk)
+    .execute(&state.db.pool)
+    .await;
+}
+
+/// 预置 mid + 库内 model_id（历史回填过滤）
 #[cfg(feature = "plugin_volcengine_enhance")]
 async fn resolve_volc_enhance_model_keys(state: &AppState) -> Vec<String> {
-    let pairs: Vec<(String, String)> = sqlx::query_as(
+    let model_ids: Vec<String> = sqlx::query_scalar(
         &state
             .db
-            .format_query("SELECT mid, model_id FROM models WHERE mid = ANY(?)"),
+            .format_query("SELECT model_id FROM models WHERE mid = ANY(?)"),
     )
     .bind(VOLC_ENHANCE_MIDS)
     .fetch_all(&state.db.pool)
@@ -3203,24 +3443,20 @@ async fn resolve_volc_enhance_model_keys(state: &AppState) -> Vec<String> {
     .unwrap_or_default();
 
     let mut keys: Vec<String> = VOLC_ENHANCE_MIDS.iter().map(|s| (*s).to_string()).collect();
-    for (mid, model_id) in pairs {
-        if !keys.iter().any(|k| k == &mid) {
-            keys.push(mid);
-        }
-        let model_id = model_id.trim();
-        if !model_id.is_empty() && !keys.iter().any(|k| k == model_id) {
-            keys.push(model_id.to_string());
+    for mid in model_ids {
+        let mid = mid.trim();
+        if !mid.is_empty() && !keys.iter().any(|k| k == mid) {
+            keys.push(mid.to_string());
         }
     }
     keys
 }
 
 #[cfg(feature = "plugin_volcengine_enhance")]
-pub async fn get_volcengine_enhance_logs(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Query(query): axum::extract::Query<VolcLogQuery>,
-    Extension(claims): Extension<crate::auth::Claims>,
-) -> crate::error::AppResult<Json<serde_json::Value>> {
+async fn require_volc_admin(
+    state: &AppState,
+    claims: &crate::auth::Claims,
+) -> crate::error::AppResult<()> {
     let role: String =
         sqlx::query_scalar(&state.db.format_query("SELECT role FROM users WHERE id = ?"))
             .bind(&claims.sub)
@@ -3231,25 +3467,42 @@ pub async fn get_volcengine_enhance_logs(
             "需要管理员权限".to_string(),
         ));
     }
+    Ok(())
+}
+
+#[cfg(feature = "plugin_volcengine_enhance")]
+async fn volc_enhance_linked_count(state: &AppState) -> i64 {
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM volcengine_enhance_logs")
+        .fetch_one(&state.db.pool)
+        .await
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "plugin_volcengine_enhance")]
+pub async fn get_volcengine_enhance_logs(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<VolcLogQuery>,
+    Extension(claims): Extension<crate::auth::Claims>,
+) -> crate::error::AppResult<Json<serde_json::Value>> {
+    require_volc_admin(&state, &claims).await?;
 
     let page_size = query.page_size.unwrap_or(15).clamp(1, 100);
     let keyword = query.keyword.as_deref().unwrap_or("").trim().to_string();
-    let model_keys = resolve_volc_enhance_model_keys(&state).await;
 
-    // 走 idx_logs_model_created；COUNT 不 JOIN users（关键词用子查询/精确 user_id）
-    let mut where_clause = " WHERE l.model = ANY(?)".to_string();
+    // 关联表驱动：COUNT/分页落在窄表，再 JOIN logs（不再 logs.model=ANY 全表扫）
+    let mut where_clause = String::new();
     let mut kw_binds: Vec<String> = Vec::new();
 
     if !keyword.is_empty() {
         let kw = format!("%{}%", keyword);
         if let Some(uid) = crate::api::logs::lookup_user_id(&state.db, &keyword).await? {
-            where_clause.push_str(" AND (l.log_id LIKE ? OR l.model LIKE ? OR l.user_id = ?)");
+            where_clause.push_str(" WHERE (l.log_id LIKE ? OR l.model LIKE ? OR l.user_id = ?)");
             kw_binds.push(kw.clone());
             kw_binds.push(kw);
             kw_binds.push(uid);
         } else {
             where_clause.push_str(
-                " AND (l.log_id LIKE ? OR l.model LIKE ? OR l.user_id IN \
+                " WHERE (l.log_id LIKE ? OR l.model LIKE ? OR l.user_id IN \
                  (SELECT id FROM users WHERE uid LIKE ? OR username LIKE ?))",
             );
             kw_binds.push(kw.clone());
@@ -3259,10 +3512,15 @@ pub async fn get_volcengine_enhance_logs(
         }
     }
 
-    let count_sql = state
-        .db
-        .format_query(&format!("SELECT COUNT(*) FROM logs l{where_clause}"));
-    let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql).bind(&model_keys);
+    let count_sql = if keyword.is_empty() {
+        "SELECT COUNT(*) FROM volcengine_enhance_logs".to_string()
+    } else {
+        state.db.format_query(&format!(
+            "SELECT COUNT(*) FROM volcengine_enhance_logs v \
+             INNER JOIN logs l ON l.id = v.log_id{where_clause}"
+        ))
+    };
+    let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
     for v in &kw_binds {
         count_q = count_q.bind(v);
     }
@@ -3274,6 +3532,11 @@ pub async fn get_volcengine_enhance_logs(
             "total": 0,
             "page": 1,
             "page_size": page_size,
+            "linked": if keyword.is_empty() {
+                0
+            } else {
+                volc_enhance_linked_count(&state).await
+            },
         })));
     }
 
@@ -3290,10 +3553,21 @@ pub async fn get_volcengine_enhance_logs(
              LIMIT 1 \
          ) m ON TRUE";
 
-    let data_sql = state
-        .db
-        .format_query(&crate::api::logs::deferred_join_page_sql(
-            "SELECT \
+    // 先从关联表取 log_id，再回表 JOIN（log_id 单调 ≈ 时间序）
+    let page_ids_sql = if keyword.is_empty() {
+        format!(
+            "SELECT v.log_id AS id FROM volcengine_enhance_logs v \
+             ORDER BY v.log_id DESC LIMIT {page_size} OFFSET {offset}"
+        )
+    } else {
+        state.db.format_query(&format!(
+            "SELECT v.log_id AS id FROM volcengine_enhance_logs v \
+             INNER JOIN logs l ON l.id = v.log_id{where_clause} \
+             ORDER BY v.log_id DESC LIMIT {page_size} OFFSET {offset}"
+        ))
+    };
+    let data_sql = format!(
+        "SELECT \
             l.id, \
             l.log_id, \
             l.user_id, \
@@ -3309,23 +3583,111 @@ pub async fn get_volcengine_enhance_logs(
             c.name AS channel_name, \
             m.name AS model_name, \
             l.task_id, \
-            l.error_message",
-            LIST_JOINS,
-            &where_clause,
-            page_size,
-            offset,
-        ));
+            l.error_message \
+         FROM ({page_ids_sql}) page \
+         INNER JOIN logs l ON l.id = page.id \
+         {LIST_JOINS} \
+         ORDER BY l.id DESC"
+    );
 
-    let mut data_q = sqlx::query_as::<_, VolcEnhanceLog>(&data_sql).bind(&model_keys);
+    let mut data_q = sqlx::query_as::<_, VolcEnhanceLog>(&data_sql);
     for v in &kw_binds {
         data_q = data_q.bind(v);
     }
     let logs: Vec<VolcEnhanceLog> = data_q.fetch_all(&state.db.pool).await?;
+    let linked = if keyword.is_empty() {
+        total
+    } else {
+        volc_enhance_linked_count(&state).await
+    };
 
     Ok(Json(serde_json::json!({
         "logs": logs,
         "total": total,
         "page": page,
         "page_size": page_size,
+        "linked": linked,
+    })))
+}
+
+#[cfg(feature = "plugin_volcengine_enhance")]
+static VOLC_LOG_RECOVER_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "plugin_volcengine_enhance")]
+pub async fn get_volcengine_enhance_logs_recover_status(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<crate::auth::Claims>,
+) -> crate::error::AppResult<Json<serde_json::Value>> {
+    require_volc_admin(&state, &claims).await?;
+    Ok(Json(serde_json::json!({
+        "running": VOLC_LOG_RECOVER_RUNNING.load(std::sync::atomic::Ordering::Relaxed),
+        "linked": volc_enhance_linked_count(&state).await,
+    })))
+}
+
+/// 后台分批回填：历史 logs（model∈预置 mid/model_id）→ 关联表
+#[cfg(feature = "plugin_volcengine_enhance")]
+pub async fn start_volcengine_enhance_logs_recover(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<crate::auth::Claims>,
+) -> crate::error::AppResult<Json<serde_json::Value>> {
+    require_volc_admin(&state, &claims).await?;
+
+    let already = VOLC_LOG_RECOVER_RUNNING
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err();
+
+    let linked = volc_enhance_linked_count(&state).await;
+    if already {
+        return Ok(Json(serde_json::json!({
+            "running": true,
+            "linked": linked,
+            "started": false,
+        })));
+    }
+
+    let state_bg = Arc::clone(&state);
+    tokio::spawn(async move {
+        let keys = resolve_volc_enhance_model_keys(&state_bg).await;
+        let insert_sql = state_bg.db.format_query(
+            "INSERT INTO volcengine_enhance_logs (log_id) \
+             SELECT l.id FROM logs l \
+             WHERE l.model = ANY(?) \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM volcengine_enhance_logs v WHERE v.log_id = l.id \
+               ) \
+             ORDER BY l.id \
+             LIMIT 500",
+        );
+        loop {
+            let n = sqlx::query(&insert_sql)
+                .bind(&keys)
+                .execute(&state_bg.db.pool)
+                .await
+                .map(|r| r.rows_affected())
+                .unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            tracing::info!("[MediaKit] 日志关联回填 +{n}");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        VOLC_LOG_RECOVER_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+        tracing::info!(
+            "[MediaKit] 日志关联回填完成，当前关联={}",
+            volc_enhance_linked_count(&state_bg).await
+        );
+    });
+
+    Ok(Json(serde_json::json!({
+        "running": true,
+        "linked": linked,
+        "started": true,
     })))
 }

@@ -1,10 +1,10 @@
-cfb975b01753e450e7672978450739fec5d6c5f3cfb975b0cgm5pm2026-08-02 14:44:53feat: 优化 SVG 图标与 Layout 布局，增强渠道配置与模型配额机制
-ad9b0a2e963e2a9f5cfe3bb129ddeddd04dc9f6bad9b0a2eaqachatm5pm2026-08-02 12:38:26chore: save latest changes
-d01247b4e5d7c9e4d8608031a796df3a9feb64e9d01247b4aqachatm5pm2026-08-02 11:21:10chore: save changes to cgdev0802
-75c22af31e679aac56be581611c4473d362d64ca75c22af3cgm5pm2026-08-01 19:30:03feat: 优化模型广场多语言与素材管理、升级 Playground 与日志交互组件
-682b5b7092671cf0e0cd63dd43fa6497f29516ce682b5b70cgm5pm2026-08-01 10:44:35feat: 优化模型广场趋势页横向轮播与实时搜索，增强 Dashboard/Logs UI 及 dev.sh 数据库连接
-231b07c7013cbf52eb1ea3ae2a88ec3b781426de231b07c7cgm5pm2026-07-31 21:08:57fix: 完善日志与任务日志 API 多语言国际化配置与页面逻辑
-e6d3099a07a65ed0dc3f188674e49c308c0c75bae6d3099acgm5pm2026-07-31 21:08:17merge: 合并 origin/chenzs 到 cgdev0726
-e79c3c7f033be2863e054ac89b7842589b29b9a8e79c3c7fcgm5pm2026-07-31 20:56:25fix: 优化模型广场视觉类型并补全 dev-all 脚本 PATH 与端口导出
-4f57a0defeda636cb91586eea8be54f01091ede34f57a0deaqachatm5pm2026-07-31 20:54:13fix: update logs page UI and logic
-51a0441e5612ca6a35f8361f51b6a58bd9e98c9f51a0441ebubyday2026-07-31 19:12:37perf(http): 出站 Client 连接层加固与非流式防挂死超时
+a7c0759ef9e3363c480901df3d2a9849708333f2a7c0759ecgm5pm2026-08-09 23:56:47feat(kyc): 补充实名认证与实人核验 API 逻辑，优化渠道转发规则与系统设置
+7337d7c08c82cb4c22d87bf1a9550e80abb1ff997337d7c0cgm5pm2026-08-09 23:21:53chore: 合并远端分支 origin/cgdev0808 到本地 cgdev0726
+0c206eae9b52138df5019971a4b69d5b75200e850c206eaecgm5pm2026-08-09 23:18:29docs: 提交本地 git 日志以准备合并
+b013706a6125574cd51743bc8a2512995cf619c0b013706acgm5pm2026-08-09 23:17:46docs: 更新 git 日志记录
+6d1b69d44c60210b2ce567c8f5cedb1f943084e26d1b69d4aqachatm5pm2026-08-09 13:11:30chore: save latest changes
+0ba5b594aa73e51ad9f4f27477095a5874646b270ba5b594aqachatm5pm2026-08-09 12:25:23chore: save latest changes
+ff01bfdfdd6fb391bcfa972c05c48682ec5b0566ff01bfdfaqachatm5pm2026-08-08 12:24:38chore: merge origin/chenzs and resolve conflict in git_log.txt
+3699c7c4c1388ca9a5148084284b57552aefe3d53699c7c4aqachatm5pm2026-08-08 12:24:27chore: save local changes before merge
+0435b85afd78035bc1e3f5eda4725b8c97fb9a100435b85abubyday2026-08-07 23:00:36feat(relay): 级联 720p←480 裁剪开关 crop_480p
+4e2dee86e5cdac9e8518bb8259bcc3d352718d4d4e2dee86bubyday2026-08-07 22:26:27refactor(relay): 轮询 opts/CascadeMk 收口，POLL_FAIL_LIMIT=15

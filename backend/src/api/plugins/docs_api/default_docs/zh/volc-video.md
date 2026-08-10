@@ -2,7 +2,7 @@
 
 火山方舟（Volcengine Ark）平台提供了国内顶尖的视频生成大模型（如 `doubao-seedance-2-0`）。支持超强的画面物理规律还原与极高的光影连贯性。
 
-网关已将其接入地址与 OpenAI 官方规范完全对齐。除了文生视频、图生视频，还支持“图片参考 + 视频参考”多模态融合生成。
+通过 OpenAI 兼容接口调用：支持文生视频、图生视频，以及图片/视频/音频多模态参考。
 
 ---
 
@@ -28,7 +28,7 @@ curl -X POST https://{{domain}}/v1/video/generations \
 ```
 
 ### B. 单图/首尾帧图生视频
-通过传入 1 或 2 张图片 URL，网关会自动将第一张图识别为首帧（若传 2 张，则第二张自动识别为尾帧），生成连贯平滑的动态视频。
+传入 1 张图为首帧；传入 2 张图时，第一张为首帧、第二张为尾帧。
 ```bash
 curl -X POST https://{{domain}}/v1/video/generations \
   -H "Authorization: Bearer sk-your_token_here" \
@@ -47,7 +47,7 @@ curl -X POST https://{{domain}}/v1/video/generations \
 ```
 
 ### C. 多图外观/主体参考生视频 (不含视频参考)
-当您想指定多张图片作为外观参考时，可以使用带有指定角色的对象数组。在没有视频参考时，网关底层的 `role` 字段（也可以使用 `type` 字段完全等价替代）应指定为 `"reference_image"`。
+多张外观参考时，使用带 `role`（或等价 `type`）的对象数组，取值为 `"reference_image"`。
 ```bash
 curl -X POST https://{{domain}}/v1/video/generations \
   -H "Authorization: Bearer sk-your_token_here" \
@@ -127,7 +127,7 @@ curl -X GET https://{{domain}}/v1/video/generations/video_task_abc123 \
 | `duration` | `integer` | 否 | `5` | 视频时长（秒），可选 `5` 或 `10`。 |
 | `camera_fixed` | `boolean` | 否 | `false` | 是否锁定镜头（不使用镜头运镜，保持静态视角拍摄）。 |
 | `generate_audio` | `boolean` | 否 | `false` | 是否同步生成匹配的视频背景环境音效。 |
-| `web_search` | `boolean` | 否 | `false` | 是否启用联网搜索（OpenAI 兼容布尔开关）。网关会自动转换为火山方舟等通道所需格式。 |
+| `web_search` | `boolean` | 否 | `false` | 是否启用联网搜索。 |
 | `seed` | `integer` | 否 | - | 随机种子值，用于多次生成时的效果控制。 |
 
 ---

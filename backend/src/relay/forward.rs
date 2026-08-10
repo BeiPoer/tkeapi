@@ -18,7 +18,7 @@ use std::collections::HashMap;
 /// 转发规则解析结果
 #[derive(Debug, Clone)]
 pub struct ResolvedForward {
-    /// 目标协议类型: "openai", "volcengine", "volcengine_chat", "gemini", "gemini_image", "anthropic", "kling", "jimeng_image", "jimeng_video"
+    /// 目标协议类型: "openai", "volcengine", "volcengine_chat", "gemini", "gemini_image", "anthropic", "kling", "kling_video", "jimeng_image", "jimeng_video", "minimax_image", "minimax_video"
     pub target_type: String,
     /// 上游路径 e.g. "/api/v3/chat/completions"
     pub upstream_path: String,
@@ -42,11 +42,13 @@ pub struct ResolvedForward {
     pub mid: Option<String>,
     /// 是否为级联转发模型（二阶段级联执行）
     pub is_cascade: bool,
+    /// 级联：目标 720p 且底座为 480p 时，是否 MediaKit 居中裁成标准 480p；缺省 true（兼容现网）；其它分辨率忽略
+    pub crop_480p: bool,
     /// 是否将 content 字段提取为 prompt（针对火山视频某些上游通道特判兼容）
     pub content_to_prompt: bool,
     /// 级联分辨率倍率表（config_json.res_mul）；阶段二：有 usage 则乘入 token，否则乘费用；空表=1.0
     pub res_mul: HashMap<String, f64>,
-    /// 级联：目标分辨率 → 增强版本（fast|standard|pro|ai）；缺 key → 标准版
+    /// 级联：目标分辨率 → 增强版本（fast|standard|pro|ai）；ai 仅 720p/1080p/2k；缺 key/非法 → 标准版
     pub res_enhance: HashMap<String, String>,
     /// 级联：目标分辨率 → 阶段一座底分辨率；缺 key / 非法则用默认一级底座
     pub res_base: HashMap<String, String>,
@@ -69,6 +71,7 @@ impl Default for ResolvedForward {
             eid: String::new(),
             mid: None,
             is_cascade: false,
+            crop_480p: true,
             content_to_prompt: false,
             res_mul: HashMap::new(),
             res_enhance: HashMap::new(),
@@ -193,7 +196,7 @@ pub async fn resolve_forward_rule(
         match owned_model.as_ref() {
             Some(m) => m,
             None => {
-                tracing::debug!("[Forward] 未找到模型 模型='{}' 类别={}", model_id, category);
+                tracing::info!("[Forward] 未找到模型 模型='{}' 类别={}", model_id, category);
                 return None;
             }
         }
@@ -234,7 +237,7 @@ pub async fn resolve_forward_rule(
             tracing::warn!("[Forward] 未找到规则 规则IDs={:?}", rule_ids);
         }
     } else {
-        tracing::debug!("[Forward] 未绑定规则 模型='{}' (按协议回退)", model_id);
+        tracing::info!("[Forward] 未绑定规则 模型='{}' (按协议回退)", model_id);
     }
 
     // 3. 按 category 筛选
@@ -318,7 +321,7 @@ pub async fn resolve_forward_rule(
     tracing::info!(
         "[Forward] 命中规则 名称='{}' EID={}: 目标类型={} 上游路径={} 鉴权类型={} \
          素材转换={} 素材命名空间={} 轮询路径={:?} 素材审核={} \
-         级联={} 提示词转换={} 关联MID='{}'",
+         级联={} 裁剪480={} 提示词转换={} 关联MID='{}'",
         rule.name,
         rule.eid,
         resolved.target_type,
@@ -329,6 +332,7 @@ pub async fn resolve_forward_rule(
         resolved.poll_path,
         resolved.asset_moderation,
         resolved.is_cascade,
+        resolved.crop_480p,
         resolved.content_to_prompt,
         model.mid
     );
@@ -398,22 +402,45 @@ pub fn build_upstream_url(
 }
 
 /// 可灵动态路径解析：根据已转换的上游请求体内容动态调整端点路径。
-/// Omni 端点不受影响（由转发规则直接指定），仅对标准视频/图片端点进行自动分发。
+/// - `kling`：旧 /v1/videos/* 文图多图分发；Omni 固定
+/// - `kling_video`：有 `contents` → `/image-to-video/${model}`，否则 `/text-to-video/${model}`；Omni 固定
 pub fn resolve_kling_dynamic_path(
     resolved: &mut ResolvedForward,
     upstream_body: &serde_json::Value,
 ) {
-    if resolved.target_type != "kling" {
+    let tt = resolved.target_type.as_str();
+    if tt != "kling" && tt != "kling_video" {
         return;
     }
-    let path = &resolved.upstream_path;
+    let path = resolved.upstream_path.as_str();
 
     // Omni 端点由转发规则直接指定，不做动态调整
     if path.contains("omni-video") || path.contains("omni-image") {
         return;
     }
 
-    // 视频动态路由：根据请求体内容判断实际端点
+    // 新协议：文/图共用一条规则，有非空 contents → image-to-video，否则 text-to-video
+    if tt == "kling_video"
+        && (path.contains("/text-to-video/") || path.contains("/image-to-video/"))
+    {
+        let suffix = path.rsplit('/').next().unwrap_or("");
+        if suffix.is_empty() {
+            return;
+        }
+        let has_contents = upstream_body
+            .get("contents")
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty());
+        let prefix = if has_contents {
+            "image-to-video"
+        } else {
+            "text-to-video"
+        };
+        resolved.upstream_path = format!("/{}/{}", prefix, suffix);
+        return;
+    }
+
+    // 旧协议视频动态路由
     if path.contains("text2video")
         || path.contains("image2video")
         || path.contains("multi-image2video")
@@ -433,7 +460,7 @@ pub fn resolve_kling_dynamic_path(
         return;
     }
 
-    // 图片动态路由
+    // 旧协议图片动态路由
     if path.contains("images") {
         if upstream_body
             .get("subject_image_list")
@@ -442,7 +469,6 @@ pub fn resolve_kling_dynamic_path(
         {
             resolved.upstream_path = "/v1/images/multi-image2image".to_string();
         }
-        // 其他情况保持转发规则原始路径（如 /v1/images/generations）
     }
 }
 
@@ -676,9 +702,10 @@ pub async fn transform_request_body(
         // 参考文档：https://atptoken.ai/zh-cn/docs/media-video
         "atp_video" => build_atp_video_body(model, body),
 
-        // 可灵 AI 视频/图片：将 OpenAI 兼容格式转换为可灵官方 API 格式
-        // 参考文档：https://klingai.com/document-api/apiReference
+        // 可灵 AI 视频/图片：旧 /v1/videos/* 扁平协议
         "kling" => build_kling_body(model, body, category, &resolved.upstream_path),
+        // 可灵 3.0 推荐：URL 含模型，body 为 contents/settings/options
+        "kling_video" => build_kling_v3_body(body, &resolved.upstream_path),
 
         // 阿里百炼 DashScope 视频：OpenAI → input/parameters 格式
         // 参考文档：https://help.aliyun.com/zh/model-studio/text-to-video-api-reference
@@ -754,6 +781,11 @@ pub async fn transform_request_body(
 
         // MiniMax 视频生成（/v2/video_generation）
         "minimax_video" => build_minimax_video_body(model, body),
+
+        // MiniMax 图片生成（/v1/image_generation）：文生图 + 图生图
+        // 参考：https://platform.minimaxi.com/docs/api-reference/image-generation-t2i
+        //       https://platform.minimaxi.com/docs/api-reference/image-generation-i2i
+        "minimax_image" => build_minimax_image_body(model, body),
 
         // 火山方舟聊天：保持 OpenAI 格式（火山完全兼容 OpenAI）
         "volcengine_chat" => {
@@ -1176,7 +1208,7 @@ pub fn build_auth_headers(resolved: &ResolvedForward, api_key: &str) -> Vec<(Str
         // 火山方舟语音合成 TTS V3：X-Api-Key 鉴权 + X-Api-Resource-Id 指定模型版本
         "volcengine_tts" => vec![("X-Api-Key".to_string(), api_key.to_string())],
         _ => {
-            // 可灵 JWT 自动生成：api_key 格式为 "access_key:secret_key"
+            // 可灵旧协议(kling)：AccessKey:SecretKey → JWT；新协议(kling_video)：官方 API Key 直传 Bearer
             if resolved.target_type == "kling" {
                 if let Some(token) = generate_kling_jwt(api_key) {
                     vec![("Authorization".to_string(), format!("Bearer {}", token))]
@@ -1262,7 +1294,7 @@ pub fn check_upstream_post_error(
         if is_openai_compat {
             // OpenAI 兼容请求：通过 format_openai 把错误转换为标准 OpenAI 格式 JSON 返回
             let formatted =
-                super::response_formatter::format_openai(category, response_body, true, None);
+                super::response_formatter::format_openai(category, response_body, false, None);
             (formatted.clone(), Some(formatted))
         } else {
             // 官方原生请求：报错格式原样返回不能转为 OpenAI，但仍需提供 Some(response_body) 触发拦截退费
@@ -1367,6 +1399,11 @@ pub fn parse_forward_config(
             .get("is_cascade")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        // 缺省 true：与历史「720p←480 必裁」一致；显式 false 跳过裁剪
+        crop_480p: config
+            .get("crop_480p")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
         content_to_prompt: config
             .get("content_to_prompt")
             .and_then(|v| v.as_bool())
@@ -1477,14 +1514,14 @@ pub fn infer_forward_from_base_url(
             _ => default_openai_forward("/v1/chat/completions"),
         }
     } else if url_lower.contains("minimaxi.com") {
-        if category == "视频" {
-            let mut r = make_forward("minimax_video", "/v2/video_generation", "bearer");
-            r.poll_path = Some("/v2/query/video_generation/${task_id}".to_string());
-            r
-        } else if category == "图片" {
-            make_forward("openai", "/v1/images/generations", "bearer")
-        } else {
-            default_openai_forward("/v1/chat/completions")
+        match category {
+            "视频" => {
+                let mut r = make_forward("minimax_video", "/v2/video_generation", "bearer");
+                r.poll_path = Some("/v2/query/video_generation/${task_id}".to_string());
+                r
+            }
+            "图片" => make_forward("minimax_image", "/v1/image_generation", "bearer"),
+            _ => default_openai_forward("/v1/chat/completions"),
         }
     } else if url_lower.contains("atptoken.ai") {
         if category == "视频" {
@@ -2203,6 +2240,88 @@ fn build_minimax_video_body(model: &str, body: &serde_json::Value) -> serde_json
     result
 }
 
+// ── MiniMax 图片生成请求体构建器（文生图 / 图生图）────────────────
+// 官方参数大多与 OpenAI 同名；仅少数需映射：size/ratio→aspect_ratio、
+// watermark→aigc_watermark、b64_json→base64、image→subject_reference。
+
+const MINIMAX_IMAGE_PASSTHROUGH_KEYS: &[&str] = &[
+    "prompt",
+    "aspect_ratio",
+    "width",
+    "height",
+    "n",
+    "seed",
+    "style",
+    "prompt_optimizer",
+    "aigc_watermark",
+    "subject_reference",
+    "response_format",
+];
+
+fn build_minimax_image_body(model: &str, body: &serde_json::Value) -> serde_json::Value {
+    let mut result = serde_json::json!({ "model": model });
+
+    // 1. 官方字段透传（原生优先，支持官方参数直调）
+    for key in MINIMAX_IMAGE_PASSTHROUGH_KEYS {
+        if let Some(v) = body.get(*key) {
+            if !v.is_null() {
+                result[*key] = v.clone();
+            }
+        }
+    }
+
+    // 2. OpenAI size / ratio → aspect_ratio（官方 aspect_ratio 或 width+height 优先）
+    let has_wh = result.get("width").is_some() && result.get("height").is_some();
+    if result.get("aspect_ratio").is_none() && !has_wh {
+        if let Some(r) = body
+            .get("ratio")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            result["aspect_ratio"] = serde_json::json!(r);
+        } else if let Some(size) = body.get("size").and_then(|v| v.as_str()) {
+            if let Some(ar) = size_to_ratio(size) {
+                result["aspect_ratio"] = serde_json::json!(ar);
+            }
+        }
+    }
+
+    // 3. OpenAI watermark → aigc_watermark（官方字段优先）
+    if result.get("aigc_watermark").is_none() {
+        if let Some(wm) = body.get("watermark") {
+            result["aigc_watermark"] = wm.clone();
+        }
+    }
+
+    // 4. response_format: OpenAI b64_json → MiniMax base64
+    if result
+        .get("response_format")
+        .and_then(|v| v.as_str())
+        .is_some_and(|rf| rf == "b64_json")
+    {
+        result["response_format"] = serde_json::json!("base64");
+    }
+
+    // 5. OpenAI image/image_urls → subject_reference（官方 subject_reference 优先）
+    if result.get("subject_reference").is_none() {
+        let urls = collect_image_urls(body, &["image", "image_urls", "image[]"]);
+        if !urls.is_empty() {
+            let refs: Vec<serde_json::Value> = urls
+                .into_iter()
+                .map(|u| {
+                    serde_json::json!({
+                        "type": "character",
+                        "image_file": u
+                    })
+                })
+                .collect();
+            result["subject_reference"] = serde_json::Value::Array(refs);
+        }
+    }
+
+    result
+}
+
 // ── Gemini 图片格式转换工具 ─────────────────────────────────────
 
 /// 解析 data URI 为 Gemini inline_data 格式 {mime_type, data}。
@@ -2231,9 +2350,7 @@ async fn download_image_to_base64(
     url: &str,
 ) -> Option<serde_json::Value> {
     for attempt in 0..2 {
-        let resp = match client
-            .get(url)
-            .timeout(std::time::Duration::from_secs(200))
+        let resp = match crate::services::http_client::with_download_timeout(client.get(url))
             .send()
             .await
         {
@@ -2856,11 +2973,219 @@ fn build_kling_body(
     serde_json::Value::Object(result)
 }
 
-// ── 可灵 JWT 自动生成 ──────────────────────────────────────────
+fn kling_v3_content_item(type_name: &str, url: &str) -> serde_json::Value {
+    serde_json::json!({ "type": type_name, "url": url })
+}
+
+fn kling_v3_image_type(role: &str, idx: usize, pair_plain: bool) -> &'static str {
+    if pair_plain {
+        return if idx == 0 {
+            "first_frame"
+        } else {
+            "last_frame"
+        };
+    }
+    match role.to_ascii_lowercase().as_str() {
+        "first_frame" | "first" => "first_frame",
+        "last_frame" | "end_frame" | "last" | "tail" => "last_frame",
+        "refer_image" | "reference_image" => "refer_image",
+        _ if idx == 0 => "first_frame",
+        _ => "refer_image",
+    }
+}
+
+fn kling_v3_build_settings(body: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    let mut settings = serde_json::Map::new();
+    let resolution = body
+        .pointer("/settings/resolution")
+        .or_else(|| body.get("resolution"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| "720p".into());
+    settings.insert("resolution".into(), serde_json::json!(resolution));
+    if let Some(d) = body
+        .pointer("/settings/duration")
+        .or_else(|| body.get("duration"))
+    {
+        settings.insert("duration".into(), d.clone());
+    }
+    // settings.audio / audio / OpenAI generate_audio → off|native
+    let audio = if let Some(a) = body
+        .pointer("/settings/audio")
+        .or_else(|| body.get("audio"))
+        .and_then(|v| v.as_str())
+    {
+        match a.to_ascii_lowercase().as_str() {
+            "off" | "false" => "off",
+            _ => "native",
+        }
+    } else if let Some(ga) = body.get("generate_audio") {
+        let on = ga.as_bool().unwrap_or(false) || ga.as_str() == Some("true");
+        if on {
+            "native"
+        } else {
+            "off"
+        }
+    } else {
+        "off"
+    };
+    settings.insert("audio".into(), serde_json::json!(audio));
+    if let Some(r) = body
+        .pointer("/settings/aspect_ratio")
+        .or_else(|| body.get("aspect_ratio"))
+        .or_else(|| body.get("ratio"))
+    {
+        settings.insert("aspect_ratio".into(), r.clone());
+    }
+    if let Some(ms) = body
+        .pointer("/settings/multi_shot")
+        .or_else(|| body.get("multi_shot"))
+    {
+        settings.insert("multi_shot".into(), ms.clone());
+    }
+    settings
+}
+
+fn kling_v3_build_options(body: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    let mut options = body
+        .get("options")
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    for key in ["callback_url", "external_task_id", "watermark_info"] {
+        if !options.contains_key(key) {
+            if let Some(v) = body.get(key) {
+                options.insert(key.into(), v.clone());
+            }
+        }
+    }
+    options
+}
+
+/// 可灵 3.0：contents / settings / options（模型在 URL）
+/// - 文生：顶层 `prompt`，无 contents
+/// - 图生 / Omni：`contents`（含 prompt 条目 + 媒体；Omni 的 prompt 一律在 contents）
+fn build_kling_v3_body(body: &serde_json::Value, upstream_path: &str) -> serde_json::Value {
+    let is_omni = upstream_path.contains("omni-video");
+
+    // 已含 contents 透传；文生 prompt+settings 也可透传。Omni 禁止仅靠顶层 prompt 透传。
+    if body.get("contents").is_some()
+        || (!is_omni && body.get("prompt").is_some() && body.get("settings").is_some())
+    {
+        let mut out = body.clone();
+        if let Some(obj) = out.as_object_mut() {
+            obj.remove("model");
+            obj.remove("model_name");
+            // Omni：顶层 prompt 迁入 contents（已有 prompt 条目则只去掉顶层）
+            if is_omni {
+                if let Some(p) = obj.remove("prompt") {
+                    let text = p.as_str().unwrap_or("").trim();
+                    if !text.is_empty() {
+                        let mut contents = obj
+                            .remove("contents")
+                            .and_then(|v| v.as_array().cloned())
+                            .unwrap_or_default();
+                        let has_prompt = contents
+                            .iter()
+                            .any(|c| c.get("type").and_then(|t| t.as_str()) == Some("prompt"));
+                        if !has_prompt {
+                            contents
+                                .insert(0, serde_json::json!({ "type": "prompt", "text": text }));
+                        }
+                        obj.insert("contents".into(), serde_json::Value::Array(contents));
+                    }
+                }
+            }
+            let mut settings = obj
+                .remove("settings")
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+            for (k, v) in kling_v3_build_settings(body) {
+                settings.entry(k).or_insert(v);
+            }
+            obj.insert("settings".into(), serde_json::Value::Object(settings));
+            let options = kling_v3_build_options(body);
+            if !options.is_empty() {
+                obj.insert("options".into(), serde_json::Value::Object(options));
+            }
+        }
+        return out;
+    }
+
+    // 媒体 → contents（prompt 稍后按文/非文分流）；仅新协议 images/image_urls/videos，不读旧 image/image_tail
+    let mut media: Vec<serde_json::Value> = Vec::new();
+
+    let images = collect_media_values(body, &["images", "image_urls"]);
+    let parsed_imgs: Vec<(String, String)> = images
+        .iter()
+        .filter_map(|item| {
+            let (url_opt, role) = parse_media_item(item, "");
+            url_opt
+                .filter(|u| !u.is_empty())
+                .map(|u| (u.to_string(), role.to_string()))
+        })
+        .collect();
+    let pair_plain = parsed_imgs.len() == 2 && parsed_imgs.iter().all(|(_, r)| r.is_empty());
+    for (idx, (url, role)) in parsed_imgs.into_iter().enumerate() {
+        media.push(kling_v3_content_item(
+            kling_v3_image_type(&role, idx, pair_plain),
+            &url,
+        ));
+    }
+
+    if is_omni || body.get("videos").is_some() {
+        for item in collect_media_values(body, &["videos"]) {
+            let (url_opt, role) = parse_media_item(&item, "");
+            let Some(url) = url_opt.filter(|u| !u.is_empty()) else {
+                continue;
+            };
+            let ty = match role.to_ascii_lowercase().as_str() {
+                "feature" | "feature_video" => "feature_video",
+                _ => "base_video",
+            };
+            media.push(kling_v3_content_item(ty, url));
+        }
+    }
+
+    // 文生：顶层 prompt；图生 / Omni：prompt 进 contents
+    let is_text = !is_omni && media.is_empty();
+    let mut result = serde_json::Map::new();
+
+    if is_text {
+        if let Some(p) = body.get("prompt") {
+            result.insert("prompt".into(), p.clone());
+        }
+    } else {
+        let mut contents = Vec::with_capacity(media.len() + 1);
+        if let Some(p) = body
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            contents.push(serde_json::json!({ "type": "prompt", "text": p }));
+        }
+        contents.extend(media);
+        result.insert("contents".into(), serde_json::Value::Array(contents));
+    }
+
+    result.insert(
+        "settings".into(),
+        serde_json::Value::Object(kling_v3_build_settings(body)),
+    );
+    let options = kling_v3_build_options(body);
+    if !options.is_empty() {
+        result.insert("options".into(), serde_json::Value::Object(options));
+    }
+
+    serde_json::Value::Object(result)
+}
+
+// ── 可灵 JWT 自动生成（仅旧 target_type=kling）────────────────
 //
 // 渠道 api_key 格式："{access_key}:{secret_key}"
 // 使用 HS256 算法生成 30 分钟有效期的 JWT Token。
-// 如果 api_key 不含 ":" 分隔符，视为已生成的 Token 直接返回。
+// 如果 api_key 不含 ":" 分隔符，视为已生成的 Token / 普通 Bearer，由调用方直传。
+// 新标准 kling_video 使用官方 API Key + Authorization: Bearer，不走本函数。
 
 fn generate_kling_jwt(api_key: &str) -> Option<String> {
     // 不含 ":" 时视为已生成的 JWT 或普通 Bearer Token，直接使用
@@ -2973,6 +3298,275 @@ fn split_model(model_str: &str) -> (&str, &str) {
     model_str.split_once('@').unwrap_or((model_str, ""))
 }
 
+/// settings.key，否则顶层 key（兼容可灵官方 settings）
+fn tc_setting<'a>(body: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    body.get("settings")
+        .and_then(|s| s.get(key))
+        .or_else(|| body.get(key))
+}
+
+fn tc_prompt_str(v: Option<&serde_json::Value>) -> Option<&str> {
+    v.and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn tc_enabled_flag(v: &serde_json::Value) -> bool {
+    v.as_bool().unwrap_or(false) || v.as_str() == Some("true")
+}
+
+fn tc_en_dis(enabled: bool) -> &'static str {
+    if enabled {
+        "Enabled"
+    } else {
+        "Disabled"
+    }
+}
+
+fn tc_push_unique(dst: &mut Vec<String>, url: &str) {
+    if !url.is_empty() && !dst.iter().any(|e| e == url) {
+        dst.push(url.to_string());
+    }
+}
+
+fn tc_push_image(dst: &mut Vec<(String, &'static str)>, url: &str, role: &'static str) {
+    if !url.is_empty() && !dst.iter().any(|(e, _)| e == url) {
+        dst.push((url.to_string(), role));
+    }
+}
+
+fn tc_list_image_role(role: &str) -> &'static str {
+    match role {
+        "first_frame" => "first_frame",
+        "end_frame" | "last_frame" => "last_frame",
+        _ => "reference_image",
+    }
+}
+
+fn tc_content_media_url(item: &serde_json::Value) -> Option<&str> {
+    item.get("url")
+        .or_else(|| item.get("image_url"))
+        .or_else(|| item.get("video_url"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+}
+
+/// 顶层 prompt/Prompt，或 contents[{type:prompt}].text（仅取文案，不扫媒体）
+fn tc_video_prompt(body: &serde_json::Value) -> Option<&str> {
+    tc_prompt_str(body.get("prompt").or_else(|| body.get("Prompt"))).or_else(|| {
+        body.get("contents")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| {
+                arr.iter().find_map(|item| {
+                    if item.get("type").and_then(|t| t.as_str()) != Some("prompt") {
+                        return None;
+                    }
+                    tc_prompt_str(item.get("text"))
+                })
+            })
+    })
+}
+
+/// 视频输入源：顶层 + 列表字段 + 可灵 contents（contents 单次扫描）
+fn tc_collect_video_src(
+    body: &serde_json::Value,
+) -> (Option<&str>, Vec<(String, &'static str)>, Vec<String>) {
+    let mut prompt = tc_prompt_str(body.get("prompt").or_else(|| body.get("Prompt")));
+    let mut images: Vec<(String, &'static str)> = Vec::new();
+    let mut videos: Vec<String> = Vec::new();
+
+    for field in ["video_url", "videos", "video_list"] {
+        for u in collect_image_urls(body, &[field]) {
+            tc_push_unique(&mut videos, &u);
+        }
+    }
+    if let Some(u) = body
+        .get("image")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        tc_push_image(&mut images, u, "first_frame");
+    }
+    if let Some(u) = body
+        .get("image_tail")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        tc_push_image(&mut images, u, "last_frame");
+    }
+    for field in ["image_list", "images", "image_urls"] {
+        for item in collect_media_values(body, &[field]) {
+            let (url, role) = parse_media_item(&item, "");
+            if let Some(u) = url.filter(|s| !s.is_empty()) {
+                tc_push_image(&mut images, u, tc_list_image_role(role));
+            }
+        }
+    }
+
+    if let Some(arr) = body.get("contents").and_then(|v| v.as_array()) {
+        for item in arr {
+            match item.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                "prompt" => {
+                    if prompt.is_none() {
+                        prompt = tc_prompt_str(item.get("text"));
+                    }
+                }
+                "first_frame" => {
+                    if let Some(u) = tc_content_media_url(item) {
+                        tc_push_image(&mut images, u, "first_frame");
+                    }
+                }
+                "last_frame" => {
+                    if let Some(u) = tc_content_media_url(item) {
+                        tc_push_image(&mut images, u, "last_frame");
+                    }
+                }
+                "refer_image" => {
+                    if let Some(u) = tc_content_media_url(item) {
+                        tc_push_image(&mut images, u, "reference_image");
+                    }
+                }
+                "base_video" | "feature_video" => {
+                    if let Some(u) = tc_content_media_url(item) {
+                        tc_push_unique(&mut videos, u);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (prompt, images, videos)
+}
+
+fn tc_video_usage(role: &str, idx: usize, count: usize, has_video: bool) -> &'static str {
+    match role {
+        "first_frame" => "FirstFrame",
+        "last_frame" => "LastFrame",
+        "reference_image" => "Reference",
+        _ if has_video || count > 2 => "Reference",
+        _ if count == 2 && idx == 0 => "FirstFrame",
+        _ if count == 2 => "LastFrame",
+        _ => "FirstFrame",
+    }
+}
+
+/// 组装 FileInfos；尾帧 URL 走 LastFrameUrl，base64 进 FileInfos
+fn tc_build_video_file_infos(
+    images: Vec<(String, &'static str)>,
+    videos: &[String],
+) -> (Vec<serde_json::Value>, Option<String>) {
+    let has_video = !videos.is_empty();
+    let count = images.len();
+    let mut fi_arr = Vec::new();
+    let mut last_frame_url = None;
+    for (idx, (u, role)) in images.into_iter().enumerate() {
+        let usage = tc_video_usage(role, idx, count, has_video);
+        if usage == "LastFrame" {
+            last_frame_url = Some(u);
+        } else {
+            fi_arr.push(tc_file(&u, &[("Usage", serde_json::json!(usage))]));
+        }
+    }
+    for vu in videos {
+        fi_arr.push(tc_file(
+            vu,
+            &[
+                ("Category", serde_json::json!("Video")),
+                ("Usage", serde_json::json!("Reference")),
+            ],
+        ));
+    }
+    if let Some(url) = last_frame_url.take() {
+        if is_b64(&url, 1) {
+            fi_arr.push(tc_file(&url, &[("Usage", serde_json::json!("LastFrame"))]));
+        } else {
+            last_frame_url = Some(url);
+        }
+    }
+    (fi_arr, last_frame_url)
+}
+
+fn tc_build_video_output_config(
+    body: &serde_json::Value,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut oc = serde_json::Map::new();
+    if let Some(r) = tc_setting(body, "resolution").and_then(|v| v.as_str()) {
+        oc.insert("Resolution".into(), serde_json::json!(r.to_uppercase()));
+    } else if let Some(mode) = body.get("mode").and_then(|v| v.as_str()) {
+        let res = match mode {
+            "std" => "720P".to_string(),
+            "pro" => "1080P".to_string(),
+            other => other.to_uppercase(),
+        };
+        oc.insert("Resolution".into(), serde_json::json!(res));
+    }
+    if let Some(r) = tc_setting(body, "aspect_ratio")
+        .or_else(|| body.get("ratio"))
+        .and_then(|v| v.as_str())
+    {
+        oc.insert("AspectRatio".into(), serde_json::json!(r));
+    }
+    if let Some(d) = tc_setting(body, "duration") {
+        if let Some(n) = d
+            .as_f64()
+            .or_else(|| d.as_str().and_then(|s| s.parse::<f64>().ok()))
+        {
+            oc.insert("Duration".into(), serde_json::json!(n));
+        }
+    }
+    if let Some(op) = body.get("OffPeak").and_then(|v| v.as_str()) {
+        oc.insert("OffPeak".into(), serde_json::json!(op));
+    } else if body.get("service_tier").and_then(|v| v.as_str()) == Some("flex") {
+        oc.insert("OffPeak".into(), serde_json::json!("Enabled"));
+    }
+    if let Some(wm) = body.get("watermark") {
+        oc.insert(
+            "LogoAdd".into(),
+            serde_json::json!(tc_en_dis(tc_enabled_flag(wm))),
+        );
+    }
+    // generate_audio > settings.audio/audio > sound
+    let audio = if let Some(ga) = body.get("generate_audio") {
+        Some(tc_enabled_flag(ga))
+    } else if let Some(a) = tc_setting(body, "audio").and_then(|v| v.as_str()) {
+        Some(!matches!(a.to_ascii_lowercase().as_str(), "off" | "false"))
+    } else {
+        body.get("sound")
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("on"))
+    };
+    if let Some(enabled) = audio {
+        oc.insert(
+            "AudioGeneration".into(),
+            serde_json::json!(tc_en_dis(enabled)),
+        );
+    }
+    if !oc.contains_key("Resolution") {
+        oc.insert("Resolution".into(), serde_json::json!("720P"));
+    }
+    oc.insert("InputComplianceCheck".into(), serde_json::json!("Disabled"));
+    oc.insert(
+        "OutputComplianceCheck".into(),
+        serde_json::json!("Disabled"),
+    );
+    oc
+}
+
+fn tc_apply_enhance_prompt(tb: &mut serde_json::Value, body: &serde_json::Value) {
+    if let Some(v) = body.get("EnhancePrompt").and_then(|v| v.as_str()) {
+        tb["EnhancePrompt"] = serde_json::json!(v);
+    } else if let Some(v) = body
+        .get("prompt_extend")
+        .or_else(|| body.get("enhance_prompt"))
+    {
+        let enabled = tc_enabled_flag(v)
+            || v.as_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case("enabled"));
+        tb["EnhancePrompt"] = serde_json::json!(tc_en_dis(enabled));
+    }
+}
+
 // ── 图片请求体构建 ──────────────────────────────────────
 // OpenAI snake_case → 腾讯云 PascalCase
 // AigcImageOutputConfig：Resolution / AspectRatio / OutputImageCount / OutputFormat / LogoAdd
@@ -3040,10 +3634,9 @@ pub fn build_tencent_vod_image_body(
             oc.insert("OutputFormat".into(), serde_json::json!(f));
         }
         if let Some(wm) = body.get("watermark") {
-            let enabled = wm.as_bool().unwrap_or(false) || wm.as_str() == Some("true");
             oc.insert(
                 "LogoAdd".into(),
-                serde_json::json!(if enabled { "Enabled" } else { "Disabled" }),
+                serde_json::json!(tc_en_dis(tc_enabled_flag(wm))),
             );
         }
         if !oc.contains_key("Resolution") {
@@ -3052,34 +3645,20 @@ pub fn build_tencent_vod_image_body(
         tb["OutputConfig"] = serde_json::Value::Object(oc);
     }
 
-    // seed -> Seed
     if let Some(s) = body.get("seed").or_else(|| body.get("Seed")) {
         tb["Seed"] = s.clone();
     }
-
-    // 透传高级参数
     if let Some(v) = body.get("ExtInfo") {
         tb["ExtInfo"] = v.clone();
     }
-    // prompt_extend -> EnhancePrompt（兼容布尔和字符串）
-    if let Some(v) = body.get("EnhancePrompt").and_then(|v| v.as_str()) {
-        tb["EnhancePrompt"] = serde_json::json!(v);
-    } else if let Some(v) = body
-        .get("prompt_extend")
-        .or_else(|| body.get("enhance_prompt"))
-    {
-        let enabled = v.as_bool().unwrap_or(false)
-            || v.as_str()
-                .map_or(false, |s| s.eq_ignore_ascii_case("enabled") || s == "true");
-        tb["EnhancePrompt"] = serde_json::json!(if enabled { "Enabled" } else { "Disabled" });
-    }
-
+    tc_apply_enhance_prompt(&mut tb, body);
     tb
 }
 
 // ── 视频请求体构建 ──────────────────────────────────────
-// AigcVideoOutputConfig 字段：Duration, Resolution, AspectRatio
-// FileInfos Usage: 有视频时图片=Reference；无视频≤2张图=FirstFrame,>2张=Reference
+// AigcVideoOutputConfig：Duration / Resolution / AspectRatio
+// FileInfos Usage：有视频时图片=Reference；无视频≤2张=FirstFrame/LastFrame，>2=Reference
+// 可灵官方 contents/settings 经此转换为腾讯云 PascalCase
 
 pub fn build_tencent_vod_video_body(
     model_str: &str,
@@ -3091,14 +3670,6 @@ pub fn build_tencent_vod_video_body(
         tb["ModelVersion"] = serde_json::json!(model_version);
     }
 
-    // Prompt / NegativePrompt
-    if let Some(v) = body
-        .get("prompt")
-        .or_else(|| body.get("Prompt"))
-        .and_then(|v| v.as_str())
-    {
-        tb["Prompt"] = serde_json::json!(v);
-    }
     if let Some(v) = body
         .get("negative_prompt")
         .or_else(|| body.get("NegativePrompt"))
@@ -3107,250 +3678,93 @@ pub fn build_tencent_vod_video_body(
         tb["NegativePrompt"] = serde_json::json!(v);
     }
 
-    // FileInfos：用户已传则原样透传；否则从 images 智能构建（base64→Type=Base64，否则 Url）
     if let Some(fi) = body.get("FileInfos") {
+        // 原生 FileInfos：只补 Prompt，不扫媒体
         tb["FileInfos"] = fi.clone();
+        if let Some(v) = tc_video_prompt(body) {
+            tb["Prompt"] = serde_json::json!(v);
+        }
     } else {
-        // 收集视频参数：支持视频 url，videos，以及可灵官方的 video_list 字段
-        let mut video_urls = Vec::new();
-        for field in &["video_url", "videos", "video_list"] {
-            video_urls.extend(collect_image_urls(body, &[*field]));
+        let (prompt, images, videos) = tc_collect_video_src(body);
+        if let Some(v) = prompt {
+            tb["Prompt"] = serde_json::json!(v);
         }
-        video_urls.dedup();
-        let has_video = !video_urls.is_empty();
-
-        let mut valid_items: Vec<(String, String)> = Vec::new();
-
-        // 1. 提取可灵专属单图参数（首帧/尾帧）
-        if let Some(u) = body
-            .get("image")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        {
-            valid_items.push((u.to_string(), "first_frame".to_string()));
-        }
-        if let Some(u) = body
-            .get("image_tail")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        {
-            valid_items.push((u.to_string(), "last_frame".to_string()));
-        }
-
-        // 2. 从列表参数（image_list, images, image_urls）中批量提取（兼容单字符串和数组格式）
-        for field in &["image_list", "images", "image_urls"] {
-            let arr = collect_media_values(body, &[*field]);
-            for item in arr {
-                let (url, role) = parse_media_item(&item, "");
-                if let Some(u) = url.filter(|s| !s.is_empty()) {
-                    let mapped_role = match role {
-                        "first_frame" => "first_frame",
-                        "end_frame" | "last_frame" => "last_frame",
-                        _ => "reference_image",
-                    };
-                    if !valid_items.iter().any(|(ex_url, _)| ex_url == u) {
-                        valid_items.push((u.to_string(), mapped_role.to_string()));
-                    }
-                }
-            }
-        }
-
-        let mut fi_arr: Vec<serde_json::Value> = Vec::new();
-        let mut last_frame_url = None;
-        let count = valid_items.len();
-        for (idx, (u, role)) in valid_items.into_iter().enumerate() {
-            let usage = match role.as_str() {
-                "first_frame" => "FirstFrame",
-                "last_frame" => "LastFrame",
-                "reference_image" => "Reference",
-                _ => {
-                    if has_video || count > 2 {
-                        "Reference"
-                    } else if count == 2 {
-                        if idx == 0 {
-                            "FirstFrame"
-                        } else {
-                            "LastFrame"
-                        }
-                    } else {
-                        "FirstFrame"
-                    }
-                }
-            };
-            if usage == "LastFrame" {
-                last_frame_url = Some(u);
-            } else {
-                fi_arr.push(tc_file(&u, &[("Usage", serde_json::json!(usage))]));
-            }
-        }
-
-        // 视频参考输入
-        for vu in &video_urls {
-            fi_arr.push(tc_file(
-                vu,
-                &[
-                    ("Category", serde_json::json!("Video")),
-                    ("Usage", serde_json::json!("Reference")),
-                ],
-            ));
-        }
-
-        // 尾帧：URL 仍走 LastFrameUrl；base64 进 FileInfos（官方无 LastFrameBase64）
+        let (fi_arr, last_frame_url) = tc_build_video_file_infos(images, &videos);
         if let Some(url) = last_frame_url {
-            if is_b64(&url, 1) {
-                fi_arr.push(tc_file(&url, &[("Usage", serde_json::json!("LastFrame"))]));
-            } else {
-                tb["LastFrameUrl"] = serde_json::json!(url);
-            }
+            tb["LastFrameUrl"] = serde_json::json!(url);
         }
-
         if !fi_arr.is_empty() {
             tb["FileInfos"] = serde_json::json!(fi_arr);
         }
     }
 
-    // 官方 LastFrameUrl：用户显式传入则原样透传（可与 FileInfos 并存；覆盖兼容字段推导结果）
+    // 用户显式 LastFrameUrl 原样透传（可与 FileInfos 并存，覆盖推导结果）
     if let Some(v) = body.get("LastFrameUrl") {
         tb["LastFrameUrl"] = v.clone();
     }
 
-    // OutputConfig
     if let Some(oc) = body.get("OutputConfig") {
         tb["OutputConfig"] = oc.clone();
     } else {
-        let mut oc = serde_json::Map::new();
-        // resolution -> Resolution
-        if let Some(r) = body.get("resolution").and_then(|v| v.as_str()) {
-            oc.insert("Resolution".into(), serde_json::json!(r.to_uppercase()));
-        } else if let Some(mode) = body.get("mode").and_then(|v| v.as_str()) {
-            let res = match mode {
-                "std" => "720P".to_string(),
-                "pro" => "1080P".to_string(),
-                other => other.to_uppercase(),
-            };
-            oc.insert("Resolution".into(), serde_json::json!(res));
-        }
-        // ratio / aspect_ratio -> AspectRatio
-        if let Some(r) = body
-            .get("aspect_ratio")
-            .or_else(|| body.get("ratio"))
-            .and_then(|v| v.as_str())
-        {
-            oc.insert("AspectRatio".into(), serde_json::json!(r));
-        }
-        // duration -> Duration
-        if let Some(d) = body.get("duration") {
-            if let Some(n) = d
-                .as_f64()
-                .or_else(|| d.as_str().and_then(|s| s.parse::<f64>().ok()))
-            {
-                oc.insert("Duration".into(), serde_json::json!(n));
-            }
-        }
-        // OffPeak 错峰模式：优先腾讯云原生参数，其次 service_tier=flex 映射
-        if let Some(op) = body.get("OffPeak").and_then(|v| v.as_str()) {
-            oc.insert("OffPeak".into(), serde_json::json!(op));
-        } else if body.get("service_tier").and_then(|v| v.as_str()) == Some("flex") {
-            oc.insert("OffPeak".into(), serde_json::json!("Enabled"));
-        }
-        // watermark -> LogoAdd
-        if let Some(wm) = body.get("watermark") {
-            let enabled = wm.as_bool().unwrap_or(false) || wm.as_str() == Some("true");
-            oc.insert(
-                "LogoAdd".into(),
-                serde_json::json!(if enabled { "Enabled" } else { "Disabled" }),
-            );
-        }
-        // 声音优先级：generate_audio（布尔）> sound（字符串 on/off）→ AudioGeneration
-        if let Some(ga) = body.get("generate_audio") {
-            let enabled = ga.as_bool().unwrap_or(false) || ga.as_str() == Some("true");
-            oc.insert(
-                "AudioGeneration".into(),
-                serde_json::json!(if enabled { "Enabled" } else { "Disabled" }),
-            );
-        } else if let Some(s) = body.get("sound").and_then(|v| v.as_str()) {
-            let enabled = s.eq_ignore_ascii_case("on");
-            oc.insert(
-                "AudioGeneration".into(),
-                serde_json::json!(if enabled { "Enabled" } else { "Disabled" }),
-            );
-        }
-        // Resolution 兜底
-        if !oc.contains_key("Resolution") {
-            oc.insert("Resolution".into(), serde_json::json!("720P"));
-        }
-        oc.insert("InputComplianceCheck".into(), serde_json::json!("Disabled"));
-        oc.insert(
-            "OutputComplianceCheck".into(),
-            serde_json::json!("Disabled"),
-        );
-        tb["OutputConfig"] = serde_json::Value::Object(oc);
+        tb["OutputConfig"] = serde_json::Value::Object(tc_build_video_output_config(body));
     }
 
-    // seed -> Seed
     if let Some(s) = body.get("seed").or_else(|| body.get("Seed")) {
         tb["Seed"] = s.clone();
     }
-
-    // 透传高级参数
     if let Some(v) = body.get("SubjectInfo").or_else(|| body.get("subject_info")) {
         tb["SubjectInfo"] = v.clone();
     }
     if let Some(v) = body.get("ExtInfo") {
         tb["ExtInfo"] = v.clone();
     }
-    // prompt_extend -> EnhancePrompt（兼容布尔和字符串）
-    if let Some(v) = body.get("EnhancePrompt").and_then(|v| v.as_str()) {
-        tb["EnhancePrompt"] = serde_json::json!(v);
-    } else if let Some(v) = body
-        .get("prompt_extend")
-        .or_else(|| body.get("enhance_prompt"))
-    {
-        let enabled = v.as_bool().unwrap_or(false)
-            || v.as_str()
-                .map_or(false, |s| s.eq_ignore_ascii_case("enabled") || s == "true");
-        tb["EnhancePrompt"] = serde_json::json!(if enabled { "Enabled" } else { "Disabled" });
-    }
-
+    tc_apply_enhance_prompt(&mut tb, body);
     tb
 }
 
-/// size ("1024x1024") -> Ratio ("1:1" / "16:9" / "9:16" / "3:4" / "4:3")
+/// OpenAI `size`（`16:9` 或 `1024x1024`）→ 最近标准宽高比。
+/// 供腾讯云 / MiniMax 等共用：含 `:` 直通；解析失败（如 `auto`）回退原串。
 fn size_to_ratio(size: &str) -> Option<&str> {
-    if size.contains(':') {
-        return Some(size);
+    let s = size.trim();
+    if s.is_empty() {
+        return None;
     }
-    // 尝试解析并计算比例。如果解析失败（如 "auto"），则最后原样返回 size。
-    let parse_and_calc = || -> Option<&str> {
-        // 支持 x、*、× (Unicode乘号) 分隔符
-        let (w, h) = size
-            .split_once('x')
-            .or_else(|| size.split_once('*'))
-            .or_else(|| size.split_once('×'))?;
-        let (width, height) = (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?);
-        if width == height {
-            return Some("1:1");
-        }
-        // 计算宽高比，匹配最接近的标准比例
-        let ratio = width as f64 / height as f64;
-        Some(if ratio > 1.0 {
-            // 横向：4:3 ≈ 1.333, 16:9 ≈ 1.778
-            if ratio < 1.5 {
-                "4:3"
-            } else {
-                "16:9"
-            }
-        } else {
-            // 纵向：3:4 ≈ 0.75, 9:16 ≈ 0.5625
-            if ratio > 0.65 {
-                "3:4"
-            } else {
-                "9:16"
-            }
+    if s.contains(':') {
+        return Some(s);
+    }
+    let Some((w, h)) = s
+        .split_once('x')
+        .or_else(|| s.split_once('X'))
+        .or_else(|| s.split_once('*'))
+        .or_else(|| s.split_once('×'))
+        .and_then(|(a, b)| {
+            let w = a.trim().parse::<f64>().ok()?;
+            let h = b.trim().parse::<f64>().ok()?;
+            (w > 0.0 && h > 0.0).then_some((w, h))
         })
+    else {
+        return Some(s);
     };
-
-    parse_and_calc().or(Some(size))
+    let r = w / h;
+    const CANDIDATES: &[(&str, f64)] = &[
+        ("1:1", 1.0),
+        ("3:2", 1.5),
+        ("4:3", 4.0 / 3.0),
+        ("16:9", 16.0 / 9.0),
+        ("21:9", 21.0 / 9.0),
+        ("2:3", 2.0 / 3.0),
+        ("3:4", 0.75),
+        ("9:16", 9.0 / 16.0),
+    ];
+    CANDIDATES
+        .iter()
+        .min_by(|a, b| {
+            (r - a.1)
+                .abs()
+                .partial_cmp(&(r - b.1).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|c| c.0)
 }
 
 // ── 即梦AI（火山引擎 CV 视觉服务）────────────────────────────
@@ -3680,10 +4094,11 @@ fn build_volcengine_media_enhance_body(model: &str, body: &serde_json::Value) ->
         req.insert("tool_version".to_string(), serde_json::json!(tv));
     }
 
-    // 3. 透传画质增强的其它可选参数 (scene/resolution/fps 等)
+    // 3. 透传画质增强的其它可选参数 (scene/resolution/resolution_limit/fps 等)
     for key in &[
         "scene",
         "resolution",
+        "resolution_limit",
         "fps",
         "bitrate_level",
         "callback_args",

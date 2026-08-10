@@ -1,6 +1,6 @@
 # Google Gemini Native API Guide
 
-If you are using the official Google SDK, or wish to bypass the protocol conversion layer to use Gemini's native Multi-modal, System Instructions, or JSON Mode, you can directly call the gateway's native Google routing.
+If you are using the official Google SDK, or wish to use Gemini Multi-modal, System Instructions, or JSON Mode, call the Google-compatible paths below.
 
 ### 1. Text Generation (Non-stream)
 * **Path**: `/v1beta/models/{model}:generateContent`

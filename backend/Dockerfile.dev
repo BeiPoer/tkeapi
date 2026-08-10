@@ -1,4 +1,5 @@
-FROM rust:1.94-slim-bullseye
+ARG DOCKER_IMAGE_PREFIX=""
+FROM ${DOCKER_IMAGE_PREFIX}rust:1.94-slim-bullseye
 
 WORKDIR /usr/src/app
 

@@ -573,13 +573,15 @@ async fn do_sync(state: Arc<AppState>) -> anyhow::Result<()> {
         .await;
 
     let github_url = "https://api.github.com/repos/lobehub/lobe-icons/contents/src";
-    let resp = match state
-        .http_client
-        .get(github_url)
-        .header("User-Agent", "TokensByte-IconSync/1.0")
-        .header("Accept", "application/vnd.github.v3+json")
-        .send()
-        .await
+    let resp = match crate::services::http_client::with_download_timeout(
+        state
+            .http_client
+            .get(github_url)
+            .header("User-Agent", "TokensByte-IconSync/1.0")
+            .header("Accept", "application/vnd.github.v3+json"),
+    )
+    .send()
+    .await
     {
         Ok(r) => r,
         Err(e) => {
@@ -672,12 +674,14 @@ async fn do_sync(state: Arc<AppState>) -> anyhow::Result<()> {
         let mut download_success = false;
 
         // Try color version first
-        if let Ok(resp) = state
-            .http_client
-            .get(&cdn_color_url)
-            .header("User-Agent", "TokensByte-IconSync/1.0")
-            .send()
-            .await
+        if let Ok(resp) = crate::services::http_client::with_download_timeout(
+            state
+                .http_client
+                .get(&cdn_color_url)
+                .header("User-Agent", "TokensByte-IconSync/1.0"),
+        )
+        .send()
+        .await
         {
             if resp.status().is_success() {
                 if let Ok(text) = resp.text().await {
@@ -691,12 +695,14 @@ async fn do_sync(state: Arc<AppState>) -> anyhow::Result<()> {
 
         // Fallback to default version if color version failed
         if !download_success {
-            if let Ok(resp) = state
-                .http_client
-                .get(&cdn_default_url)
-                .header("User-Agent", "TokensByte-IconSync/1.0")
-                .send()
-                .await
+            if let Ok(resp) = crate::services::http_client::with_download_timeout(
+                state
+                    .http_client
+                    .get(&cdn_default_url)
+                    .header("User-Agent", "TokensByte-IconSync/1.0"),
+            )
+            .send()
+            .await
             {
                 if resp.status().is_success() {
                     if let Ok(text) = resp.text().await {

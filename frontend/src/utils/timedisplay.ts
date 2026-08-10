@@ -26,6 +26,41 @@ export function shouldShowTimezoneSuffix(): boolean {
   return useSettingsStore.getState().settings?.site?.show_timezone !== false;
 }
 
+function tzLabel(name?: string): string {
+  let n = name || 'UTC';
+  if (n.startsWith('GMT')) n = n.replace('GMT', 'UTC');
+  return n === 'UTC' ? 'UTC+0' : n;
+}
+
+function formatParts(date: Date, timeZone: string) {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    timeZone,
+    timeZoneName: 'shortOffset',
+  });
+  return Object.fromEntries(fmt.formatToParts(date).map((p) => [p.type, p.value]));
+}
+
+/**
+ * 站点时区偏移后缀，如 ` (UTC+8)`。
+ * 遵循基础设置「显示时区后缀」；关闭时返回空串。
+ */
+export function timedisplayOffsetSuffix(timeZone?: string): string {
+  if (!shouldShowTimezoneSuffix()) return '';
+  const tz = (timeZone || resolveTimedisplay()).trim() || 'Asia/Shanghai';
+  try {
+    return ` (${tzLabel(formatParts(new Date(), tz).timeZoneName)})`;
+  } catch {
+    return ' (UTC+0)';
+  }
+}
+
 /**
  * 将后端返回的 UTC 朴素时间 / ISO / RFC3339 字符串解析为 Date。
  * 无偏移的 `YYYY-MM-DD HH:mm:ss` / `YYYY-MM-DDTHH:mm:ss` 按 UTC 解释（与 timesystem 对齐）。
@@ -52,27 +87,6 @@ export function parseApiTimeAsUtc(raw: string | number | Date | null | undefined
   }
   const d = new Date(s);
   return isNaN(d.getTime()) ? null : d;
-}
-
-function tzLabel(name?: string): string {
-  let n = name || 'UTC';
-  if (n.startsWith('GMT')) n = n.replace('GMT', 'UTC');
-  return n === 'UTC' ? 'UTC+0' : n;
-}
-
-function formatParts(date: Date, timeZone: string) {
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-    timeZone,
-    timeZoneName: 'shortOffset',
-  });
-  return Object.fromEntries(fmt.formatToParts(date).map((p) => [p.type, p.value]));
 }
 
 /**

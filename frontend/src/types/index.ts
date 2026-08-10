@@ -269,6 +269,8 @@ export interface Redemption {
   used_count?: number;
   /** 单兑换码单用户兑换次数，-1 = 不限（兼容历史 0） */
   per_user_limit?: number;
+  /** 同一活动下单用户可兑换次数，-1 = 不限 */
+  per_user_activity_limit?: number;
   /** 状态: 1=正常, 0=禁用, -1=作废 */
   status?: number;
 }
@@ -282,6 +284,8 @@ export interface RedemptionGroup {
   total_used_count: number;
   max_uses: number;
   per_user_limit: number;
+  /** 同一活动下单用户可兑换次数，-1 = 不限 */
+  per_user_activity_limit?: number;
 }
 
 export interface RequestLog {
@@ -410,6 +414,8 @@ interface SiteSettings {
   favicon?: string;
   logo?: string;
   login_title?: string;
+  /** 登录页标题点击跳转地址，留空则不可点击 */
+  login_title_url?: string;
   login_subtitle?: string;
   enable_multilingual?: boolean;
   enable_theme_toggle?: boolean;
@@ -451,17 +457,54 @@ interface LoginSettings {
   enable_google_login: boolean;
 }
 
-interface RegistrationSettings {
+export interface RegistrationSettings {
   enable_username_registration: boolean;
   enable_email_registration: boolean;
   enable_mobile_registration: boolean;
   enable_password_recovery: boolean;
+  /** 是否要求绑定手机号 */
+  require_bind_mobile?: boolean;
+  /** 是否要求绑定邮箱 */
+  require_bind_email?: boolean;
+  /** all=全部都要 / any=满足其一 / prompt_only=仅弹窗提示 */
+  bind_enforcement?: 'all' | 'any' | 'prompt_only';
+  /** 是否开启站点用户实名认证（KYC） */
+  enable_user_kyc?: boolean;
   // 以下字段仅管理后台完整接口返回，公开接口不包含
   ip_rate_limit_enabled?: boolean;
   ip_daily_limit?: number;
   email_validation_strict?: boolean;
   email_whitelist_enabled?: boolean;
   email_whitelist?: string[];
+}
+
+export type UserKycType = 'personal' | 'enterprise';
+export type UserKycStatus = 'none' | 'pending' | 'approved' | 'rejected' | 'expired';
+export type KycIdDocType = 'id_card' | 'passport' | 'driver_license';
+export type KycValidityType = 'long_term' | 'expire_date';
+
+export interface UserKyc {
+  id: number;
+  user_id: string;
+  kyc_type: UserKycType | string;
+  status: UserKycStatus | string;
+  real_name?: string | null;
+  id_doc_type?: KycIdDocType | string | null;
+  id_doc_front_url?: string | null;
+  id_doc_back_url?: string | null;
+  company_name?: string | null;
+  business_license_url?: string | null;
+  tax_registration_url?: string | null;
+  legal_notarization_url?: string | null;
+  validity_type: KycValidityType | string;
+  expire_at?: string | null;
+  reject_reason?: string | null;
+  admin_remark?: string | null;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  submitted_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface MarketingSettings {
@@ -513,6 +556,16 @@ export interface AllSettings {
     hyperbc_enabled: boolean;
     allinpay_enabled: boolean;
   };
+  /** 支付渠道列表（排序/展示/启用，不含密钥） */
+  payment_channels?: {
+    id: string;
+    sort_order: number;
+    enabled: boolean;
+    display_name?: string | null;
+    subtitle?: string | null;
+    logo_url?: string | null;
+    allinpay_methods?: string[];
+  }[];
   agreement?: AgreementSettings;
   /** 微信 OAuth app_id（前端扫码需要），公开接口仅返回此字段，不含 secret */
   wechat_oauth_app_id?: string;
@@ -549,6 +602,19 @@ export interface AllSettings {
   payment_stripe?: any;
   payment_bonuspay?: any;
   payment_hyperbc?: any;
+  payment_allinpay?: any;
+  payment_channels_ui?: {
+    channels: {
+      id: string;
+      sort_order: number;
+      enabled: boolean;
+      display_name?: string | null;
+      subtitle?: string | null;
+      logo_url?: string | null;
+      allinpay_wechat_enabled?: boolean;
+      allinpay_alipay_enabled?: boolean;
+    }[];
+  };
   google_oauth?: any;
   wechat_oauth?: any;
 }
@@ -577,6 +643,12 @@ export interface ChannelConfig {
   last_reset_day?: string;
   last_reset_week?: string;
   last_reset_month?: string;
+  /** 日额度刷新时（0-23），站点时区 */
+  daily_reset_hour?: number;
+  /** 日额度刷新分（0-59） */
+  daily_reset_minute?: number;
+  /** 到达刷新时刻后再冷却多少分钟才真正刷新（0=立即） */
+  daily_reset_cooldown_minutes?: number;
   /** 1=启用, 0=禁用 */
   status?: number;
   /** 上游分类（channel_categories.id） */

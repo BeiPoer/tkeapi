@@ -74,7 +74,7 @@
 
 > [!WARNING]
 > **关于 Claude 系列模型的接入注意事项**：
-> 平台上的 Claude 模型虽然在网关侧兼容 Chat 接口，但由于 Codex 客户端在调用时会带入部分与 Claude 不兼容的原生参数，因此 **Codex 客户端无法使用 Chat 接口接入 Claude 模型**，请使用 Claude 专用接口或配置转译。
+> 平台上的 Claude 模型也支持 Chat 接口；但 Codex 客户端可能带入 Claude 不兼容的参数，因此 **Codex 请勿用 Chat 接口调 Claude**，请改用 Claude 专用接口。
 
 ### 2. 余额查询配置
 Codex 客户端查询账户余额的提取器脚本如下：
@@ -116,4 +116,4 @@ Codex 和 Claude Code 等 Agent 客户端在发起请求时，会默认附带较
 ![Agent 系统提示词与缓存机制](/assets/docs/codex-claude/image8.png)
 
 ### 2. 缓存命中条件
-大模型上游的 Context Caching（上下文缓存）通常需要在**多轮连续对话**后才会触发命中并享受到缓存折扣。单轮独立请求不会触发缓存命中。
+Context Caching（上下文缓存）通常需在**多轮连续对话**后才会命中并享受缓存折扣；单轮独立请求一般不会命中。

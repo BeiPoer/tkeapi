@@ -1,6 +1,6 @@
 # Chat & Response Endpoints
 
-The chat interface provided by the gateway is fully backward-compatible with the official OpenAI specifications. Regardless of whether the underlying model you are calling belongs to OpenAI, Google, Anthropic, Alibaba, Volcengine, or other providers, the gateway will intelligently handle request format translation and response format normalization in the background.
+OpenAI-compatible chat. Follow the examples below with your platform API Key.
 
 ### 1. Chat Completions
 * **Path**: `/v1/chat/completions`
@@ -31,20 +31,20 @@ curl -X POST https://{{domain}}/v1/chat/completions \
   }'
 ```
 
-### 2. Transparent Response Passthrough (Responses)
+### 2. Responses API
 * **Path**: `/v1/responses`
 * **Method**: `POST`
 
 > [!NOTE]
-> If you want to bypass the gateway's automatic parameter validation and protocol translation and send the official native Request Payload directly to the underlying OpenAI or Volcengine Ark models, you can use the `/v1/responses` endpoint. The gateway will pass the request body losslessly to the upstream channel while still securing core platform features such as global billing, quota limits, and audit logs.
+> Use `/v1/responses` when your client already speaks the Responses payload format. Billing, quotas, and usage logs still apply.
 
 #### Request Example
 ```json
 {
   "model": "gpt-4o",
   "input": [
-    {"role": "user", "content": "透传请求内容"}
+    {"role": "user", "content": "Hello"}
   ],
   "stream": false
-} 
+}
 ```

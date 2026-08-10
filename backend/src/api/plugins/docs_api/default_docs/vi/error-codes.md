@@ -30,19 +30,19 @@ Khi yêu cầu gặp lỗi, Gateway luôn trả về thân lỗi định dạng 
   * **Cách khắc phục**: Đăng nhập vào trang người dùng của hệ thống để kiểm tra số dư token; kiểm tra trong danh sách token xem "Danh sách mô hình khả dụng" có bao gồm mô hình đang được yêu cầu hay không.
 
 * **404 Not Found (Giao diện hoặc định tuyến không tồn tại)**
-  * **Nguyên nhân có thể**: Đường dẫn URL yêu cầu bị viết sai chính tả; mô hình được gọi chưa được cấu hình bất kỳ "kênh thượng nguồn" (upstream channel) hợp lệ nào ở trang quản trị; tất cả các nút kênh liên kết bên dưới đều ở trạng thái "Vô hiệu hóa".
+  * **Nguyên nhân có thể**: Đường dẫn URL yêu cầu bị viết sai chính tả; mô hình được gọi chưa được cấu hình bất kỳ "kênh" (channel) hợp lệ nào ở trang quản trị; tất cả các nút kênh liên kết bên dưới đều ở trạng thái "Vô hiệu hóa".
   * **Cách khắc phục**: Kiểm tra đường dẫn gọi (như `/v1/chat/completions`); xác nhận mô hình đó ở trang quản trị đã được liên kết với kênh đang hoạt động.
 
 * **429 Too Many Requests (Kích hoạt giới hạn tần suất/Kiểm soát tần suất)**
-  * **Nguyên nhân có thể**: Kích hoạt giới hạn tần suất của token (RPM / TPM); kích hoạt ngưỡng kiểm soát tần suất chính thức của nhà cung cấp dịch vụ thượng nguồn tương ứng với kênh bên dưới.
+  * **Nguyên nhân có thể**: Kích hoạt giới hạn tần suất của token (RPM / TPM); hoặc giới hạn phía máy chủ.
   * **Cách khắc phục**: Thêm logic thử lại với độ trễ lũy thừa (exponential backoff retry) ở phía mã nguồn; xác nhận cài đặt giới hạn tần suất của token hoặc liên hệ với quản trị viên để nâng giới hạn tần suất.
 
 * **500 Internal Error (Lỗi nội bộ Gateway)**
   * **Nguyên nhân có thể**: Kết nối cơ sở dữ liệu của Gateway bị ngắt hoặc quá hạn (timeout); xảy ra ngoại lệ Panic chưa được bắt trong mã nguồn nội bộ của nền tảng.
   * **Cách khắc phục**: Liên hệ với quản trị viên hệ thống, kiểm tra nhật ký (log) của container dịch vụ backend để xác định nguyên nhân lỗi.
 
-* **502 Bad Gateway (Dịch vụ kênh thượng nguồn không khả dụng)**
-  * **Nguyên nhân có thể**: Kết nối đến điểm cuối (endpoint) chính thức của thượng nguồn (như `api.openai.com`) bị quá hạn hoặc gián đoạn mạng; tài khoản chính thức của thượng nguồn bị nợ cước hoặc mô hình đã bị nhà cung cấp chính thức khai tử.
+* **502 Bad Gateway (Dịch vụ kênh không khả dụng)**
+  * **Nguyên nhân có thể**: Kết nối hạ nguồn bị quá hạn, gián đoạn mạng hoặc tạm thời không khả dụng.
   * **Cách khắc phục**: Xem chi tiết trong trường `message` của thân phản hồi JSON trả về, kiểm tra tính khả dụng của kênh ở trang quản trị, loại trừ các vấn đề về mạng của kênh hoặc nợ cước tài khoản.
 
 * **504 Gateway Timeout (Gateway phản hồi quá hạn)**

@@ -68,15 +68,17 @@ const safeLazy = (loader: () => Promise<any>) =>
 
 /** 插件组件包装器：Suspense + 降级 */
 const PluginModule: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <Suspense fallback={<div style={{ padding: 60, textAlign: 'center' }}><Spin /></div>}>{children}</Suspense>
+  <Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 400, height: '100%' }}><Spin size="large" /></div>}>{children}</Suspense>
 );
 
 /** 内置 Tab hash 白名单（与 Tabs items 的 key 对齐） */
 const BUILTIN_TAB_KEYS = [
   'audit_log', 'basic', 'api_access', 'storage', 'moderation', 'moderation_query',
   'preset', 'api_log', 'team_config', 'theme_promo', 'pg_storage', 'marketplace_models',
-  'routing_rules', 'portal_manager', 'ha_config', 'docs_manager',
+  'routing_rules', 'portal_manager', 'ha_config', 'ha_logs', 'docs_manager',
 ] as const;
+
+const HaLogs = safeLazy(() => import('./HighAvailability/HaLogs'));
 
 /** 使用独立 TOS 表单的插件（其余仅展示全局存储） */
 const INDEPENDENT_STORAGE_PLUGINS = new Set([
@@ -607,6 +609,7 @@ const PluginConfigInner: React.FC = () => {
       type: 'video',
       is_system: false,
       description: '请填写方案描述',
+      max_reference_images: 7,
       params: [
         { key: 'ratio', label: '画面比例', type: 'radio', data_type: 'string', options: ['16:9', '9:16', '1:1'], default: '16:9' },
         { key: 'resolution', label: '分辨率', type: 'select', data_type: 'string', options: ['720p', '1080p', '4k'], default: '1080p' },
@@ -653,10 +656,17 @@ const PluginConfigInner: React.FC = () => {
 
   const handleSaveEditingScheme = () => {
     if (!editingScheme) return;
+    const normalized = {
+      ...editingScheme,
+      max_reference_images:
+        typeof editingScheme.max_reference_images === 'number'
+          ? editingScheme.max_reference_images
+          : 7,
+    };
     if (editingSchemeIndex >= 0) {
-      setSchemeList(prev => prev.map((s, i) => i === editingSchemeIndex ? editingScheme : s));
+      setSchemeList(prev => prev.map((s, i) => i === editingSchemeIndex ? normalized : s));
     } else {
-      setSchemeList(prev => [...prev, editingScheme]);
+      setSchemeList(prev => [...prev, normalized]);
     }
     setSchemeEditVisible(false);
     message.success('方案已更新，请点击保存生效');
@@ -1875,7 +1885,7 @@ const PluginConfigInner: React.FC = () => {
                 tooltip="控制当物理上游损坏时，允许向下 Failover 切换重试的最大子渠道个数。同时也作为添加渠道虚拟组时多渠道绑定的多选勾选上限。"
                 rules={[{ required: true, message: '请输入最大重试次数' }]}
               >
-                <InputNumber min={1} max={100} style={{ width: '100%' }} />
+                <InputNumber min={1} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
             <Col span={12}>
@@ -1885,7 +1895,7 @@ const PluginConfigInner: React.FC = () => {
                 tooltip="上游返回 429 Too Many Requests 时，该子渠道在内存中熔断冷却的倒计时秒数。"
                 rules={[{ required: true, message: '请输入冷却时间' }]}
               >
-                <InputNumber min={5} style={{ width: '100%' }} />
+                <InputNumber min={0} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
           </Row>
@@ -1897,7 +1907,7 @@ const PluginConfigInner: React.FC = () => {
                 tooltip="上游连接超时、DNS失败、网关502等，该子渠道在内存中熔断冷却的倒计时秒数。"
                 rules={[{ required: true, message: '请输入冷却时间' }]}
               >
-                <InputNumber min={5} style={{ width: '100%' }} />
+                <InputNumber min={0} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
             <Col span={12}>
@@ -1907,7 +1917,7 @@ const PluginConfigInner: React.FC = () => {
                 tooltip="上游返回 401 密钥失效、402 余额耗尽等错误时，在内存中拉黑该渠道的倒计时秒数。"
                 rules={[{ required: true, message: '请输入冷却时间' }]}
               >
-                <InputNumber min={5} style={{ width: '100%' }} />
+                <InputNumber min={0} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
           </Row>
@@ -1922,16 +1932,41 @@ const PluginConfigInner: React.FC = () => {
                 <InputNumber min={0} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
+            <Col span={12}>
+              <Form.Item
+                name="ha_total_timeout_secs"
+                label="HA 整次墙钟预算 (秒)"
+                tooltip="从首次尝试起算的整次 HA 墙钟上限，仅开启 Failover 时生效。预算耗尽后立即返回首次上游失败，避免备渠切换把时间打满被入口 Nginx 切成 504 HTML。填 0 为自动：min(540, 上游超时-60)。首次尝试仍用全局上游超时（默认 1800s），不截断长成功请求。"
+                rules={[{ required: true, message: '请输入墙钟预算，0 表示自动' }]}
+                initialValue={0}
+              >
+                <InputNumber min={0} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
           </Row>
           <Form.Item
             name="ha_meltdown_whitelist"
             label="报错信息不熔断白名单"
-            tooltip="输入上游报错信息中的关键词，当上游返回的错误信息包含白名单中的任意一条关键词时（不区分大小写），将跳过熔断，不冷却对应子渠道。适用于上游返回的业务级错误提示（如内容安全审核等）不应触发渠道切换的场景。"
+            tooltip="输入上游报错信息中的关键词，当上游返回的错误信息包含白名单中的任意一条关键词时（不区分大小写），将跳过熔断，不冷却对应子渠道。适用于上游返回的业务级错误提示（如内容安全审核等）不应触发渠道冷却的场景；仍会按策略尝试切换备渠。"
           >
             <Select
               mode="tags"
               style={{ width: '100%' }}
               placeholder="输入报错关键词后按回车添加，例如：内容安全、content_filter"
+              tokenSeparators={['\n']}
+              open={false}
+              suffixIcon={null}
+            />
+          </Form.Item>
+          <Form.Item
+            name="ha_meltdown_blacklist"
+            label="报错信息停止切换黑名单"
+            tooltip="输入上游报错信息中的关键词，当失败错误信息包含黑名单中的任意一条关键词时（不区分大小写），立即停止向后续备渠 Failover。适用于各上游大概率返回相同业务错误（如内容违规、参数非法、InternalServiceError 等）的场景，避免空耗时间与配额。嵌套转发时建议将平台级错误码加入黑名单，以便下游站尽快拿到真实错误体。"
+          >
+            <Select
+              mode="tags"
+              style={{ width: '100%' }}
+              placeholder="输入报错关键词后按回车添加，例如：InternalServiceError、content_policy、敏感词"
               tokenSeparators={['\n']}
               open={false}
               suffixIcon={null}
@@ -2782,6 +2817,9 @@ const PluginConfigInner: React.FC = () => {
                         {scheme.is_system && <Tag color="gold" style={{ fontSize: 10, borderRadius: 8, lineHeight: '18px' }}>内置</Tag>}
                       </div>
                       <Text style={{ color: _isLight ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.4)', fontSize: 12, display: 'block', marginBottom: 8 }}>{scheme.description}</Text>
+                      <Tag style={{ fontSize: 11, borderRadius: 4, marginBottom: 8, background: _isLight ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.03)', border: _isLight ? '1px solid rgba(0,0,0,0.06)' : '1px solid rgba(255,255,255,0.06)', color: _isLight ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.45)' }}>
+                        最大参考图: {scheme.max_reference_images ?? 7}
+                      </Tag>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                         {scheme.params?.map((p: any) => (
                           <Tag key={p.key} style={{ fontSize: 11, borderRadius: 4, background: _isLight ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.03)', border: _isLight ? '1px solid rgba(0,0,0,0.06)' : '1px solid rgba(255,255,255,0.06)', color: _isLight ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.45)', maxWidth: '100%', display: 'inline-flex', flexWrap: 'wrap', whiteSpace: 'normal', height: 'auto', padding: '4px 8px' }}>
@@ -2849,6 +2887,23 @@ const PluginConfigInner: React.FC = () => {
             <div>
               <Text style={{ display: 'block', marginBottom: 6, fontSize: 13, color: _isLight ? 'rgba(0,0,0,0.6)' : 'rgba(255,255,255,0.6)' }}>描述</Text>
               <Input.TextArea value={editingScheme.description} onChange={e => setEditingScheme({ ...editingScheme, description: e.target.value })} autoSize={{ minRows: 2, maxRows: 4 }} />
+            </div>
+            <div>
+              <Text style={{ display: 'block', marginBottom: 6, fontSize: 13, color: _isLight ? 'rgba(0,0,0,0.6)' : 'rgba(255,255,255,0.6)' }}>最大参考图数量</Text>
+              <InputNumber
+                min={0}
+                max={32}
+                precision={0}
+                style={{ width: '100%' }}
+                value={editingScheme.max_reference_images ?? 7}
+                onChange={v => setEditingScheme({
+                  ...editingScheme,
+                  max_reference_images: typeof v === 'number' ? v : 7,
+                })}
+              />
+              <Text style={{ display: 'block', marginTop: 6, fontSize: 12, color: _isLight ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,0.35)' }}>
+                固定字段：图片/视频创作页上传参考图的上限；对话方案可设为 0。
+              </Text>
             </div>
 
             <Divider style={{ margin: '8px 0', borderColor: _isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.06)' }} />
@@ -4003,6 +4058,7 @@ const PluginConfigInner: React.FC = () => {
               ? [
               { key: 'basic', label: '基本配置', children: basicTab },
               { key: 'ha_config', label: '高可用参数配置', children: haConfigTab },
+              { key: 'ha_logs', label: '使用日志记录', children: <PluginModule><HaLogs /></PluginModule> },
             ]
             : plugin.name === 'team_marketing'
               ? [

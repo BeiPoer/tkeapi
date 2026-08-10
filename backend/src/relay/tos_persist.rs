@@ -400,7 +400,7 @@ pub async fn cleanup_expired_files(state: &AppState) {
     let tos_config = match load_system_tos_config(state).await {
         Some(c) => c,
         None => {
-            tracing::debug!("[TosCleanup] 系统存储设置未配置，跳过过期文件清理");
+            tracing::info!("[TosCleanup] 系统存储设置未配置，跳过过期文件清理");
             return;
         }
     };
@@ -440,7 +440,7 @@ pub async fn cleanup_expired_files(state: &AppState) {
                     continue;
                 }
                 // 对象已不存在（404），视为已清理，继续删除数据库记录
-                tracing::debug!(
+                tracing::info!(
                     "[TosCleanup] TOS 对象已不存在 key={}，清理数据库记录",
                     object_key
                 );
@@ -533,19 +533,7 @@ fn replace_urls_in_json(
 
 /// 下载远程文件
 async fn download_url(http_client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
-    let resp = http_client
-        .get(url)
-        .timeout(std::time::Duration::from_secs(200))
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-    resp.bytes()
-        .await
-        .map(|b| b.to_vec())
-        .map_err(|e| format!("读取失败: {}", e))
+    crate::services::http_client::download_bytes(http_client, url).await
 }
 
 /// Base64 解码（支持 data:xxx;base64, 前缀）

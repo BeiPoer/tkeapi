@@ -22,9 +22,22 @@ import IconPicker from '../../components/IconPicker';
 import RateDisplay from './RateDisplay';
 import { useThemeStore } from '../../store/theme';
 import SmartSvgIcon from '../../components/SmartSvgIcon';
+import { Image as ImageIcon, Video, AudioLines, MessageSquare, Cuboid, ListOrdered, Sparkles } from 'lucide-react';
 
 
 const { Title, Text } = Typography;
+
+const renderTypeSystemIcon = (name: string, size = 18) => {
+  const lowerName = (name || '').toLowerCase();
+  if (lowerName.includes('视频增强') || lowerName.includes('videoenhance') || lowerName.includes('video-enhance') || lowerName.includes('video_enhance')) return <Sparkles size={size} />;
+  if (lowerName.includes('图片') || lowerName.includes('image')) return <ImageIcon size={size} />;
+  if (lowerName.includes('视频') || lowerName.includes('video')) return <Video size={size} />;
+  if (lowerName.includes('音频') || lowerName.includes('audio')) return <AudioLines size={size} />;
+  if (lowerName.includes('聊天') || lowerName.includes('chat') || lowerName.includes('text')) return <MessageSquare size={size} />;
+  if (lowerName.includes('embedding') || lowerName.includes('向量')) return <Cuboid size={size} />;
+  if (lowerName.includes('rerank') || lowerName.includes('排序')) return <ListOrdered size={size} />;
+  return null;
+};
 
 const ResizableHeaderCell = (props: any) => {
   const { onResize, width: initialWidth, minWidth, ...restProps } = props;
@@ -596,6 +609,7 @@ const Models: React.FC = () => {
   const [billingTypeFilter, setBillingTypeFilter] = useState<string>('all');
   const [billingSearchKeyword, setBillingSearchKeyword] = useState<string>('');
   const [forwardRuleSearchKeyword, setForwardRuleSearchKeyword] = useState<string>('');
+  const [forwardRuleCategoryFilter, setForwardRuleCategoryFilter] = useState<string>('all');
   const [sortType, setSortType] = useState<string>('time_desc');
   const [tableBillingTypeFilter, setTableBillingTypeFilter] = useState<string>('all');
   const [tableStatusFilter, setTableStatusFilter] = useState<string>('all');
@@ -2223,7 +2237,7 @@ const Models: React.FC = () => {
                            </Form.Item>
                        </Col>
                        <Col span={12}>
-                           <Form.Item name="site_discount_enabled" label={<Text strong>折扣限价</Text>} valuePropName="checked" initialValue={false}>
+                           <Form.Item name="site_discount_enabled" label={<Text strong>折扣限价</Text>} valuePropName="checked" initialValue={true}>
                               <Switch checkedChildren="开启" unCheckedChildren="关闭" />
                            </Form.Item>
                        </Col>
@@ -2285,25 +2299,56 @@ const Models: React.FC = () => {
                                 <Title level={4} style={{ margin: 0 }}>选择官方服务商</Title>
                                 <Button type="dashed" size="small" onClick={() => setIsProviderManagerVisible(true)}>管理官方服务商</Button>
                               </div>
-                              <Row gutter={[12, 12]}>
-                                <Col span={8}>
+                              <Row gutter={[6, 6]}>
+                                <Col xs={6} sm={4} md={3}>
                                   <div 
                                     onClick={() => form.setFieldsValue({ provider_id: null })}
-                                    style={{ padding: '10px', borderRadius: 8, cursor: 'pointer', border: !form.getFieldValue('provider_id') ? '2px solid #1677ff' : (isLight ? '1px solid #e5e4e7' : '1px solid #303030'), background: !form.getFieldValue('provider_id') ? 'rgba(22,119,255,0.05)' : (isLight ? '#fff' : '#141414'), display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', minHeight: 68, transition: 'all 0.2s' }}
+                                    style={{ 
+                                      aspectRatio: '1 / 1', 
+                                      padding: '6px 4px', 
+                                      borderRadius: 6, 
+                                      cursor: 'pointer', 
+                                      border: !form.getFieldValue('provider_id') ? '1.5px solid #1677ff' : (isLight ? '1px solid #e5e4e7' : '1px solid rgba(255,255,255,0.08)'), 
+                                      background: !form.getFieldValue('provider_id') ? (isLight ? '#e6f4ff' : 'rgba(22,119,255,0.15)') : (isLight ? '#fff' : 'rgba(255,255,255,0.03)'), 
+                                      display: 'flex', 
+                                      flexDirection: 'column', 
+                                      alignItems: 'center', 
+                                      justifyContent: 'center', 
+                                      gap: 4, 
+                                      transition: 'all 0.2s' 
+                                    }}
                                   >
-                                    <span style={{ fontWeight: !form.getFieldValue('provider_id') ? 600 : 400, color: 'var(--text-secondary)' }}>清除选择</span>
+                                    <CloseOutlined style={{ fontSize: 16, color: 'var(--text-secondary)' }} />
+                                    <span style={{ fontWeight: !form.getFieldValue('provider_id') ? 600 : 400, fontSize: 11, color: 'var(--text-secondary)', textAlign: 'center' }}>清除选择</span>
                                   </div>
                                 </Col>
                                 {allProviders.map(p => {
                                   const selected = form.getFieldValue('provider_id') === p.id;
                                   return (
-                                    <Col span={8} key={p.id}>
+                                    <Col xs={6} sm={4} md={3} key={p.id}>
                                       <div 
                                         onClick={() => form.setFieldsValue({ provider_id: p.id })}
-                                        style={{ padding: '10px', borderRadius: 8, cursor: 'pointer', border: selected ? '2px solid #1677ff' : (isLight ? '1px solid #e5e4e7' : '1px solid #303030'), background: selected ? 'rgba(22,119,255,0.05)' : (isLight ? '#fff' : '#141414'), display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', minHeight: 68, gap: 8, transition: 'all 0.2s' }}
+                                        style={{ 
+                                          aspectRatio: '1 / 1', 
+                                          padding: '6px 4px', 
+                                          borderRadius: 6, 
+                                          cursor: 'pointer', 
+                                          border: selected ? '1.5px solid #1677ff' : (isLight ? '1px solid #e5e4e7' : '1px solid rgba(255,255,255,0.08)'), 
+                                          background: selected ? (isLight ? '#e6f4ff' : 'rgba(22,119,255,0.15)') : (isLight ? '#fff' : 'rgba(255,255,255,0.03)'), 
+                                          display: 'flex', 
+                                          flexDirection: 'column', 
+                                          alignItems: 'center', 
+                                          justifyContent: 'center', 
+                                          gap: 4, 
+                                          transition: 'all 0.2s' 
+                                        }}
                                       >
-                                        {p.logo ? <SmartSvgIcon src={`/assets/icons/lobe/${p.logo}.svg`} alt="" style={{ width: 24, height: 24, objectFit: 'contain' }} onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} /> : <div style={{ width: 24, height: 24, borderRadius: 6, background: 'rgba(128,128,128,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{(p.name_en || p.name).charAt(0)}</div>}
-                                        <span style={{ fontWeight: selected ? 600 : 400, fontSize: 13, textAlign: 'center', width: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{(isEn && p.name_en) ? p.name_en : p.name}</span>
+                                        {p.logo ? (
+                                          <SmartSvgIcon src={`/assets/icons/lobe/${p.logo}.svg`} alt="" style={{ width: 20, height: 20, flexShrink: 0, objectFit: 'contain' }} onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                                        ) : (
+                                          <div style={{ width: 20, height: 20, borderRadius: 4, flexShrink: 0, background: 'rgba(128,128,128,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 600 }}>{(p.name_en || p.name).charAt(0)}</div>
+                                        )}
+                                        <span style={{ fontWeight: selected ? 600 : 400, fontSize: 11.5, textAlign: 'center', width: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{(isEn && p.name_en) ? p.name_en : p.name}</span>
                                       </div>
                                     </Col>
                                   );
@@ -2321,30 +2366,56 @@ const Models: React.FC = () => {
                                 <Title level={4} style={{ margin: 0 }}>选择API服务商</Title>
                                 <Button type="dashed" size="small" onClick={() => setIsApiProviderManagerVisible(true)}>管理API服务商</Button>
                               </div>
-                              <Row gutter={[12, 12]}>
-                                <Col span={8}>
+                              <Row gutter={[6, 6]}>
+                                <Col xs={6} sm={4} md={3}>
                                   <div
                                     onClick={() => form.setFieldsValue({ api_provider_id: null })}
-                                    style={{ border: form.getFieldValue('api_provider_id') === null ? '2px solid var(--text)' : (isLight ? '1px solid #d9d9d9' : '1px solid rgba(255,255,255,0.1)'), borderRadius: 8, padding: '10px', cursor: 'pointer', background: form.getFieldValue('api_provider_id') === null ? (isLight ? '#f9fafb' : 'rgba(255,255,255,0.04)') : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', minHeight: 48, transition: 'all 0.2s' }}
+                                    style={{ 
+                                      aspectRatio: '1 / 1', 
+                                      padding: '6px 4px', 
+                                      borderRadius: 6, 
+                                      cursor: 'pointer', 
+                                      border: form.getFieldValue('api_provider_id') === null ? '1.5px solid #1677ff' : (isLight ? '1px solid #e5e4e7' : '1px solid rgba(255,255,255,0.08)'), 
+                                      background: form.getFieldValue('api_provider_id') === null ? (isLight ? '#e6f4ff' : 'rgba(22,119,255,0.15)') : (isLight ? '#fff' : 'rgba(255,255,255,0.03)'), 
+                                      display: 'flex', 
+                                      flexDirection: 'column', 
+                                      alignItems: 'center', 
+                                      justifyContent: 'center', 
+                                      gap: 4, 
+                                      transition: 'all 0.2s' 
+                                    }}
                                   >
-                                    <div style={{ textAlign: 'center' }}>
-                                      <CloseOutlined style={{ fontSize: 16, color: 'var(--text-secondary)', marginBottom: 4 }} />
-                                      <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>清除选择</div>
-                                    </div>
+                                    <CloseOutlined style={{ fontSize: 16, color: 'var(--text-secondary)' }} />
+                                    <span style={{ fontSize: 11, fontWeight: form.getFieldValue('api_provider_id') === null ? 600 : 400, color: 'var(--text-secondary)', textAlign: 'center' }}>清除选择</span>
                                   </div>
                                 </Col>
                                 {allApiProviders.map(p => {
                                   const selected = form.getFieldValue('api_provider_id') === p.id;
                                   return (
-                                    <Col span={8} key={p.id}>
+                                    <Col xs={6} sm={4} md={3} key={p.id}>
                                       <div
                                         onClick={() => form.setFieldsValue({ api_provider_id: p.id })}
-                                        style={{ border: selected ? '2px solid var(--text)' : (isLight ? '1px solid #d9d9d9' : '1px solid rgba(255,255,255,0.1)'), borderRadius: 8, padding: '10px 12px', cursor: 'pointer', background: selected ? (isLight ? '#f9fafb' : 'rgba(255,255,255,0.04)') : 'transparent', transition: 'all 0.2s', display: 'flex', alignItems: 'center', gap: 8, height: '100%' }}
+                                        style={{ 
+                                          aspectRatio: '1 / 1', 
+                                          padding: '6px 4px', 
+                                          borderRadius: 6, 
+                                          cursor: 'pointer', 
+                                          border: selected ? '1.5px solid #1677ff' : (isLight ? '1px solid #e5e4e7' : '1px solid rgba(255,255,255,0.08)'), 
+                                          background: selected ? (isLight ? '#e6f4ff' : 'rgba(22,119,255,0.15)') : (isLight ? '#fff' : 'rgba(255,255,255,0.03)'), 
+                                          display: 'flex', 
+                                          flexDirection: 'column', 
+                                          alignItems: 'center', 
+                                          justifyContent: 'center', 
+                                          gap: 4, 
+                                          transition: 'all 0.2s' 
+                                        }}
                                       >
-                                        {p.logo && (
-                                          <SmartSvgIcon src={`/assets/icons/lobe/${p.logo}.svg`} alt="" style={{ width: 20, height: 20, objectFit: 'contain' }} onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                                        {p.logo ? (
+                                          <SmartSvgIcon src={`/assets/icons/lobe/${p.logo}.svg`} alt="" style={{ width: 20, height: 20, flexShrink: 0, objectFit: 'contain' }} onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                                        ) : (
+                                          <div style={{ width: 20, height: 20, borderRadius: 4, flexShrink: 0, background: 'rgba(128,128,128,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 600 }}>{(p.name_en || p.name).charAt(0)}</div>
                                         )}
-                                        <div style={{ fontSize: 13, fontWeight: selected ? 600 : 400, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                        <div style={{ fontSize: 11.5, fontWeight: selected ? 600 : 400, textAlign: 'center', width: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                           {isEn && p.name_en ? p.name_en : p.name}
                                         </div>
                                       </div>
@@ -2363,21 +2434,43 @@ const Models: React.FC = () => {
                                 <Title level={4} style={{ margin: 0 }}>选择模型类型</Title>
                                 <Button type="dashed" size="small" onClick={() => setIsTypeManagerVisible(true)}>管理类型</Button>
                               </div>
-                              <Row gutter={[12, 12]}>
+                              <Row gutter={[6, 6]}>
                                 {allTypes.map(t => {
                                   const selected = form.getFieldValue('type_id') === t.id;
+                                  const sysIcon = renderTypeSystemIcon(t.name_en || t.name, 18);
                                   return (
-                                    <Col span={8} key={t.id}>
+                                    <Col xs={6} sm={4} md={3} key={t.id}>
                                       <div 
                                         onClick={() => {
                                           if (form.getFieldValue('type_id') !== t.id) {
                                             form.setFieldsValue({ type_id: t.id, feature_attributes: [] });
                                           }
                                         }}
-                                        style={{ padding: '10px', borderRadius: 8, cursor: 'pointer', border: selected ? '2px solid #1677ff' : (isLight ? '1px solid #e5e4e7' : '1px solid #303030'), background: selected ? 'rgba(22,119,255,0.05)' : (isLight ? '#fff' : '#141414'), display: 'flex', alignItems: 'center', gap: 8, transition: 'all 0.2s' }}
+                                        style={{ 
+                                          aspectRatio: '1 / 1', 
+                                          padding: '6px 4px', 
+                                          borderRadius: 6, 
+                                          cursor: 'pointer', 
+                                          border: selected ? '1.5px solid #1677ff' : (isLight ? '1px solid #e5e4e7' : '1px solid rgba(255,255,255,0.08)'), 
+                                          background: selected ? (isLight ? '#e6f4ff' : 'rgba(22,119,255,0.15)') : (isLight ? '#fff' : 'rgba(255,255,255,0.03)'), 
+                                          display: 'flex', 
+                                          flexDirection: 'column', 
+                                          alignItems: 'center', 
+                                          justifyContent: 'center', 
+                                          gap: 4, 
+                                          transition: 'all 0.2s' 
+                                        }}
                                       >
-                                        <div style={{ width: 8, height: 8, borderRadius: '50%', background: selected ? '#1677ff' : (isLight ? '#d9d9d9' : '#434343') }} />
-                                        <span style={{ fontWeight: selected ? 600 : 400, fontSize: 14 }}>{(isEn && t.name_en) ? t.name_en : t.name}</span>
+                                        {sysIcon ? (
+                                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 20, height: 20, color: selected ? '#1677ff' : (isLight ? 'rgba(0,0,0,0.7)' : 'rgba(255,255,255,0.8)') }}>
+                                            {sysIcon}
+                                          </div>
+                                        ) : t.logo ? (
+                                          <SmartSvgIcon src={`/assets/icons/lobe/${t.logo}.svg`} alt="" style={{ width: 20, height: 20, flexShrink: 0, objectFit: 'contain' }} onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                                        ) : (
+                                          <div style={{ width: 20, height: 20, borderRadius: 4, flexShrink: 0, background: 'rgba(128,128,128,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 600 }}>{(t.name_en || t.name).charAt(0)}</div>
+                                        )}
+                                        <span style={{ fontWeight: selected ? 600 : 400, fontSize: 11.5, textAlign: 'center', width: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{(isEn && t.name_en) ? t.name_en : t.name}</span>
                                       </div>
                                     </Col>
                                   );
@@ -2430,25 +2523,26 @@ const Models: React.FC = () => {
 
                           return (
                             <div style={{ animation: 'fadeIn 0.2s' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, gap: 8, flexWrap: 'wrap' }}>
                                 <Title level={4} style={{ margin: 0 }}>选择计费基础定价模板</Title>
                                 <Input 
                                   placeholder="搜索模板名称..." 
                                   prefix={<SearchOutlined style={{ color: 'var(--text-secondary)' }} />} 
-                                  style={{ width: 180 }} 
+                                  style={{ width: 170 }} 
                                   value={billingSearchKeyword}
                                   onChange={e => setBillingSearchKeyword(e.target.value)}
                                   allowClear
                                 />
                               </div>
-                              <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
-                                <span style={{ color: 'var(--text-secondary)' }}>
+                              <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+                                <span style={{ color: 'var(--text-secondary)', fontSize: 13, flexShrink: 0 }}>
                                   <span style={{ color: '#ff4d4f', marginRight: 4, fontFamily: 'SimSun, sans-serif' }}>*</span>计费类型
                                 </span>
                                 <Radio.Group 
                                   value={billingTypeFilter} 
                                   onChange={e => setBillingTypeFilter(e.target.value)} 
                                   buttonStyle="solid"
+                                  size="small"
                                 >
                                   <Radio.Button value="all">全部</Radio.Button>
                                   <Radio.Button value="tokens">Token计费</Radio.Button>
@@ -2456,28 +2550,47 @@ const Models: React.FC = () => {
                                   <Radio.Button value="duration">时长计费</Radio.Button>
                                 </Radio.Group>
                               </div>
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                                 {filteredBillingRules.length > 0 ? filteredBillingRules.map(b => {
                                   const selected = form.getFieldValue('billing_rule_id') === b.id;
                                   return (
                                     <div 
                                       key={b.id}
                                       onClick={() => form.setFieldsValue({ billing_rule_id: b.id })}
-                                      style={{ padding: '12px 16px', borderRadius: 8, cursor: 'pointer', border: selected ? '2px solid #1677ff' : (isLight ? '1px solid #e5e4e7' : '1px solid #303030'), background: selected ? 'rgba(22,119,255,0.05)' : (isLight ? '#fff' : '#141414'), display: 'flex', justifyContent: 'space-between', alignItems: 'center', transition: 'all 0.2s' }}
+                                      style={{ 
+                                        padding: '7px 12px', 
+                                        borderRadius: 6, 
+                                        cursor: 'pointer', 
+                                        border: selected ? '1.5px solid #1677ff' : (isLight ? '1px solid #e5e4e7' : '1px solid rgba(255,255,255,0.08)'), 
+                                        background: selected ? (isLight ? '#e6f4ff' : 'rgba(22,119,255,0.15)') : (isLight ? '#fff' : 'rgba(255,255,255,0.03)'), 
+                                        display: 'flex', 
+                                        justifyContent: 'space-between', 
+                                        alignItems: 'center', 
+                                        transition: 'all 0.2s' 
+                                      }}
                                     >
-                                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1, overflow: 'hidden' }}>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                          <span style={{ fontWeight: selected ? 600 : 500, fontSize: 15, color: selected ? '#1677ff' : 'inherit' }}>{b.name}</span>
-                                          {b.pid && <Tag color="blue" bordered={false} style={{ margin: 0, fontSize: 10, padding: '0 4px', lineHeight: '18px' }}>PID: {b.pid}</Tag>}
-                                          <Tag color={b.billing_type === 'tokens' ? 'green' : (b.billing_type === 'requests' ? 'orange' : 'purple')} bordered={false} style={{ margin: 0, fontSize: 10, padding: '0 4px', lineHeight: '18px' }}>
+                                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, overflow: 'hidden' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                          <span style={{ fontWeight: selected ? 600 : 500, fontSize: 13.5, color: selected ? '#1677ff' : 'inherit' }}>{b.name}</span>
+                                          {b.pid && <Tag color="blue" bordered={false} style={{ margin: 0, fontSize: 10, padding: '0 4px', lineHeight: '16px' }}>PID: {b.pid}</Tag>}
+                                          <Tag color={b.billing_type === 'tokens' ? 'green' : (b.billing_type === 'requests' ? 'orange' : 'purple')} bordered={false} style={{ margin: 0, fontSize: 10, padding: '0 4px', lineHeight: '16px' }}>
                                             {b.billing_type === 'tokens' ? '按Token' : (b.billing_type === 'requests' ? '按次' : '按时长')}
                                           </Tag>
                                         </div>
-                                        <div style={{ background: isLight ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.02)', padding: '6px 10px', borderRadius: 6 }}>
+                                        <div style={{ background: isLight ? 'rgba(0,0,0,0.025)' : 'rgba(255,255,255,0.03)', padding: '3px 8px', borderRadius: 4, fontSize: 11.5, lineHeight: '1.4' }}>
                                           <RateDisplay rule={b} currencySymbol={currencySymbol} formatPrice={formatPrice} />
                                         </div>
                                       </div>
-                                      <div style={{ width: 18, height: 18, borderRadius: '50%', border: selected ? '5px solid #1677ff' : '1px solid #d9d9d9', background: selected ? '#fff' : 'transparent', transition: 'all 0.2s', flexShrink: 0, marginLeft: 16 }} />
+                                      <div style={{ 
+                                        width: 16, 
+                                        height: 16, 
+                                        borderRadius: '50%', 
+                                        border: selected ? '4.5px solid #1677ff' : (isLight ? '1px solid #d9d9d9' : '1px solid rgba(255,255,255,0.2)'), 
+                                        background: selected ? '#fff' : 'transparent', 
+                                        transition: 'all 0.2s', 
+                                        flexShrink: 0, 
+                                        marginLeft: 12 
+                                      }} />
                                     </div>
                                   );
                                 }) : <Empty description="未找到匹配的计费模板" style={{ margin: '40px 0' }} />}
@@ -2488,26 +2601,52 @@ const Models: React.FC = () => {
 
                         if (activeRightPanel === 'forward_rules') {
                           const val = form.getFieldValue('forward_rule_ids') || [];
+                          const categories = Array.from(new Set(allForwardRules.map(r => r.category).filter(Boolean)));
+
                           const filteredForwardRules = allForwardRules.filter(r => {
+                            const matchCategory = forwardRuleCategoryFilter === 'all' || r.category === forwardRuleCategoryFilter;
+                            if (!matchCategory) return false;
                             if (!forwardRuleSearchKeyword) return true;
                             const keyword = forwardRuleSearchKeyword.toLowerCase();
-                            return r.name.toLowerCase().includes(keyword) || (r.eid && String(r.eid).toLowerCase().includes(keyword));
+                            return (
+                              r.name.toLowerCase().includes(keyword) || 
+                              (r.eid && String(r.eid).toLowerCase().includes(keyword)) ||
+                              (r.category && String(r.category).toLowerCase().includes(keyword))
+                            );
                           });
 
                           return (
                             <div style={{ animation: 'fadeIn 0.2s' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, gap: 8, flexWrap: 'wrap' }}>
                                 <Title level={4} style={{ margin: 0 }}>挂载转发规则组合</Title>
                                 <Input 
                                   placeholder="搜索名称或 EID..." 
                                   prefix={<SearchOutlined style={{ color: 'var(--text-secondary)' }} />} 
-                                  style={{ width: 180 }} 
+                                  style={{ width: 170 }} 
                                   value={forwardRuleSearchKeyword}
                                   onChange={e => setForwardRuleSearchKeyword(e.target.value)}
                                   allowClear
                                 />
                               </div>
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                              {categories.length > 0 && (
+                                <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                                  <span style={{ color: 'var(--text-secondary)', fontSize: 13, flexShrink: 0 }}>
+                                    所属分类
+                                  </span>
+                                  <Radio.Group 
+                                    value={forwardRuleCategoryFilter} 
+                                    onChange={e => setForwardRuleCategoryFilter(e.target.value)} 
+                                    buttonStyle="solid"
+                                    size="small"
+                                  >
+                                    <Radio.Button value="all">全部</Radio.Button>
+                                    {categories.map(cat => (
+                                      <Radio.Button key={String(cat)} value={String(cat)}>{String(cat)}</Radio.Button>
+                                    ))}
+                                  </Radio.Group>
+                                </div>
+                              )}
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                                 {filteredForwardRules.length > 0 ? filteredForwardRules.map(r => {
                                   const isSelected = val.includes(r.id);
                                   return (
@@ -2516,13 +2655,43 @@ const Models: React.FC = () => {
                                       onClick={() => {
                                         form.setFieldsValue({ forward_rule_ids: [r.id] });
                                       }}
-                                      style={{ padding: '10px 16px', borderRadius: 8, cursor: 'pointer', border: isSelected ? '2px solid #1677ff' : (isLight ? '1px solid #e5e4e7' : '1px solid #303030'), background: isSelected ? 'rgba(22,119,255,0.05)' : (isLight ? '#fff' : '#141414'), display: 'flex', justifyContent: 'space-between', alignItems: 'center', transition: 'all 0.2s' }}
+                                      style={{ 
+                                        padding: '6px 12px', 
+                                        borderRadius: 6, 
+                                        cursor: 'pointer', 
+                                        border: isSelected ? '1.5px solid #1677ff' : (isLight ? '1px solid #e5e4e7' : '1px solid rgba(255,255,255,0.08)'), 
+                                        background: isSelected ? (isLight ? '#e6f4ff' : 'rgba(22,119,255,0.15)') : (isLight ? '#fff' : 'rgba(255,255,255,0.03)'), 
+                                        display: 'flex', 
+                                        justifyContent: 'space-between', 
+                                        alignItems: 'center', 
+                                        minHeight: 36,
+                                        transition: 'all 0.2s' 
+                                      }}
                                     >
-                                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                                        <span style={{ fontWeight: isSelected ? 600 : 500, fontSize: 15, color: isSelected ? '#1677ff' : 'inherit' }}>{r.name}</span>
-                                        <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>EID: {r.eid || '-'} | 规则类型: {r.rule_type}</span>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden', flex: 1, marginRight: 12 }}>
+                                        {r.eid && (
+                                          <Tag color="blue" bordered={false} style={{ margin: 0, fontSize: 11, padding: '0 5px', lineHeight: '18px', flexShrink: 0 }}>
+                                            EID: {r.eid}
+                                          </Tag>
+                                        )}
+                                        {r.category && (
+                                          <Tag color="purple" bordered={false} style={{ margin: 0, fontSize: 10, padding: '0 5px', lineHeight: '18px', flexShrink: 0 }}>
+                                            {r.category}
+                                          </Tag>
+                                        )}
+                                        <span style={{ fontWeight: isSelected ? 600 : 500, fontSize: 13.5, color: isSelected ? '#1677ff' : 'inherit', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                          {r.name}
+                                        </span>
                                       </div>
-                                      <div style={{ width: 18, height: 18, borderRadius: '50%', border: isSelected ? '5px solid #1677ff' : '1px solid #d9d9d9', background: isSelected ? '#fff' : 'transparent', transition: 'all 0.2s', flexShrink: 0, marginLeft: 16 }} />
+                                      <div style={{ 
+                                        width: 16, 
+                                        height: 16, 
+                                        borderRadius: '50%', 
+                                        border: isSelected ? '4.5px solid #1677ff' : (isLight ? '1px solid #d9d9d9' : '1px solid rgba(255,255,255,0.2)'), 
+                                        background: isSelected ? '#fff' : 'transparent', 
+                                        transition: 'all 0.2s', 
+                                        flexShrink: 0 
+                                      }} />
                                     </div>
                                   );
                                 }) : <Empty description="未找到匹配的转发规则" style={{ margin: '40px 0' }} />}

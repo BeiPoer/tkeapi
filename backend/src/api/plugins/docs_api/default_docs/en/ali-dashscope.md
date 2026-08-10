@@ -1,6 +1,6 @@
 # Alibaba Bailian (DashScope) Native API Guide
 
-The gateway is fully compatible with the native API routing of Alibaba Cloud Bailian (DashScope) LLMs, image, and video models, supporting complete status extraction and billing auditing.
+Alibaba Bailian (DashScope) compatible paths. Use your platform API Key.
 
 ### 1. Wanx Video Generation (Submit Video)
 * **Path**: `/api/v1/services/aigc/video-generation/video-synthesis`
@@ -19,19 +19,19 @@ The gateway is fully compatible with the native API routing of Alibaba Cloud Bai
   }
 } 
 ```
-The gateway automatically intercepts and injects the `X-DashScope-Async: enable` request header to achieve automatic hosting and submission of asynchronous tasks.
+Async tasks require header `X-DashScope-Async: enable` (include it in your request if the client does not add it).
 
 ### 2. Wanx Image Generation (Submit Image)
 * **Path**: `/api/v1/services/aigc/multimodal-generation/generation`
 * **Request Method**: `POST`
 
-The format is similar to video, supporting direct transparent transmission of vendor-specific control parameters such as seed and size.
+Similar request shape to video; supports vendor fields such as seed and size.
 
 ### 3. Asynchronous Task Status Query
 * **Path**: `/api/v1/tasks/{task_id}`
 * **Request Method**: `GET`
 
-Both Alibaba Wanx video and image tasks use Bailian's unified asynchronous task ID. You can use the native `task_id` for polling. The gateway will extract the corresponding usage for billing deduction after the status changes to `succeeded` or `failed`.
+Both Alibaba Wanx video and image tasks use Bailian's unified asynchronous task ID. You can use the native `task_id` for polling. Usage is settled when the task reaches `succeeded` or `failed`.
 
 ### 4. Text Embeddings (Embeddings) and Rerank
 * **Embeddings API**: `/compatible-mode/v1/embeddings` (`POST`)

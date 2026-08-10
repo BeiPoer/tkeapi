@@ -1,6 +1,6 @@
 # Quick Start & Authentication Guide
 
-Welcome to the Unified API Gateway! This gateway supports both the OpenAI protocol and the native protocols of various LLM providers, providing you with automatic channel routing, protocol translation, and smart billing settlement.
+Welcome to the Unified API Gateway. Use the Base URL and API Key below to call models.
 
 ### 1. Base URL
 The unified API base URL is:

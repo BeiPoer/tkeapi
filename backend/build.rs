@@ -100,12 +100,14 @@ fn main() {
     fs::write(&dest_path, json_str).unwrap();
 
     // 监测对应更改以触发更新，保障热重载
+    // 始终监听 git_log.txt：Docker 容器内无 .git 时靠它触发 build.rs 重跑
+    println!("cargo:rerun-if-changed=git_log.txt");
     if Path::new("../.git/HEAD").exists() {
         println!("cargo:rerun-if-changed=../.git/HEAD");
     } else if Path::new(".git/HEAD").exists() {
         println!("cargo:rerun-if-changed=.git/HEAD");
     } else {
-        // 无 git 时不强制重构
+        // 无 git 时不强制重构（git_log.txt 已覆盖）
     }
 
     // 自动检测插件文件/目录的存在性，实现代码级别的解耦和优雅降级

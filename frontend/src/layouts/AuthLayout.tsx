@@ -26,6 +26,8 @@ export interface AuthMethodOption {
 interface AuthLayoutProps {
   title: string;
   subtitle?: string;
+  /** 标题点击跳转地址；留空则标题不可点击 */
+  titleHref?: string | null;
   logo?: string | null;
   loading?: boolean;
   children: React.ReactNode;
@@ -37,9 +39,19 @@ interface AuthLayoutProps {
   onMethodChange?: (key: string) => void;
 }
 
+/** 规范化标题链接：相对路径原样保留，无协议的外链补 https:// */
+const normalizeTitleHref = (raw?: string | null): string | null => {
+  const href = (raw || '').trim();
+  if (!href) return null;
+  if (href.startsWith('/') || href.startsWith('#') || href.startsWith('?')) return href;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href)) return href;
+  return `https://${href}`;
+};
+
 const AuthLayout: React.FC<AuthLayoutProps> = ({
   title,
   subtitle,
+  titleHref,
   logo,
   loading,
   children,
@@ -129,6 +141,9 @@ const AuthLayout: React.FC<AuthLayoutProps> = ({
     return '"The next-generation LLM API gateway, empowering teams with agile control and granular management of large language models."';
   };
 
+  const rawHref = titleHref !== undefined ? titleHref : settings?.site?.login_title_url;
+  const href = normalizeTitleHref(rawHref);
+
   return (
     <div className={`min-h-screen bg-background text-foreground relative overflow-hidden font-sans transition-opacity duration-300 ${
       isReady ? 'opacity-100' : 'opacity-0'
@@ -148,16 +163,32 @@ const AuthLayout: React.FC<AuthLayoutProps> = ({
           <GridStarsEffect />
 
           {/* 顶部 Logo 与系统名称 */}
-          <div className="relative z-20 flex items-center gap-2.5 text-lg font-semibold tracking-tight">
-            {logo ? (
-              <img src={logo} alt="logo" className="w-7 h-7 object-contain rounded" />
-            ) : (
-              <div className="flex items-center justify-center w-7 h-7 rounded bg-primary text-primary-foreground">
-                <Terminal className="w-4 h-4" />
-              </div>
-            )}
-            <span>{settings?.site?.name || 'TokensByte'}</span>
-          </div>
+          {href ? (
+            <a
+              href={href}
+              className="relative z-20 flex items-center gap-2.5 text-lg font-semibold tracking-tight text-white hover:opacity-80 transition-opacity cursor-pointer no-underline"
+            >
+              {logo ? (
+                <img src={logo} alt="logo" className="w-7 h-7 object-contain rounded" />
+              ) : (
+                <div className="flex items-center justify-center w-7 h-7 rounded bg-primary text-primary-foreground">
+                  <Terminal className="w-4 h-4" />
+                </div>
+              )}
+              <span>{settings?.site?.name || 'TokensByte'}</span>
+            </a>
+          ) : (
+            <div className="relative z-20 flex items-center gap-2.5 text-lg font-semibold tracking-tight">
+              {logo ? (
+                <img src={logo} alt="logo" className="w-7 h-7 object-contain rounded" />
+              ) : (
+                <div className="flex items-center justify-center w-7 h-7 rounded bg-primary text-primary-foreground">
+                  <Terminal className="w-4 h-4" />
+                </div>
+              )}
+              <span>{settings?.site?.name || 'TokensByte'}</span>
+            </div>
+          )}
 
           {/* 底部名言引用 */}
           <div className="relative z-20 mt-auto max-w-md">
@@ -213,16 +244,32 @@ const AuthLayout: React.FC<AuthLayoutProps> = ({
         </div>
 
         {/* 移动端/小屏幕下的 Logo & 标题在一行展示 (位于卡片外部上方) */}
-        <div className={`flex ${loginStyle === 'split' ? 'lg:hidden' : ''} items-center justify-center gap-2 mb-4 select-none`}>
-          {logo ? (
-            <img src={logo} alt="logo" className="w-8 h-8 object-contain rounded-lg shadow-xs" />
-          ) : (
-            <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary text-primary-foreground">
-              <Terminal className="w-4 h-4" />
-            </div>
-          )}
-          <span className="font-semibold tracking-tight text-base text-foreground">{settings?.site?.name || 'TokensByte'}</span>
-        </div>
+        {href ? (
+          <a
+            href={href}
+            className={`flex ${loginStyle === 'split' ? 'lg:hidden' : ''} items-center justify-center gap-2 mb-4 select-none text-foreground hover:opacity-80 transition-opacity cursor-pointer no-underline`}
+          >
+            {logo ? (
+              <img src={logo} alt="logo" className="w-8 h-8 object-contain rounded-lg shadow-xs" />
+            ) : (
+              <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary text-primary-foreground">
+                <Terminal className="w-4 h-4" />
+              </div>
+            )}
+            <span className="font-semibold tracking-tight text-base text-foreground">{settings?.site?.name || 'TokensByte'}</span>
+          </a>
+        ) : (
+          <div className={`flex ${loginStyle === 'split' ? 'lg:hidden' : ''} items-center justify-center gap-2 mb-4 select-none`}>
+            {logo ? (
+              <img src={logo} alt="logo" className="w-8 h-8 object-contain rounded-lg shadow-xs" />
+            ) : (
+              <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary text-primary-foreground">
+                <Terminal className="w-4 h-4" />
+              </div>
+            )}
+            <span className="font-semibold tracking-tight text-base text-foreground">{settings?.site?.name || 'TokensByte'}</span>
+          </div>
+        )}
 
         {/* 表单容器卡片 */}
         <div className="w-full max-w-[380px] rounded-xl overflow-hidden bg-zinc-50/30 dark:bg-zinc-900/35 shadow-md flex flex-col">
@@ -232,9 +279,18 @@ const AuthLayout: React.FC<AuthLayoutProps> = ({
 
             {/* 标题 & 副标题 */}
             <div className="flex flex-col text-center select-none">
-              <h1 className="!text-xl md:!text-2xl font-semibold tracking-tight text-foreground leading-none">
-                {title}
-              </h1>
+              {href ? (
+                <h1 className="!text-xl md:!text-2xl font-semibold tracking-tight text-foreground leading-none">
+                  <a
+                    href={href}
+                    className="text-inherit no-underline hover:opacity-80 transition-opacity cursor-pointer"
+                  >
+                    {title}
+                  </a>
+                </h1>
+              ) : (
+                <h1 className="!text-xl md:!text-2xl font-semibold tracking-tight text-foreground leading-none">{title}</h1>
+              )}
               {subtitle && (
                 <p className="text-xs text-muted-foreground leading-none mt-1">
                   {subtitle}

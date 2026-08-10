@@ -370,9 +370,16 @@ const Register: React.FC = () => {
     </div>
   );
 
+  const baseTitle = settings?.site?.login_title || settings?.site?.name || 'TokensByte';
+  const registerTitle = `${baseTitle} ${i18n.language.startsWith('zh') ? '注册' : 'Register'}`;
+  const registerTitleUrl = settings?.site?.login_title_url || '';
+  const registerSubtitle = settings?.site?.login_subtitle || 'Next-gen LLM API Gateway';
+
   return (
     <AuthLayout
-      title={t('auth.register_title')}
+      title={registerTitle}
+      subtitle={registerSubtitle}
+      titleHref={registerTitleUrl}
       logo={siteLogo}
       loading={!settings}
       methodsLabel={t('auth.register_method')}

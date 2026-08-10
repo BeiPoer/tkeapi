@@ -1,0 +1,43 @@
+/*
+ * tokensbyte opensource
+ * (c) 2026 tokensbyte.ai
+ * @copyright      Copyright netbcloud/wstianxia
+ * @license        MIT (https://www.tokensbyte.ai/)
+ */
+
+/**
+ * 合并进行中的相同异步任务（如 React StrictMode 双挂载、并发调用）。
+ * 可选短时缓存：避免 settings 等依赖刚到又立刻重打同一接口。
+ */
+const inflight = new Map<string, Promise<unknown>>();
+const recent = new Map<string, { at: number; value: unknown }>();
+
+const DEFAULT_RECENT_MS = 1200;
+
+export function coalesceAsync<T>(
+  key: string,
+  factory: () => Promise<T>,
+  options?: { recentMs?: number },
+): Promise<T> {
+  const recentMs = options?.recentMs ?? DEFAULT_RECENT_MS;
+  const cached = recent.get(key);
+  if (cached && Date.now() - cached.at < recentMs) {
+    return Promise.resolve(cached.value as T);
+  }
+
+  const existing = inflight.get(key);
+  if (existing) return existing as Promise<T>;
+
+  const promise = factory()
+    .then((value) => {
+      recent.set(key, { at: Date.now(), value });
+      return value;
+    })
+    .finally(() => {
+      if (inflight.get(key) === promise) {
+        inflight.delete(key);
+      }
+    });
+  inflight.set(key, promise);
+  return promise;
+}

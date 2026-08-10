@@ -11,6 +11,7 @@
  */
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import toast from '../PlaygroundToast';
+import generateUUID from '../../../../../utils/uuid';
 import { LoadingOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import type { AdvancedNodeProps } from './shared/types';
@@ -242,7 +243,7 @@ const VolcEnhanceNode: React.FC<AdvancedNodeProps> = ({
       return;
     }
 
-    const sysLogId = 'tsk_' + crypto.randomUUID().replace(/-/g, '').toLowerCase().substring(0, 26);
+    const sysLogId = 'tsk_' + generateUUID().replace(/-/g, '').toLowerCase().substring(0, 26);
     setEnhanceProcessing(true);
 
     // 自动展开详细数据面板

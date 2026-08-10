@@ -8,6 +8,14 @@
 use crate::time_system::DbTs;
 use serde::{Deserialize, Serialize};
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_unlimited() -> i32 {
+    -1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Redemption {
     pub id: i64,
@@ -31,6 +39,9 @@ pub struct Redemption {
     /// 单兑换码单用户可兑换次数，-1 = 不限（兼容历史 0 = 不限）
     #[sqlx(default)]
     pub per_user_limit: i32,
+    /// 同一活动（同 name）下单用户可兑换次数，-1 = 不限（兼容历史缺省）
+    #[sqlx(default)]
+    pub per_user_activity_limit: i32,
     /// 状态: 1=正常, 0=禁用, -1=作废
     #[sqlx(default)]
     pub status: i32,
@@ -47,7 +58,7 @@ pub struct CreateRedemptionRequest {
     /// 过期时间 ISO 字符串（permanent=false 时必填）
     #[serde(default)]
     pub expires_at: Option<String>,
-    /// 是否允许多次兑换（false 时强制 max_uses=1, per_user_limit=1）
+    /// 是否允许多次兑换（false 时强制 max_uses=1；与活动参与次数限制相互独立）
     #[serde(default)]
     pub allow_multiple: bool,
     /// 单兑换码兑换次数上限，-1 = 不限（仅 allow_multiple=true 时生效；每个码独立）
@@ -56,14 +67,9 @@ pub struct CreateRedemptionRequest {
     /// 单兑换码单用户兑换次数上限，-1 = 不限（仅 allow_multiple=true 时生效）
     #[serde(default = "default_unlimited")]
     pub per_user_limit: i32,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_unlimited() -> i32 {
-    -1
+    /// 同一活动下单用户可兑换次数上限，-1 = 不限（与 allow_multiple 相互独立）
+    #[serde(default = "default_unlimited")]
+    pub per_user_activity_limit: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +99,8 @@ pub struct RedemptionGroup {
     pub total_used_count: i64,
     pub max_uses: i32,
     pub per_user_limit: i32,
+    #[sqlx(default)]
+    pub per_user_activity_limit: i32,
 }
 
 #[derive(Debug, Serialize)]

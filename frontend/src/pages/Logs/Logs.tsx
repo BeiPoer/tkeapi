@@ -906,6 +906,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
             current: page,
             pageSize,
             onChange: (p: number, s: number) => { setPage(p); setPageSize(s); },
+            showQuickJumper: true,
           }}
           renderCard={(record: any) => {
             const userName = record.user_nickname || record.user_id?.slice(0, 8) || '-';
@@ -1020,6 +1021,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
             pageSize,
             onChange: (p, s) => { setPage(p); setPageSize(s); },
             showSizeChanger: true,
+            showQuickJumper: true,
           }}
           onChange={(pagination, filters: any) => {
             let shouldResetPage = false;

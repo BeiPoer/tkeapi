@@ -7,12 +7,14 @@
 
 use crate::error::{AppError, AppResult};
 use crate::models::{
+    build_public_payment_channels, merge_payment_channels_ui, public_payment_status_from_channels,
     AgreementSettings, AllSettings, CurrencySettings, DatabaseSettings, GoogleOAuthSettings,
     LoginSettings, MarketingSettings, PaymentAlipaySettings, PaymentAllinpaySettings,
-    PaymentBonuspaySettings, PaymentHyperbcSettings, PaymentStripeSettings, PaymentWechatSettings,
-    PublicMarketingSettings, PublicNotificationSettings, PublicPaymentStatus,
-    PublicRegistrationSettings, PublicSettings, RegistrationSettings, SMTPSettings, SiteSettings,
-    SmsSettings, StorageSettings, UpdateSettingsRequest, WechatOAuthSettings,
+    PaymentBonuspaySettings, PaymentChannelsUiSettings, PaymentGatewayEnableFlags,
+    PaymentHyperbcSettings, PaymentStripeSettings, PaymentWechatSettings, PublicMarketingSettings,
+    PublicNotificationSettings, PublicRegistrationSettings, PublicSettings, RegistrationSettings,
+    SMTPSettings, SiteSettings, SmsSettings, StorageSettings, UpdateSettingsRequest,
+    WechatOAuthSettings,
 };
 use crate::AppState;
 use axum::{extract::State, Json};
@@ -73,31 +75,34 @@ pub async fn get_public_settings(
                 }
             });
 
-    // 支付渠道仅提取 enabled 开关，不暴露 any 密钥
-    let wechat_enabled =
-        get_setting::<Option<PaymentWechatSettings>>(&state, "payment_wechat", None)
-            .await?
-            .map_or(false, |p| p.enabled);
-    let alipay_enabled =
-        get_setting::<Option<PaymentAlipaySettings>>(&state, "payment_alipay", None)
-            .await?
-            .map_or(false, |p| p.enabled);
-    let stripe_enabled =
-        get_setting::<Option<PaymentStripeSettings>>(&state, "payment_stripe", None)
-            .await?
-            .map_or(false, |p| p.enabled);
-    let bonuspay_enabled =
-        get_setting::<Option<PaymentBonuspaySettings>>(&state, "payment_bonuspay", None)
-            .await?
-            .map_or(false, |p| p.enabled);
-    let hyperbc_enabled =
-        get_setting::<Option<PaymentHyperbcSettings>>(&state, "payment_hyperbc", None)
-            .await?
-            .map_or(false, |p| p.enabled);
-    let allinpay_enabled =
-        get_setting::<Option<PaymentAllinpaySettings>>(&state, "payment_allinpay", None)
-            .await?
-            .map_or(false, |p| p.enabled);
+    // 支付渠道仅提取 enabled 开关与展示元数据，不暴露任何密钥
+    let wechat_cfg =
+        get_setting::<Option<PaymentWechatSettings>>(&state, "payment_wechat", None).await?;
+    let alipay_cfg =
+        get_setting::<Option<PaymentAlipaySettings>>(&state, "payment_alipay", None).await?;
+    let stripe_cfg =
+        get_setting::<Option<PaymentStripeSettings>>(&state, "payment_stripe", None).await?;
+    let bonuspay_cfg =
+        get_setting::<Option<PaymentBonuspaySettings>>(&state, "payment_bonuspay", None).await?;
+    let hyperbc_cfg =
+        get_setting::<Option<PaymentHyperbcSettings>>(&state, "payment_hyperbc", None).await?;
+    let allinpay_cfg =
+        get_setting::<Option<PaymentAllinpaySettings>>(&state, "payment_allinpay", None).await?;
+    let gateway = PaymentGatewayEnableFlags {
+        wechat: wechat_cfg.as_ref().map_or(false, |p| p.enabled),
+        alipay: alipay_cfg.as_ref().map_or(false, |p| p.enabled),
+        stripe: stripe_cfg.as_ref().map_or(false, |p| p.enabled),
+        bonuspay: bonuspay_cfg.as_ref().map_or(false, |p| p.enabled),
+        hyperbc: hyperbc_cfg.as_ref().map_or(false, |p| p.enabled),
+        allinpay: allinpay_cfg.as_ref().map_or(false, |p| p.enabled),
+    };
+    let channels_ui = merge_payment_channels_ui(
+        get_setting::<Option<PaymentChannelsUiSettings>>(&state, "payment_channels_ui", None)
+            .await?,
+        &gateway,
+    );
+    let payment_channels = build_public_payment_channels(&channels_ui, &gateway);
+    let payment = public_payment_status_from_channels(&payment_channels);
 
     Ok(Json(PublicSettings {
         is_open_source: cfg!(not(feature = "commercial_plugins")),
@@ -106,14 +111,8 @@ pub async fn get_public_settings(
         login,
         registration: PublicRegistrationSettings::from(&registration),
         marketing: PublicMarketingSettings::from(&marketing),
-        payment: PublicPaymentStatus {
-            wechat_enabled,
-            alipay_enabled,
-            stripe_enabled,
-            bonuspay_enabled,
-            hyperbc_enabled,
-            allinpay_enabled,
-        },
+        payment,
+        payment_channels,
         agreement,
         wechat_oauth_app_id,
         google_oauth_client_id,
@@ -331,6 +330,15 @@ pub async fn update_settings(
         merge_and_save_setting::<PaymentAllinpaySettings>(
             &state,
             "payment_allinpay",
+            &v,
+            Default::default(),
+        )
+        .await?;
+    }
+    if let Some(v) = request.payment_channels_ui {
+        merge_and_save_setting::<PaymentChannelsUiSettings>(
+            &state,
+            "payment_channels_ui",
             &v,
             Default::default(),
         )
@@ -794,6 +802,27 @@ pub async fn test_storage_connection(
 
 /// 加载全部设置（统一入口）
 pub async fn load_all_settings(state: &Arc<AppState>) -> AppResult<AllSettings> {
+    let payment_wechat: Option<PaymentWechatSettings> =
+        get_setting(state, "payment_wechat", None).await?;
+    let payment_alipay: Option<PaymentAlipaySettings> =
+        get_setting(state, "payment_alipay", None).await?;
+    let payment_stripe: Option<PaymentStripeSettings> =
+        get_setting(state, "payment_stripe", None).await?;
+    let payment_bonuspay: Option<PaymentBonuspaySettings> =
+        get_setting(state, "payment_bonuspay", None).await?;
+    let payment_hyperbc: Option<PaymentHyperbcSettings> =
+        get_setting(state, "payment_hyperbc", None).await?;
+    let payment_allinpay: Option<PaymentAllinpaySettings> =
+        get_setting(state, "payment_allinpay", None).await?;
+    let gateway = PaymentGatewayEnableFlags {
+        wechat: payment_wechat.as_ref().map_or(false, |p| p.enabled),
+        alipay: payment_alipay.as_ref().map_or(false, |p| p.enabled),
+        stripe: payment_stripe.as_ref().map_or(false, |p| p.enabled),
+        bonuspay: payment_bonuspay.as_ref().map_or(false, |p| p.enabled),
+        hyperbc: payment_hyperbc.as_ref().map_or(false, |p| p.enabled),
+        allinpay: payment_allinpay.as_ref().map_or(false, |p| p.enabled),
+    };
+
     Ok(AllSettings {
         site: get_setting(state, "site_settings", default_site_settings()).await?,
         currency: get_setting(state, "currency_settings", default_currency_settings()).await?,
@@ -808,12 +837,16 @@ pub async fn load_all_settings(state: &Arc<AppState>) -> AppResult<AllSettings> 
         sms: get_setting(state, "sms_settings", None).await?,
         marketing: get_setting(state, "marketing_settings", default_marketing_settings()).await?,
         database: get_setting(state, "database_settings", default_database_settings()).await?,
-        payment_wechat: get_setting(state, "payment_wechat", None).await?,
-        payment_alipay: get_setting(state, "payment_alipay", None).await?,
-        payment_stripe: get_setting(state, "payment_stripe", None).await?,
-        payment_bonuspay: get_setting(state, "payment_bonuspay", None).await?,
-        payment_hyperbc: get_setting(state, "payment_hyperbc", None).await?,
-        payment_allinpay: get_setting(state, "payment_allinpay", None).await?,
+        payment_wechat,
+        payment_alipay,
+        payment_stripe,
+        payment_bonuspay,
+        payment_hyperbc,
+        payment_allinpay,
+        payment_channels_ui: Some(merge_payment_channels_ui(
+            get_setting(state, "payment_channels_ui", None).await?,
+            &gateway,
+        )),
         google_oauth: get_setting(state, "google_oauth", None).await?,
         wechat_oauth: get_setting(state, "wechat_oauth", None).await?,
         agreement: get_setting(state, "agreement_settings", default_agreement_settings()).await?,
@@ -936,6 +969,7 @@ pub fn default_site_settings() -> SiteSettings {
         favicon: String::new(),
         logo: String::new(),
         login_title: String::new(),
+        login_title_url: String::new(),
         login_subtitle: String::new(),
         enable_multilingual: true,
         supported_languages: vec!["zh".to_string(), "en".to_string()],
@@ -1007,6 +1041,10 @@ pub fn default_registration_settings() -> RegistrationSettings {
             "aliyun.com".to_string(),
             "foxmail.com".to_string(),
         ],
+        require_bind_mobile: false,
+        require_bind_email: false,
+        bind_enforcement: "all".to_string(),
+        enable_user_kyc: false,
     }
 }
 

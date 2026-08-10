@@ -11,6 +11,7 @@
  */
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import toast from '../PlaygroundToast';
+import generateUUID from '../../../../../utils/uuid';
 import { usePlayground, useCanvas } from '../../context/PlaygroundContext';
 import { LoadingOutlined, SettingOutlined } from '@ant-design/icons';
 import { Dropdown, Switch } from 'antd';
@@ -29,18 +30,6 @@ import {
   handleInputBlur
 } from './shared/nodeStyles';
 import type { AdvancedNodeProps } from './shared/types';
-
-// 安全的 UUID 生成器，兼容 HTTP 等非安全上下文
-const generateUUID = () => {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = Math.random() * 16 | 0;
-    const v = c === 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
-};
 
 const AiImageNode: React.FC<AdvancedNodeProps> = ({
   node,

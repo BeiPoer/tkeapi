@@ -1,8 +1,6 @@
 # 谷歌 gemini-3.1 图像生成接入指南
 
-`gemini-3.1-flash-image-preview` 是 Google 旗下最新推出的极速、高品质多模态图像生成接口。本平台已将其统一包装为向下兼容的 OpenAI 标准生图路由。
-
-由于 Google Gemini 官方 Imagen 生图 API 对尺寸和比例有特殊的入参规范，请使用下方演示的 `ratio` (比例) 与 `resolution` (分辨率) 参数进行调用。
+`gemini-3.1-flash-image-preview` 通过 OpenAI 兼容接口 `POST /v1/images/generations` 调用。请使用下方的 `ratio`（比例）与 `resolution`（分辨率）参数。
 
 ---
 
@@ -48,7 +46,7 @@ curl -X POST https://{{domain}}/v1/images/generations \
 
 ### C. 搜索增强生图 (Search Grounding)
 
-您可以启用谷歌原生搜索或谷歌图片搜索组件，使模型在生成时能联网检索现实世界中最新的视觉信息辅助作画。
+可开启联网搜索，辅助检索最新视觉信息作画。
 
 ```bash
 curl -X POST https://{{domain}}/v1/images/generations \
@@ -68,21 +66,19 @@ curl -X POST https://{{domain}}/v1/images/generations \
 
 ## 2. 完整参数字典说明
 
-本网关自动完成 OpenAI 规范到谷歌官方的对齐适配，支持以下字段：
-
-| OpenAI 兼容参数名 | 类型 | 必填 | 默认值 | 描述与限制 |
+| 参数 | 类型 | 必填 | 默认值 | 描述与限制 |
 | :--- | :--- | :--- | :--- | :--- |
-| `model` | `string` | **是** | - | 图像生成模型标识，传入 `gemini-3.1-flash-image-preview`。 |
-| `prompt` | `string` | **是** | - | 描述画面的中英文提示词。 |
-| `image` | `string / array` | 否 | - | 单个参考图 URL 字符串，或者 URL 数组（用于图生图参考）。 |
-| `image_urls` | `array` | 否 | - | 纯参考图 URL 数组。与 `image` 二选一，支持多图参考。 |
-| `ratio` | `string` | 否 | `"1:1"` | 图片宽高比。可选值：`"1:1"`, `"3:4"`, `"4:3"`, `"9:16"`, `"16:9"`。优先级高于 `size`。 |
-| `resolution` | `string` | 否 | `"1k"` | 画面分辨率大小。可选值：`"1k"` (最长边 1024 像素)、`"2k"` (最长边 2048 像素) 等。优先级高于 `size`。 |
-| `size` | `string` | 否 | - | **兼容参数**：若传入带冒号的比例（如 `"16:9"` 等）会自动映射为 `ratio`；传入不带冒号的（如 `"1k"` 等）映射为 `resolution`。**避免直接传入 `"1024x1024"` 像素值**。 |
-| `response_format` | `string` | 否 | `"url"` | 响应格式。可选 `"url"` (返回可下载的图片链接) 或 `"b64_json"` (返回 Base64 编码的图像数据)。 |
-| `n` | `integer` | 否 | `1` | 期望生成的图片张数。 |
-| `google_search` | `boolean` | 否 | `false` | 是否开启 Google Search 搜索增强联网工具。 |
-| `google_image_search` | `boolean` | 否 | `false` | 是否开启谷歌图片搜索联网辅助工具。 |
+| `model` | `string` | **是** | - | 如 `gemini-3.1-flash-image-preview`。 |
+| `prompt` | `string` | **是** | - | 画面提示词。 |
+| `image` | `string / array` | 否 | - | 参考图 URL（字符串或数组）。 |
+| `image_urls` | `array` | 否 | - | 参考图 URL 数组；与 `image` 二选一。 |
+| `ratio` | `string` | 否 | `"1:1"` | 宽高比：`"1:1"` / `"3:4"` / `"4:3"` / `"9:16"` / `"16:9"`。优先于 `size`。 |
+| `resolution` | `string` | 否 | `"1k"` | 如 `"1k"`、`"2k"`。优先于 `size`。 |
+| `size` | `string` | 否 | - | 兼容写法：带冒号（如 `"16:9"`）表示比例；不带冒号（如 `"1k"`）表示分辨率。**请勿传 `"1024x1024"` 像素值**。 |
+| `response_format` | `string` | 否 | `"url"` | `"url"` 或 `"b64_json"`。 |
+| `n` | `integer` | 否 | `1` | 生成张数。 |
+| `google_search` | `boolean` | 否 | `false` | 是否开启 Google Search。 |
+| `google_image_search` | `boolean` | 否 | `false` | 是否开启图片搜索辅助。 |
 
 ---
 

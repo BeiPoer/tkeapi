@@ -2,7 +2,7 @@
 
 `gpt-image-2` 是 OpenAI 旗下最新一代旗舰图像生成与编辑模型（完美对齐并支持 DALL-E 旗舰生图标准），具备极高的提示词还原能力和清晰写实的画面质感。
 
-网关已将其接入地址与 OpenAI 官方规范完全对齐。除了支持经典的**文生图 (Generations)**，还全面兼容**图像编辑与局部重绘 (Image Edits)**。
+支持**文生图 (Generations)** 与**图像编辑 / 局部重绘 (Image Edits)**。
 
 ---
 
@@ -35,7 +35,7 @@ curl -X POST https://{{domain}}/v1/images/generations \
 
 ## 3. 图像编辑与局部重绘 (Image Edits) 示例
 
-图像编辑路由为 `/v1/images/edits`。网关同时兼容 `JSON` 格式与 `Form-Data` 格式，具体使用取决于上游通道支持情况或您的客户端便利性：
+图像编辑路由为 `/v1/images/edits`，同时兼容 `JSON` 与 `Form-Data`：
 
 ### A. 极简 JSON 传参方式 (直接传网络图片 URL)
 无需繁琐的文件流处理，直接通过 JSON 传递底图与遮罩图的网络公开直链。

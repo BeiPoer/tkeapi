@@ -12,8 +12,9 @@ import {
   shouldShowWebNotifications,
   maybeShowBrowserPush,
 } from '../utils/notificationPrefs';
-import { Sidebar as SidebarIcon } from 'lucide-react';
+import { Sidebar as SidebarIcon, Terminal } from 'lucide-react';
 import request from '../utils/request';
+import generateUUID from '../utils/uuid';
 import { persistUserLanguagePreference } from '../utils/language';
 import useSettingsStore from '../store/settings';
 import { hasAdminChildMenuPermission } from '../constants/adminMenuPermissions';
@@ -59,6 +60,7 @@ import type { Announcement } from '../types';
 import useAuthStore from '../store/auth';
 import { useThemeStore } from '../store/theme';
 import UserAvatarMenu from '../components/UserAvatarMenu';
+import BindPromptModal from '../components/BindPromptModal';
 import { getAntdThemeTokens, getSiderMenuTokens, softAccent } from '../theme/tokens';
 
 const { Header, Sider, Content } = Layout;
@@ -73,8 +75,12 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
   const { t, i18n } = useTranslation();
   const location = useLocation();
   const navigate = useNavigate();
+  const screens = useBreakpoint();
   const [collapsed, setCollapsed] = useState(() => {
     try {
+      if (typeof window !== 'undefined' && window.innerWidth <= 576) {
+        return true;
+      }
       const saved = localStorage.getItem('sidebar_collapsed');
       return saved !== null ? JSON.parse(saved) : false;
     } catch (e) {
@@ -82,12 +88,17 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
     }
   });
 
+  useEffect(() => {
+    if (screens.xs) {
+      setCollapsed(true);
+    }
+  }, [screens.xs]);
+
   const handleCollapsedChange = (val: boolean) => {
     setCollapsed(val);
     localStorage.setItem('sidebar_collapsed', JSON.stringify(val));
   };
 
-  const screens = useBreakpoint();
   const [openKeys, setOpenKeys] = useState<string[]>([]);
 
 
@@ -325,7 +336,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
               e.preventDefault();
               const impToken = sessionStorage.getItem('token');
               if (!impToken) return;
-              const handoffKey = `imp_handoff_${crypto.randomUUID()}`;
+              const handoffKey = `imp_handoff_${generateUUID()}`;
               localStorage.setItem(handoffKey, impToken);
               const safePath = targetPath.startsWith('/') && !targetPath.startsWith('//') ? targetPath : '/dashboard';
               window.location.href = `${window.location.origin}/login?impersonate=1&handoff=${encodeURIComponent(handoffKey)}&redirect=${encodeURIComponent(safePath)}`;
@@ -875,11 +886,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
           collapsed={collapsed}
           theme={themeMode}
           width={240}
-          breakpoint="lg"
           collapsedWidth={screens.xs ? 0 : 68}
-          onBreakpoint={(broken) => {
-            if (broken) setCollapsed(true);
-          }}
           style={{
             boxShadow: 'none',
             borderRight: themeMode === 'light' ? '1px solid #e4e4e7' : '1px solid #1f1f23',
@@ -894,21 +901,82 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
           className="custom-sider"
         >
           <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-            <div style={{ height: screens.xs ? 48 : 56, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 8px', borderBottom: themeMode === 'light' ? '1px solid #e4e4e7' : '1px solid #1f1f23' }}>
-              {siteLogo ? (
-                (collapsed && !screens.xs) ? (
-                  <img src={siteLogo} alt="logo" style={{ width: 32, height: 32, objectFit: 'contain' }} />
+            {/* Logo Area：展开态固定宽度裁切 + 与图标轨交叉淡入，避免文字挤压 */}
+            <div
+              style={{
+                height: screens.xs ? 48 : 56,
+                position: 'relative',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '0 8px',
+                borderBottom: themeMode === 'light' ? '1px solid #e4e4e7' : '1px solid #1f1f23',
+                overflow: 'hidden',
+                flexShrink: 0,
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  justifyContent: 'center',
+                  width: 224,
+                  minWidth: 224,
+                  maxWidth: 224,
+                  opacity: collapsed ? 0 : 1,
+                  transition: collapsed
+                    ? 'opacity 0.1s ease'
+                    : 'opacity 0.18s ease 0.12s',
+                  pointerEvents: collapsed ? 'none' : 'auto',
+                }}
+              >
+                {siteLogo ? (
+                  <img src={siteLogo} alt="logo" style={{ width: 20, height: 20, objectFit: 'contain', flexShrink: 0 }} />
                 ) : (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', justifyContent: 'center' }}>
-                    <img src={siteLogo} alt="logo" style={{ width: 28, height: 28, objectFit: 'contain', flexShrink: 0 }} />
-                    <div style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', margin: 0, fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18, fontWeight: 700, lineHeight: 1.2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-all' }}>
-                      {siteName}
-                    </div>
+                  <div className="flex items-center justify-center w-5 h-5 rounded bg-primary text-primary-foreground flex-shrink-0">
+                    <Terminal className="w-3 h-3" />
                   </div>
-                )
-              ) : (
-                <div style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', margin: 0, fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18, fontWeight: 700, lineHeight: 1.2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-all', textAlign: 'center' }}>
-                  {(collapsed && !screens.xs) ? 'TB' : siteName}
+                )}
+                <div
+                  style={{
+                    color: themeMode === 'light' ? '#1f2937' : '#fff',
+                    margin: 0,
+                    fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18,
+                    fontWeight: 700,
+                    lineHeight: 1.2,
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    minWidth: 0,
+                  }}
+                  title={siteName}
+                >
+                  {siteName}
+                </div>
+              </div>
+              {!screens.xs && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    opacity: collapsed ? 1 : 0,
+                    transition: collapsed
+                      ? 'opacity 0.18s ease 0.12s'
+                      : 'opacity 0.1s ease',
+                    pointerEvents: collapsed ? 'auto' : 'none',
+                  }}
+                >
+                  {siteLogo ? (
+                    <img src={siteLogo} alt="logo" style={{ width: 24, height: 24, objectFit: 'contain' }} />
+                  ) : (
+                    <div className="flex items-center justify-center w-6 h-6 rounded-md bg-primary text-primary-foreground">
+                      <Terminal className="w-3.5 h-3.5" />
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -991,7 +1059,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                 : '1px solid rgba(255, 255, 255, 0.08)',
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center' }}>
+            <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, flexShrink: 1, overflow: 'hidden' }}>
               <Button
                 type="text"
                 icon={<SidebarIcon size={16} />}
@@ -1003,23 +1071,50 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                   alignItems: 'center',
                   justifyContent: 'center',
                   color: themeMode === 'light' ? '#71717a' : '#a1a1aa',
-                  borderRadius: 6
+                  borderRadius: 6,
+                  flexShrink: 0,
                 }}
               />
               {screens.xs && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 8 }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    marginLeft: 6,
+                    minWidth: 0,
+                    overflow: 'hidden',
+                    cursor: 'pointer'
+                  }}
+                  onClick={() => navigate('/dashboard')}
+                >
                   {siteLogo ? (
-                    <img src={siteLogo} alt="logo" style={{ width: 24, height: 24, objectFit: 'contain' }} />
+                    <img src={siteLogo} alt="logo" style={{ width: 18, height: 18, objectFit: 'contain', flexShrink: 0 }} />
                   ) : (
-                    <Title level={5} style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', margin: 0 }}>
-                      {siteName}
-                    </Title>
+                    <div className="flex items-center justify-center w-4.5 h-4.5 rounded bg-primary text-primary-foreground flex-shrink-0">
+                      <Terminal className="w-3 h-3" />
+                    </div>
                   )}
+                  <span
+                    style={{
+                      color: themeMode === 'light' ? '#1f2937' : '#fff',
+                      margin: 0,
+                      fontSize: 14,
+                      fontWeight: 600,
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      lineHeight: 1.2,
+                    }}
+                    title={siteName}
+                  >
+                    {siteName}
+                  </span>
                 </div>
               )}
             </div>
 
-            <Space size={screens.xs ? 4 : 8} align="center">
+            <Space size={screens.xs ? 2 : 8} align="center" style={{ flexShrink: 0 }}>
               <style>{`
                 .header-badge.ant-badge {
                   display: flex !important;
@@ -1051,11 +1146,13 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                       color: themeMode === 'light' ? '#1f2937' : '#fff',
                       display: 'flex',
                       alignItems: 'center',
+                      justifyContent: 'center',
                       gap: 6,
                       fontSize: 14,
                       fontWeight: 500,
-                      height: 40,
-                      padding: '0 12px',
+                      height: screens.xs ? 34 : 40,
+                      width: screens.xs ? 34 : undefined,
+                      padding: screens.xs ? 0 : '0 12px',
                     }}
                     onClick={(e) => {
                       if (!e.metaKey && !e.ctrlKey) {
@@ -1064,7 +1161,9 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                       }
                     }}
                   >
-                    <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{t('menu.model_marketplace', 'Models')}</span>
+                    {!screens.xs && (
+                      <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{t('menu.model_marketplace', 'Models')}</span>
+                    )}
                   </Button>
                 </Tooltip>
               )}
@@ -1096,11 +1195,13 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                       color: themeMode === 'light' ? '#1f2937' : '#fff',
                       display: 'flex',
                       alignItems: 'center',
+                      justifyContent: 'center',
                       gap: 6,
                       fontSize: 14,
                       fontWeight: 500,
-                      height: 40,
-                      padding: '0 12px',
+                      height: screens.xs ? 34 : 40,
+                      width: screens.xs ? 34 : undefined,
+                      padding: screens.xs ? 0 : '0 12px',
                     }}
                     onClick={(e) => {
                       if (!e.metaKey && !e.ctrlKey) {
@@ -1109,7 +1210,9 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                       }
                     }}
                   >
-                    <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{t('menu.relay_api', 'API教程')}</span>
+                    {!screens.xs && (
+                      <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{t('menu.relay_api', 'API教程')}</span>
+                    )}
                   </Button>
                 </Tooltip>
               )}
@@ -1134,7 +1237,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                           </svg>
                         )
                     }
-                    style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 40, height: 40 }}
+                    style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: screens.xs ? 34 : 40, height: screens.xs ? 34 : 40 }}
                   />
                 </Tooltip>
               )}
@@ -1151,7 +1254,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                         <ellipse cx="12" cy="12" rx="3.5" ry="8.5" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="2" />
                       </svg>
                     }
-                    style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 40, height: 40 }}
+                    style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: screens.xs ? 34 : 40, height: screens.xs ? 34 : 40 }}
                   />
                 </Dropdown>
               )}
@@ -1185,7 +1288,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                           <path d="M10 19.5a2 2 0 004 0" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="2.5" strokeLinecap="round" />
                         </svg>
                       }
-                      style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 40, height: 40 }}
+                      style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: screens.xs ? 34 : 40, height: screens.xs ? 34 : 40 }}
                       onClick={() => {
                         setUnreadCount(0);
                       }}
@@ -1229,6 +1332,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
         </Layout>
       </Layout>
 
+      {isUserEnd && <BindPromptModal />}
     </ConfigProvider>
   );
 };

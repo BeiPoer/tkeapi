@@ -66,6 +66,7 @@ const Redemptions: React.FC = () => {
 
   const permanent = Form.useWatch('permanent', form);
   const allowMultiple = Form.useWatch('allow_multiple', form);
+  const limitPerUserActivity = Form.useWatch('limit_per_user_activity', form);
 
   const fetchGroups = async (page = currentPage, size = pageSize) => {
     setLoading(true);
@@ -182,8 +183,14 @@ const Redemptions: React.FC = () => {
           ? null
           : (values.expires_at ? dayjs(values.expires_at).format('YYYY-MM-DD') : null),
         allow_multiple: !!values.allow_multiple,
+        // 与活动参与次数解耦：关闭多次兑换时单码仅 1 次；开启时用自定义总次数
         max_uses: values.allow_multiple ? Number(values.max_uses ?? -1) : 1,
-        per_user_limit: values.allow_multiple ? Number(values.per_user_limit ?? -1) : 1,
+        // 单码单用户：关闭多次兑换固定 1；开启时不限，改由活动参与次数约束
+        per_user_limit: values.allow_multiple ? -1 : 1,
+        // 活动级单用户参与次数：默认不限，开启后自定义
+        per_user_activity_limit: values.limit_per_user_activity
+          ? Number(values.per_user_activity_limit ?? 1)
+          : -1,
       };
 
       const resp = await (request.post('/redemptions', payload) as unknown as Promise<GenerateResponse>);
@@ -357,16 +364,17 @@ const Redemptions: React.FC = () => {
       key: 'rule',
       render: (_: unknown, record: RedemptionGroup) => {
         const max = record.max_uses ?? 1;
-        const limit = record.per_user_limit ?? 1;
-        if (max === 1 && limit === 1) {
-          return <Tag color="default">{isZh ? '单次有效' : 'Single Use'}</Tag>;
-        }
-        const maxText = max === -1 ? (isZh ? '无限' : 'Unlimited') : max;
-        const limitText = limit === -1 ? (isZh ? '无限' : 'Unlimited') : limit;
+        const activityLimit = record.per_user_activity_limit ?? -1;
+        const maxText = max === -1 || max === 0
+          ? (isZh ? '无限' : 'Unlimited')
+          : max;
+        const activityText = activityLimit === -1 || activityLimit === 0
+          ? (isZh ? '不限制' : 'Unlimited')
+          : activityLimit;
         return (
           <div style={{ fontSize: '12px', color: 'var(--ant-color-text-secondary)', lineHeight: '1.5' }}>
-            <div>{isZh ? '总可兑换:' : 'Max:'} <Text strong>{maxText}</Text></div>
-            <div>{isZh ? '单人可兑:' : 'Per user:'} <Text strong>{limitText}</Text></div>
+            <div>{isZh ? '单码可兑:' : 'Per code:'} <Text strong>{maxText}</Text></div>
+            <div>{isZh ? '单人活动:' : 'Per user:'} <Text strong>{activityText}</Text></div>
           </div>
         );
       },
@@ -607,7 +615,8 @@ const Redemptions: React.FC = () => {
             permanent: true,
             allow_multiple: false,
             max_uses: -1,
-            per_user_limit: -1,
+            limit_per_user_activity: false,
+            per_user_activity_limit: 1,
           }}
         >
           <Form.Item name="name" label={t('redemptions.name')} rules={[{ required: true }]}>
@@ -641,34 +650,49 @@ const Redemptions: React.FC = () => {
 
           <Form.Item
             name="allow_multiple"
-            label={isZh ? '开启多次兑换' : 'Allow multiple redemptions'}
+            label={isZh ? '兑换码支持多次兑换' : 'Allow multiple redemptions'}
             valuePropName="checked"
-            extra={isZh ? '关闭时每个兑换码仅可兑换 1 次' : 'When off, each code can only be redeemed once'}
+            extra={isZh ? '关闭时每个兑换码仅可兑换 1 次；与下方「单用户活动参与次数」相互独立' : 'When off, each code can only be redeemed once; independent of per-user activity limit'}
           >
             <Switch />
           </Form.Item>
 
           {allowMultiple && (
-            <div style={{ display: 'flex', gap: 16 }}>
-              <Form.Item
-                name="max_uses"
-                label={isZh ? '单兑换码兑换次数' : 'Uses per code'}
-                rules={[{ required: true }]}
-                extra={isZh ? '-1 表示不限制；对每个生成的兑换码分别生效' : '-1 = unlimited; applies to each generated code'}
-                style={{ flex: 1, marginBottom: 0 }}
-              >
-                <InputNumber min={-1} max={100000} style={{ width: '100%' }} />
-              </Form.Item>
-              <Form.Item
-                name="per_user_limit"
-                label={isZh ? '单兑换码单用户兑换次数' : 'Uses per code per user'}
-                rules={[{ required: true }]}
-                extra={isZh ? '-1 表示不限制；同一用户对同一兑换码的上限' : '-1 = unlimited; limit for the same user on the same code'}
-                style={{ flex: 1, marginBottom: 0 }}
-              >
-                <InputNumber min={-1} max={10000} style={{ width: '100%' }} />
-              </Form.Item>
-            </div>
+            <Form.Item
+              name="max_uses"
+              label={isZh ? '单兑换码兑换次数' : 'Uses per code'}
+              rules={[{ required: true }]}
+              extra={isZh ? '-1 表示不限制；对每个生成的兑换码分别生效' : '-1 = unlimited; applies to each generated code'}
+            >
+              <InputNumber min={-1} max={100000} style={{ width: '100%' }} />
+            </Form.Item>
+          )}
+
+          <Form.Item
+            name="limit_per_user_activity"
+            label={isZh ? '限制单用户参与本活动次数' : 'Limit per-user activity redemptions'}
+            valuePropName="checked"
+            extra={isZh ? '默认不限制；开启后同一用户在本活动下最多兑换 N 次（跨多个兑换码累计）' : 'Off = unlimited; when on, each user may redeem at most N times in this activity'}
+          >
+            <Switch />
+          </Form.Item>
+
+          {limitPerUserActivity && (
+            <Form.Item
+              name="per_user_activity_limit"
+              label={isZh ? '单用户可参与次数' : 'Max redemptions per user'}
+              rules={[
+                { required: true, message: isZh ? '请填写参与次数' : 'Please enter a limit' },
+                {
+                  type: 'number',
+                  min: 1,
+                  message: isZh ? '至少为 1 次' : 'Must be at least 1',
+                },
+              ]}
+              extra={isZh ? '同一用户兑换本活动任意兑换码均计入次数' : 'Counts across all codes under this activity name'}
+            >
+              <InputNumber min={1} max={10000} style={{ width: '100%' }} />
+            </Form.Item>
           )}
         </Form>
       </Modal>

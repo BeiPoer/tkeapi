@@ -1,6 +1,6 @@
 # Google Gemini 네이티브 API 설명
 
-Google 공식 SDK를 사용 중이거나, 프로토콜 변환 레이어를 건너뛰고 Gemini 네이티브의 Multi-modal, System Instruction 또는 JSON Mode를 사용하고자 하는 경우, 게이트웨이의 Google 네이티브 라우트를 직접 호출할 수 있습니다.
+Google SDK 또는 Gemini 형식을 사용하는 경우, 아래 경로와 본 플랫폼 API Key로 호출하세요.
 
 ### 1. 텍스트 생성 (Non-stream)
 * **경로**: `/v1beta/models/{model}:generateContent`

@@ -11,14 +11,20 @@ import MobileCardList, { MobileCard, CardRow, CardActions } from '../../componen
 import ModelSelector from '../../components/ModelSelector';
 import WalletBalanceDisplay from '../../components/WalletBalanceDisplay';
 import WalletDetailsView from '../../components/WalletDetailsView';
+import UserKycFormFields, {
+  kycToFormValues,
+  formValuesToKycPayload,
+  KYC_STATUS_META,
+} from '../../components/UserKycFormFields';
 import { PlusOutlined, EditOutlined, DeleteOutlined, UserOutlined, SyncOutlined, WalletOutlined, LoginOutlined, ArrowLeftOutlined, CloseOutlined, SearchOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
 import request from '../../utils/request';
 import useSettingsStore from '../../store/settings';
 import { useThemeStore } from '../../store/theme';
+import generateUUID from '../../utils/uuid';
 
-import type { User } from '../../types';
+import type { User, UserKyc, UserKycStatus } from '../../types';
 import dayjs from 'dayjs';
 import { formatApiDateTime } from '../../utils/timedisplay';
 import { toAbsoluteDateParam } from '../../utils/dateRangeParams';
@@ -176,6 +182,10 @@ const Users: React.FC = () => {
   // ── 等级变更历史 ──
   const [levelLogs, setLevelLogs] = useState<any[]>([]);
   const [levelLogsLoading, setLevelLogsLoading] = useState(false);
+  // ── 用户实名 KYC ──
+  const [userKyc, setUserKyc] = useState<UserKyc | null>(null);
+  const [kycLoading, setKycLoading] = useState(false);
+  const [kycSaving, setKycSaving] = useState(false);
 
   const fetchUsers = async () => {
     setLoading(true);
@@ -255,7 +265,21 @@ const Users: React.FC = () => {
     // 清空模型折扣状态
     setDiscountMap({});
     setDiscountMids([]);
+    setUserKyc(null);
     setIsModalVisible(true);
+  };
+
+  const loadUserKyc = (userId: string) => {
+    setKycLoading(true);
+    (request.get(`/users/${userId}/kyc`) as unknown as Promise<UserKyc>)
+      .then((res) => {
+        setUserKyc(res);
+        form.setFieldsValue(kycToFormValues(res));
+      })
+      .catch(() => {
+        setUserKyc(null);
+      })
+      .finally(() => setKycLoading(false));
   };
 
   const handleEdit = (record: User) => {
@@ -277,6 +301,42 @@ const Users: React.FC = () => {
     const md: Record<string, number> = record.model_discounts ? (() => { try { return JSON.parse(record.model_discounts); } catch { return {}; } })() : {};
     setDiscountMap(md);
     setDiscountMids(Object.keys(md));
+    if (!isAdminPage) {
+      loadUserKyc(record.id);
+    } else {
+      setUserKyc(null);
+    }
+  };
+
+  const handleSaveKyc = async () => {
+    if (!editingUser) return;
+    try {
+      const kycType = form.getFieldValue('kyc_type') || 'personal';
+      const idDocType = form.getFieldValue('id_doc_type');
+      const validityType = form.getFieldValue('validity_type');
+      const fields = [
+        'kyc_type', 'status', 'validity_type', 'reject_reason', 'admin_remark',
+      ];
+      if (kycType === 'enterprise') {
+        fields.push('company_name', 'business_license_url', 'tax_registration_url', 'legal_notarization_url');
+      } else {
+        fields.push('real_name', 'id_doc_type', 'id_doc_front_url');
+        if (idDocType === 'id_card') fields.push('id_doc_back_url');
+      }
+      if (validityType === 'expire_date') fields.push('expire_at');
+      const values = await form.validateFields(fields);
+      setKycSaving(true);
+      const payload = formValuesToKycPayload(values, true);
+      const res = await (request.put(`/users/${editingUser.id}/kyc`, payload) as unknown as Promise<UserKyc>);
+      setUserKyc(res);
+      form.setFieldsValue(kycToFormValues(res));
+      message.success('实名信息已保存');
+    } catch (e: any) {
+      if (e?.errorFields) return;
+      console.error(e);
+    } finally {
+      setKycSaving(false);
+    }
   };
 
   const handleDelete = async (id: string) => {
@@ -304,6 +364,12 @@ const Users: React.FC = () => {
         delete payload.gift_balance;
         delete payload.gift_used_quota;
         delete payload.used_quota;
+        // 实名字段由「保存实名信息」单独提交，勿混入用户更新
+        [
+          'kyc_type', 'status', 'real_name', 'id_doc_type', 'id_doc_front_url', 'id_doc_back_url',
+          'company_name', 'business_license_url', 'tax_registration_url', 'legal_notarization_url',
+          'validity_type', 'expire_at', 'reject_reason', 'admin_remark',
+        ].forEach((k) => { delete payload[k]; });
         // 保存模型折扣：仅保留已设置折扣值的模型
         const validDiscounts: Record<string, number> = {};
         for (const mid of discountMids) {
@@ -395,16 +461,13 @@ const Users: React.FC = () => {
       const resp = await (request.post(`/users/${record.id}/impersonate`) as unknown as Promise<{ token: string; user: User }>);
       const { token, user } = resp;
       
-      let baseUrl = window.location.origin;
-      // 严谨判断：如果处于本地开发环境，并且不是在5173端口，强制向5173发起用户端请求
-      if (baseUrl.includes('localhost') && !baseUrl.includes('5173')) {
-        baseUrl = 'http://localhost:5173';
-      }
+      // 管理端与用户端同属一个 Vite SPA；本地 5173=商业版、5174=开源版，直接用当前 origin
+      const baseUrl = window.location.origin;
       
       message.success(`正在打开用户端: ${user.username}`);
       
       // 用 localStorage 一次性交接，避免 JWT 出现在 URL
-      const handoffKey = `imp_handoff_${crypto.randomUUID()}`;
+      const handoffKey = `imp_handoff_${generateUUID()}`;
       localStorage.setItem(handoffKey, token);
       window.open(`${baseUrl}/login?impersonate=1&handoff=${encodeURIComponent(handoffKey)}`, '_blank', 'noopener,noreferrer');
     } catch (e) {
@@ -1247,6 +1310,41 @@ const Users: React.FC = () => {
                             </div>
                           </Col>
                         </Row>
+                      </div>
+                    )
+                  }] : []),
+                  // ── 用户实名 Tab（仅编辑普通用户） ──
+                  ...((editingUser && !isAdminPage) ? [{
+                    key: '6',
+                    label: (
+                      <span>
+                        用户实名
+                        {userKyc?.status && userKyc.status !== 'none' ? (
+                          <Tag
+                            color={KYC_STATUS_META[(userKyc.status as UserKycStatus)]?.color || 'default'}
+                            style={{ marginLeft: 8 }}
+                          >
+                            {KYC_STATUS_META[(userKyc.status as UserKycStatus)]?.label || userKyc.status}
+                          </Tag>
+                        ) : null}
+                      </span>
+                    ),
+                    children: kycLoading ? (
+                      <div style={{ textAlign: 'center', padding: 40 }}><Spin /></div>
+                    ) : (
+                      <div style={{ marginTop: 8 }}>
+                        <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 16, fontSize: 13 }}>
+                          录入或审核该用户的个人/企业实名信息。证件图片需先配置对象存储（站点设置 → 存储）。
+                        </Typography.Text>
+                        <UserKycFormFields
+                          form={form}
+                          mode="admin"
+                          targetUserId={editingUser.id}
+                          currentStatus={(userKyc?.status as UserKycStatus) || 'none'}
+                        />
+                        <Button type="primary" loading={kycSaving} onClick={handleSaveKyc} style={{ marginTop: 8 }}>
+                          保存实名信息
+                        </Button>
                       </div>
                     )
                   }] : [])

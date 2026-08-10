@@ -13,6 +13,7 @@ import { useCallback, useRef, useEffect } from 'react';
 import toast from '../components/PlaygroundToast';
 import axios from 'axios';
 import requestUtil from '../../../../utils/request';
+import generateUUID from '../../../../utils/uuid';
 import type { CanvasNode } from '../types';
 import { useCanvas } from '../context/PlaygroundContext';
 import { usePlayground } from '../context/PlaygroundContext';
@@ -411,8 +412,9 @@ export const useGlobalTaskPolling = () => {
   const pollTaskStatus = useCallback((nodeId: string, taskId: string, modelId: string, nodeType: string, pollEndpointTemplate?: string, tokenKey?: string) => {
     let attempts = 0;
     let consecutiveErrors = 0; // 连续异常计数
-    // 根据节点类型区分轮询上限：视频模型生成时间较长，允许最多 60 分钟；图片/其他 15 分钟
-    const maxAttempts = nodeType === 'video' ? 720 : 180; // 视频: 720×5s=60min, 图片: 180×5s=15min
+    const pollIntervalMs = 3000;
+    // 按间隔换算软超时墙钟：视频约 60min，图片/其他约 15min
+    const maxAttempts = nodeType === 'video' ? 1200 : 300;
 
     const buildPollUrl = () => {
       if (pollEndpointTemplate && !pollEndpointTemplate.includes('{task_id}')) return pollEndpointTemplate;
@@ -550,7 +552,7 @@ export const useGlobalTaskPolling = () => {
           activePollingRef.current.delete(nodeId);
           return;
         }
-        schedulePoll(poll, 5000);
+        schedulePoll(poll, pollIntervalMs);
       } catch (e: any) {
         // 请求被取消或页面卸载 → 忽略，不计入错误
         if (isUnloadingRef.current || isRequestAborted(e)) return;
@@ -635,13 +637,15 @@ export const useGlobalTaskPolling = () => {
           return;
         }
 
-        // 网络异常采用指数退避（5s→10s→15s...上限30s），减少无效请求
-        const retryDelay = isNetErr ? Math.min(5000 + consecutiveErrors * 5000, 30000) : 5000;
+        // 网络异常指数退避（3s 起，上限 30s），减少无效请求
+        const retryDelay = isNetErr
+          ? Math.min(pollIntervalMs + consecutiveErrors * pollIntervalMs, 30000)
+          : pollIntervalMs;
         schedulePoll(poll, retryDelay);
       }
     };
 
-    // 对新建的或刚刚捕获的节点，立即执行第一次轮询检查，之后再以 5s 周期进行
+    // 新建/刚捕获节点：立即首查，之后按 pollIntervalMs 周期
     schedulePoll(poll, 100);
   }, [setNodes, setTaskPollingNodes, persistAsset]);
 
@@ -940,7 +944,7 @@ export const useGeneration = () => {
     }, 1500);
 
     const newNodeId = Date.now().toString() + Math.random().toString(36).substring(2, 6);
-    const sysLogId = 'tsk_' + crypto.randomUUID().replace(/-/g, '').toLowerCase().substring(0, 26);
+    const sysLogId = 'tsk_' + generateUUID().replace(/-/g, '').toLowerCase().substring(0, 26);
     const centerX = -canvasTransform.x / canvasTransform.scale + window.innerWidth / 2 - 250;
     const centerY = -canvasTransform.y / canvasTransform.scale + window.innerHeight / 2 - 200;
 

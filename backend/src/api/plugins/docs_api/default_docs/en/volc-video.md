@@ -73,4 +73,4 @@ curl -X GET https://{{domain}}/v1/video/generations/vtask-volc-882ab381cd84e0 \
 | `prompt` | `string` | Yes | - | Motion and scene description prompt. |
 | `duration` | `integer` | No | `5` | Video length in seconds (e.g. `5` or `10`). |
 | `watermark` | `boolean` | No | `false` | Whether to append the official model watermark. |
-| `web_search` | `boolean` | No | `false` | Enable web search. Use this OpenAI-style boolean; — the gateway converts it for Volcengine. |
+| `web_search` | `boolean` | No | `false` | Enable web search. |

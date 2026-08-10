@@ -10,7 +10,7 @@
 //! 请求体直接透传，仅替换 model 字段；响应直接返回上游 JSON。
 //! 遵循与 audio.rs 一致的 7 步流水线模式。
 
-use super::{forward, proxy, router, usage_extractor};
+use super::{forward, proxy, router, upstream_headers, usage_extractor};
 use crate::models::ApiToken;
 use crate::{
     error::{AppError, AppResult},
@@ -161,53 +161,51 @@ pub async fn generic_relay(
         );
 
         if ha.pending_log_id.is_none() {
-            ha.pending_log_id = proxy::record_pending_log(proxy::PendingLog {
-                state: &state,
-                user_id: &token.user_id,
-                token_id: token.id,
-                model: model,
-                endpoint: &ep,
-                is_stream: 0,
-                request_content: Some(&request_content_str),
-                upstream_url: Some(&url),
-                channel: &channel,
-                billing_model_hint: None,
-                plugin_tag: None,
-                category: Some(resolved_cat.as_str()),
-                db_model: db_model.as_ref(),
-                forward_eid: Some(&resolved.eid),
-                requested_log_id: None,
-            })
-            .await;
+            ha.set_pending(
+                proxy::record_pending_log(proxy::PendingLog {
+                    state: &state,
+                    user_id: &token.user_id,
+                    token_id: token.id,
+                    model: model,
+                    endpoint: &ep,
+                    is_stream: 0,
+                    request_content: Some(&request_content_str),
+                    upstream_url: Some(&url),
+                    channel: &channel,
+                    billing_model_hint: None,
+                    plugin_tag: None,
+                    category: Some(resolved_cat.as_str()),
+                    db_model: db_model.as_ref(),
+                    forward_eid: Some(&resolved.eid),
+                    requested_log_id: None,
+                })
+                .await,
+            );
         }
 
-        // ── 7. 上游请求 → 响应处理 → 计费结算 ──
-        // 【连接保护】将上游请求+预扣费+日志记录放入独立 task，客户端断开后仍能完成
-        let model = model.to_string();
+        // 【连接保护】上游请求+预扣+落库放独立 task，客户端断开后仍能完成
         let pending_log_id = ha.pending_log_id;
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Result<Response, AppError>>();
-        let state_c = state.clone();
-        let token_c = token.clone();
-        let channel_c = channel.clone();
-        let model_c = model.clone();
-        let request_content_str_c = request_content_str.clone();
-        let ctx_c = ctx.clone();
-        let url_c = url.clone();
+        let timeout_ctx = ha.timeout_ctx();
+        let fail_buf = ha.buf();
 
-        tokio::spawn(async move {
-            let state = state_c;
-            let token = token_c;
-            let channel = channel_c;
-            let model = model_c;
-            let request_content_str = request_content_str_c;
-            let url = url_c;
-            let result: Result<Response, AppError> = async {
+        let result_rx = super::spawn_protected({
+            let state = state.clone();
+            let token = token.clone();
+            let channel = channel.clone();
+            let model = model.to_string();
+            let request_content_str = request_content_str.clone();
+            let ctx = ctx.clone();
+            let url = url.clone();
+            let ep = ep.clone();
+            let db_model = db_model.clone();
+            let resolved_cat = resolved_cat.clone();
+            async move {
                 // 构建并发送上游请求（统一鉴权 + 设置请求体）；预扣在业务成功后再执行（对齐 chat）
                 let builder = state
                     .http_client
                     .post(&url)
                     .header("Content-Type", "application/json");
-                let builder = crate::services::http_client::with_upstream_timeout(
+                let builder = crate::services::http_client::with_timeout(
                     forward::apply_request_auth(
                         builder,
                         &resolved,
@@ -215,72 +213,44 @@ pub async fn generic_relay(
                         &mut upstream_body,
                         &channel.base_url,
                     ),
+                    timeout_ctx.resolve(),
                 );
                 let resp = match builder.send().await {
                     Ok(resp) => resp,
                     Err(e) => {
                         let err_msg = e.to_string();
                         let latency_ms = start_time.elapsed().as_millis() as u32;
-                        return Err(proxy::record_zero_cost_upstream_fail(
-                            proxy::ZeroCostUpstreamFail {
-                                state: &state,
-                                token: &token,
-                                channel: &channel,
-                                model: &model,
-                                prefer_http_status: Some(502),
-                                endpoint: &ep,
-                                latency_ms,
-                                is_stream: 0,
-                                request_content: request_content_str.clone(),
-                                response_body: err_msg.clone(),
-                                response_content: Some(err_msg),
-                                upstream_req_content: Some(upstream_body.to_string()),
-                                billing_detail: None,
-                                hint_category: Some(category),
-                                pending_log_id,
-                                billing_model_hint: None,
-                                db_model: db_model.as_ref(),
-                                client_msg: None,
-                                pre_deducted: 0.0,
-                                pre_deduct_gift: 0.0,
-                            },
-                        )
-                        .await);
+                        let bill = crate::relay::ha::FailBill::transport(
+                            latency_ms,
+                            err_msg,
+                            &request_content_str,
+                            upstream_body.to_string(),
+                        );
+                        return Err(crate::relay::ha::HaAttempt::park(&fail_buf, bill, None));
                     }
                 };
 
                 let status = resp.status().as_u16();
                 if !resp.status().is_success() {
+                    let upstream_hdrs = resp.headers().clone();
                     let err = resp.text().await.unwrap_or_default();
                     let latency_ms = start_time.elapsed().as_millis() as u32;
-                    return Err(proxy::record_zero_cost_upstream_fail(
-                        proxy::ZeroCostUpstreamFail {
-                            state: &state,
-                            token: &token,
-                            channel: &channel,
-                            model: &model,
-                            prefer_http_status: Some(status),
-                            endpoint: &ep,
-                            latency_ms,
-                            is_stream: 0,
-                            request_content: request_content_str.clone(),
-                            response_body: err.clone(),
-                            response_content: Some(err),
-                            upstream_req_content: Some(upstream_body.to_string()),
-                            billing_detail: None,
-                            hint_category: Some(resolved_cat.as_str()),
-                            pending_log_id,
-                            billing_model_hint: None,
-                            db_model: db_model.as_ref(),
-                            client_msg: None,
-                            pre_deducted: 0.0,
-                            pre_deduct_gift: 0.0,
-                        },
-                    )
-                    .await);
+                    let bill = crate::relay::ha::FailBill::http(
+                        latency_ms,
+                        status,
+                        err,
+                        &request_content_str,
+                        upstream_body.to_string(),
+                    );
+                    return Err(crate::relay::ha::HaAttempt::park(
+                        &fail_buf,
+                        bill,
+                        Some(upstream_hdrs),
+                    ));
                 }
 
                 // 读取响应体文本
+                let upstream_hdrs = resp.headers().clone();
                 let mut resp_text = resp.text().await.unwrap_or_default();
 
                 // 上游 body 级错误检测（HTTP 200 但业务失败，在预扣费之前拦截）
@@ -293,31 +263,18 @@ pub async fn generic_relay(
                 resp_text = converted;
                 if let Some(err_response) = post_err {
                     let latency_ms = start_time.elapsed().as_millis() as u32;
-                    return Err(proxy::record_zero_cost_upstream_fail(
-                        proxy::ZeroCostUpstreamFail {
-                            state: &state,
-                            token: &token,
-                            channel: &channel,
-                            model: &model,
-                            prefer_http_status: None,
-                            endpoint: &ep,
-                            latency_ms,
-                            is_stream: 0,
-                            request_content: request_content_str.clone(),
-                            response_body: resp_text.clone(),
-                            response_content: Some(resp_text.clone()),
-                            upstream_req_content: Some(upstream_body.to_string()),
-                            billing_detail: None,
-                            hint_category: Some(resolved_cat.as_str()),
-                            pending_log_id,
-                            billing_model_hint: None,
-                            db_model: db_model.as_ref(),
-                            client_msg: Some(&err_response),
-                            pre_deducted: 0.0,
-                            pre_deduct_gift: 0.0,
-                        },
-                    )
-                    .await);
+                    let bill = crate::relay::ha::FailBill::biz(
+                        latency_ms,
+                        resp_text,
+                        err_response,
+                        request_content_str,
+                        upstream_body.to_string(),
+                    );
+                    return Err(crate::relay::ha::HaAttempt::park(
+                        &fail_buf,
+                        bill,
+                        Some(upstream_hdrs),
+                    ));
                 }
 
                 let pre_deduct_gift = proxy::pre_deduct_or_intercept(
@@ -340,7 +297,7 @@ pub async fn generic_relay(
 
                 // 提取 usage tokens
                 let mut usage = usage_extractor::parse_usage(&resp_text);
-                // 关键修正：部分 rerank 模型（如阿里 qwen3-vl-rerank）返回的 total_tokens 大于 input_tokens，
+                // 差额修正：部分 rerank 模型（如阿里 qwen3-vl-rerank）返回的 total_tokens 大于 input_tokens，
                 // 或部分模型仅返回 total_tokens。为确保以 total_tokens 作为总消耗准确计费，
                 // 当 total 大于 prompt、completion 与 image_tokens 之和时，将差额统一补入 prompt 用量中。
                 if usage.total > 0
@@ -358,7 +315,7 @@ pub async fn generic_relay(
                     db_model.as_ref(),
                     db_rule.as_mut(),
                     &channel,
-                    &ctx_c,
+                    &ctx,
                     &usage,
                     &features,
                     mapping_source,
@@ -392,27 +349,35 @@ pub async fn generic_relay(
                     billing_model_hint: None,
                     plugin_tag: None,
                     db_model: db_model.as_ref(),
+                    time_multiplier: db_rule.as_ref().map(|r| r.applied_multiplier),
                 })
                 .await;
 
-                // 直接透传上游 JSON 响应
-                let resp_body = Response::builder()
-                    .header("Content-Type", "application/json")
-                    .body(axum::body::Body::from(resp_text))
-                    .unwrap();
-
-                Ok(resp_body)
+                // 直接透传上游 JSON 响应（含诊断响应头）
+                Ok(upstream_headers::json_with_upstream_headers(
+                    &upstream_hdrs,
+                    resp_text,
+                ))
             }
-            .await;
-            let _ = result_tx.send(result);
         });
 
         match result_rx.await {
             Ok(result) => match result {
-                Ok(resp) => return Ok(resp),
+                Ok(resp) => {
+                    let ms = start_time.elapsed().as_millis() as u32;
+                    ha.ok(&state, &channel, &url, ms).await;
+                    return Ok(resp);
+                }
                 Err(e) => {
                     if ha
-                        .on_spawn_result_err(&state, &channel, e, Some(&url))
+                        .fail(
+                            &crate::relay::ha::HaBillCtx::new(&state, &token, model, &ep)
+                                .category(resolved_cat.as_str())
+                                .db(db_model.as_ref()),
+                            &channel,
+                            e,
+                            Some(&url),
+                        )
                         .await
                     {
                         ha.bump();
@@ -428,5 +393,10 @@ pub async fn generic_relay(
         }
     } // end while
 
-    Err(ha.finish())
+    Err(ha
+        .finish(
+            &crate::relay::ha::HaBillCtx::new(&state, &token, model, &entry_path)
+                .category(category),
+        )
+        .await)
 }

@@ -36,7 +36,7 @@ curl -X POST https://{{domain}}/v1/chat/completions \
 * **Phương thức Yêu cầu**: `POST`
 
 > [!NOTE]
-> Nếu bạn muốn bỏ qua bước tự động kiểm tra tham số và chuyển dịch giao thức của Gateway to gửi trực tiếp Request Payload đầy đủ, gốc chính thức của nhà cung cấp đến mô hình OpenAI hoặc Volcengine ở tầng dưới, bạn có thể sử dụng giao diện `/v1/responses`. Gateway sẽ truyền trực tiếp thân yêu cầu (request body) đến kênh thượng nguồn (upstream) mà không làm mất dữ liệu, trong khi vẫn đảm bảo các chức năng cốt lõi của nền tảng như tính phí toàn cục, giới hạn hạn ngạch và kiểm toán nhật ký sử dụng.
+> Dùng `/v1/responses` khi client đã dùng định dạng Responses. Vẫn áp dụng tính phí, hạn ngạch và nhật ký.
 
 #### Ví dụ yêu cầu
 ```json

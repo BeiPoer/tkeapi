@@ -57,7 +57,7 @@ curl -X POST https://{{domain}}/v1/chat/completions \
 
 ## 3. 多模态：音频 + 文本
 
-两种常见写法（按上游模型支持选择）：
+两种常见写法（按模型能力选择）：
 
 **A. OpenAI 风格 `input_audio`（base64）**
 

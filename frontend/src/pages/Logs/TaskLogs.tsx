@@ -90,15 +90,25 @@ const getAsyncFinalStatus = (r: TaskLog): 'pending' | 'succeeded' | 'failed' => 
         || v.final_result?.status || v.output?.status || v.output?.task_status;
       if (status === 'succeeded' || status === 'succeed' || status === 'SUCCESS' || status === 'completed') return 'succeeded';
       if (status === 'failed' || status === 'FAILED') return 'failed';
+      // 上游仍在跑：勿被下方「有计费明细且未冻结 → 成功」误判（如渠道测试轮询中）
+      const s = String(status || '').toLowerCase();
+      if (
+        s === 'pending' || s === 'running' || s === 'processing' || s === 'queued'
+        || s === 'submitted' || s === 'in_progress' || s === 'in-progress'
+      ) {
+        return 'pending';
+      }
     } catch { /* ignore */ }
   }
 
   // 2. 列表标记优先；billing_detail 仅兼容旧缓存/展开合并
   if (r.billing_failed) return 'failed';
-  if (r.billing_present && !r.billing_frozen) return 'succeeded';
+  if (r.billing_frozen) return 'pending';
+  if (r.billing_present) return 'succeeded';
   if (r.billing_detail) {
     if (r.billing_detail.includes('失败')) return 'failed';
-    if (!r.billing_detail.includes('冻结')) return 'succeeded';
+    if (r.billing_detail.includes('冻结')) return 'pending';
+    return 'succeeded';
   }
 
   return 'pending';
@@ -874,7 +884,7 @@ const TaskLogs: React.FC = () => {
           rowKey="id"
           compact={true}
           gap={4}
-          pagination={{ current: page, pageSize, total, onChange: (p: number, s: number) => fetchLogs(p, s) }}
+          pagination={{ current: page, pageSize, total, onChange: (p: number, s: number) => fetchLogs(p, s), showQuickJumper: true }}
           renderCard={renderMobileCard}
         />
       ) : (
@@ -893,6 +903,7 @@ const TaskLogs: React.FC = () => {
             pageSize,
             total,
             showSizeChanger: true,
+            showQuickJumper: true,
             showTotal: (totalCount) => t('task_logs.total_records', '共 {{total}} 条', { total: totalCount }),
           }}
           onChange={(pagination, filters) => {

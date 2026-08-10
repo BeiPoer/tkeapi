@@ -893,6 +893,50 @@ body[data-theme='light'] .ant-switch.ant-switch-checked .ant-switch-handle::befo
   }
 }
 
+/* 绑定提醒弹窗：与右上角头像 Popover 同系毛玻璃 */
+.custom-premium-bind-modal-shell .ant-modal-container,
+.custom-premium-bind-modal .ant-modal-container,
+.custom-premium-bind-modal .ant-modal-content {
+  padding: 0 !important;
+  border-radius: 20px !important;
+  background: rgba(255, 255, 255, 0.28) !important;
+  -webkit-backdrop-filter: blur(28px) saturate(200%) !important;
+  backdrop-filter: blur(28px) saturate(200%) !important;
+  border: 1px solid rgba(0, 0, 0, 0.08) !important;
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.55),
+    0 24px 48px rgba(0, 0, 0, 0.12) !important;
+  overflow: hidden !important;
+}
+
+[data-theme='dark'] .custom-premium-bind-modal-shell .ant-modal-container,
+[data-theme='dark'] .custom-premium-bind-modal .ant-modal-container,
+[data-theme='dark'] .custom-premium-bind-modal .ant-modal-content {
+  background: rgba(30, 30, 32, 0.28) !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.08),
+    0 24px 48px rgba(0, 0, 0, 0.55) !important;
+}
+
+.custom-premium-bind-modal .ant-modal-body {
+  padding: 0 !important;
+  background: transparent !important;
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .custom-premium-bind-modal-shell .ant-modal-container,
+  .custom-premium-bind-modal .ant-modal-container,
+  .custom-premium-bind-modal .ant-modal-content {
+    background: rgba(255, 255, 255, 0.88) !important;
+  }
+  [data-theme='dark'] .custom-premium-bind-modal-shell .ant-modal-container,
+  [data-theme='dark'] .custom-premium-bind-modal .ant-modal-container,
+  [data-theme='dark'] .custom-premium-bind-modal .ant-modal-content {
+    background: rgba(30, 30, 32, 0.88) !important;
+  }
+}
+
 /*
  * 全站提示已统一走 GlobalToast（页面正中黑白灰风格）。
  * 隐藏 antd 原生 message，避免偶发双弹或旧白底样式漏出。

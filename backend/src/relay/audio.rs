@@ -9,7 +9,7 @@
 //! 语音合成（TTS）端点，支持 OpenAI 兼容格式和火山 TTS V3 SSE 协议。
 //! 遵循与 video.rs 一致的 7 步流水线模式。
 
-use super::{forward, proxy, router};
+use super::{forward, proxy, router, upstream_headers};
 use crate::models::ApiToken;
 use crate::{
     error::{AppError, AppResult},
@@ -237,50 +237,47 @@ pub async fn audio_speech(
         );
 
         if ha.pending_log_id.is_none() {
-            ha.pending_log_id = proxy::record_pending_log(proxy::PendingLog {
-                state: &state,
-                user_id: &token.user_id,
-                token_id: token.id,
-                model: model,
-                endpoint: &ep,
-                is_stream: 0,
-                request_content: Some(&request_content_str),
-                upstream_url: Some(&url),
-                channel: &channel,
-                billing_model_hint: None,
-                plugin_tag: None,
-                category: Some(resolved_cat.as_str()),
-                db_model: db_model.as_ref(),
-                forward_eid: Some(&resolved.eid),
-                requested_log_id: None,
-            })
-            .await;
+            ha.set_pending(
+                proxy::record_pending_log(proxy::PendingLog {
+                    state: &state,
+                    user_id: &token.user_id,
+                    token_id: token.id,
+                    model: model,
+                    endpoint: &ep,
+                    is_stream: 0,
+                    request_content: Some(&request_content_str),
+                    upstream_url: Some(&url),
+                    channel: &channel,
+                    billing_model_hint: None,
+                    plugin_tag: None,
+                    category: Some(resolved_cat.as_str()),
+                    db_model: db_model.as_ref(),
+                    forward_eid: Some(&resolved.eid),
+                    requested_log_id: None,
+                })
+                .await,
+            );
         }
 
-        // ── 7. 上游请求 → 响应处理 → 计费结算 ──
-        // 【连接保护】将上游请求+预扣费+日志记录放入独立 task，客户端断开后仍能完成
-        let model = model.to_string();
+        // 【连接保护】上游请求+预扣+落库放独立 task，客户端断开后仍能完成
         let is_sse = raw_path.ends_with("/sse");
         let pending_log_id = ha.pending_log_id;
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Result<Response, AppError>>();
-        let state_c = state.clone();
-        let token_c = token.clone();
-        let channel_c = channel.clone();
-        let model_c = model.clone();
-        let request_content_str_c = request_content_str.clone();
-        let response_format_c = response_format.clone();
-        let ctx_c = ctx.clone();
-        let url_c = url.clone();
+        let timeout_ctx = ha.timeout_ctx();
+        let fail_buf = ha.buf();
 
-        tokio::spawn(async move {
-            let state = state_c;
-            let token = token_c;
-            let channel = channel_c;
-            let model = model_c;
-            let request_content_str = request_content_str_c;
-            let response_format = response_format_c;
-            let url = url_c;
-            let result: Result<Response, AppError> = async {
+        let result_rx = super::spawn_protected({
+            let state = state.clone();
+            let token = token.clone();
+            let channel = channel.clone();
+            let model = model.to_string();
+            let request_content_str = request_content_str.clone();
+            let response_format = response_format.clone();
+            let ctx = ctx.clone();
+            let url = url.clone();
+            let ep = ep.clone();
+            let db_model = db_model.clone();
+            let resolved_cat = resolved_cat.clone();
+            async move {
                 // 先打上游；业务成功后再预扣（对齐 chat，缩短失败路径冻账窗口）
                 let builder = state
                     .http_client
@@ -300,217 +297,180 @@ pub async fn audio_speech(
                         .header("X-Api-Request-Id", ulid::Ulid::new().to_string())
                         .header("X-Control-Require-Usage-Tokens-Return", "*");
                 }
-                let builder = crate::services::http_client::with_upstream_timeout(builder);
+                let builder =
+                    crate::services::http_client::with_timeout(builder, timeout_ctx.resolve());
                 let resp = match builder.send().await {
                     Ok(resp) => resp,
                     Err(e) => {
                         let err_msg = e.to_string();
                         let latency_ms = start_time.elapsed().as_millis() as u32;
-                        return Err(proxy::record_zero_cost_upstream_fail(
-                            proxy::ZeroCostUpstreamFail {
-                                state: &state,
-                                token: &token,
-                                channel: &channel,
-                                model: &model,
-                                prefer_http_status: Some(502),
-                                endpoint: &ep,
-                                latency_ms,
-                                is_stream: 0,
-                                request_content: request_content_str.clone(),
-                                response_body: err_msg.clone(),
-                                response_content: Some(err_msg),
-                                upstream_req_content: Some(upstream_body.to_string()),
-                                billing_detail: None,
-                                hint_category: Some(resolved_cat.as_str()),
-                                pending_log_id,
-                                billing_model_hint: None,
-                                db_model: db_model.as_ref(),
-                                client_msg: None,
-                                pre_deducted: 0.0,
-                                pre_deduct_gift: 0.0,
-                            },
-                        )
-                        .await);
+                        let bill = crate::relay::ha::FailBill::transport(
+                            latency_ms,
+                            err_msg,
+                            &request_content_str,
+                            upstream_body.to_string(),
+                        );
+                        return Err(crate::relay::ha::HaAttempt::park(&fail_buf, bill, None));
                     }
                 };
 
                 let status = resp.status().as_u16();
                 if !resp.status().is_success() {
+                    let upstream_hdrs = resp.headers().clone();
                     let err = resp.text().await.unwrap_or_default();
                     let latency_ms = start_time.elapsed().as_millis() as u32;
-                    return Err(proxy::record_zero_cost_upstream_fail(
-                        proxy::ZeroCostUpstreamFail {
-                            state: &state,
-                            token: &token,
-                            channel: &channel,
-                            model: &model,
-                            prefer_http_status: Some(status),
-                            endpoint: &ep,
-                            latency_ms,
-                            is_stream: 0,
-                            request_content: request_content_str.clone(),
-                            response_body: err.clone(),
-                            response_content: Some(err),
-                            upstream_req_content: Some(upstream_body.to_string()),
-                            billing_detail: None,
-                            hint_category: Some(resolved_cat.as_str()),
-                            pending_log_id,
-                            billing_model_hint: None,
-                            db_model: db_model.as_ref(),
-                            client_msg: None,
-                            pre_deducted: 0.0,
-                            pre_deduct_gift: 0.0,
-                        },
-                    )
-                    .await);
+                    let bill = crate::relay::ha::FailBill::http(
+                        latency_ms,
+                        status,
+                        err,
+                        &request_content_str,
+                        upstream_body.to_string(),
+                    );
+                    return Err(crate::relay::ha::HaAttempt::park(
+                        &fail_buf,
+                        bill,
+                        Some(upstream_hdrs),
+                    ));
                 }
 
                 // 根据 target_type 和路由类型分发响应处理
-                let (resp_body, text_characters, resp_summary) =
-                    if resolved.target_type == "volcengine_tts" {
-                        // 在所有权被 raw_response 消耗前提取 Content-Type
-                        let default_ct = if is_sse {
-                            "text/event-stream"
-                        } else {
-                            audio_content_type(&response_format)
-                        };
-                        let upstream_ct = resp
-                            .headers()
-                            .get("content-type")
-                            .and_then(|v| v.to_str().ok())
-                            .unwrap_or(default_ct)
-                            .to_string();
-
-                        let raw_response = resp.text().await.unwrap_or_default();
-
-                        // 检查并记录火山 TTS 的业务错误（原生路由退费并透传 200，兼容路由退费并返回推断状态码）
-                        if let Some(err_json) = detect_volcengine_tts_error(&raw_response) {
-                            let latency_ms = start_time.elapsed().as_millis() as u32;
-                            if is_native_route {
-                                let _ = record_volcengine_tts_error(
-                                    &state,
-                                    &token,
-                                    &channel,
-                                    &model,
-                                    0.0,
-                                    0.0,
-                                    &ep,
-                                    &err_json,
-                                    latency_ms,
-                                    &request_content_str,
-                                    &raw_response,
-                                    &upstream_body.to_string(),
-                                    pending_log_id,
-                                    db_model.as_ref(),
-                                )
-                                .await;
-
-                                let body = Response::builder()
-                                    .header("Content-Type", &upstream_ct)
-                                    .body(axum::body::Body::from(raw_response))
-                                    .unwrap();
-                                return Ok(body);
-                            } else {
-                                let display_err = if let Ok(event) =
-                                    serde_json::from_str::<VolcTtsEvent>(&err_json)
-                                {
-                                    format!(
-                                        "火山 TTS 错误: code={}, message={}",
-                                        event.code, event.message
-                                    )
-                                } else {
-                                    err_json.clone()
-                                };
-                                let fail_status = record_volcengine_tts_error(
-                                    &state,
-                                    &token,
-                                    &channel,
-                                    &model,
-                                    0.0,
-                                    0.0,
-                                    &ep,
-                                    &display_err,
-                                    latency_ms,
-                                    &request_content_str,
-                                    &raw_response,
-                                    &upstream_body.to_string(),
-                                    pending_log_id,
-                                    db_model.as_ref(),
-                                )
-                                .await;
-                                return Err(proxy::upstream_fail(fail_status, &display_err));
-                            }
-                        }
-
-                        if is_native_route {
-                            // 官方原生路由：透传上游 SSE/Chunked 响应原文，同时提取 usage.text_words 用于计费
-                            let chars = extract_volcengine_tts_usage(&raw_response)
-                                .unwrap_or(request_text_chars);
-                            let mode_str = if is_sse { "SSE" } else { "Chunked" };
-                            let summary = format!(
-                                "{} 透传 {} bytes, {}字符",
-                                mode_str,
-                                raw_response.len(),
-                                chars
-                            );
-                            let body = Response::builder()
-                                .header("Content-Type", &upstream_ct)
-                                .body(axum::body::Body::from(raw_response.clone()))
-                                .unwrap();
-                            (body, chars, summary)
-                        } else {
-                            // OpenAI 兼容路由：解析 SSE 事件流 → Base64 解码 → 返回二进制音频流
-                            match consume_volcengine_tts_sse(&raw_response, request_text_chars) {
-                                Ok((bytes, chars)) => {
-                                    let summary =
-                                        format!("音频数据 {} bytes, {}字符", bytes.len(), chars);
-                                    let content_type = audio_content_type(&response_format);
-                                    let body = Response::builder()
-                                        .header("Content-Type", content_type)
-                                        .body(axum::body::Body::from(bytes))
-                                        .unwrap();
-                                    (body, chars, summary)
-                                }
-                                Err(err_msg) => {
-                                    // SSE 事件级错误（HTTP 200 但业务失败，如 Invalid X-Api-Key）
-                                    let latency_ms = start_time.elapsed().as_millis() as u32;
-                                    let fail_status = record_volcengine_tts_error(
-                                        &state,
-                                        &token,
-                                        &channel,
-                                        &model,
-                                        0.0,
-                                        0.0,
-                                        &ep,
-                                        &err_msg,
-                                        latency_ms,
-                                        &request_content_str,
-                                        &raw_response,
-                                        &upstream_body.to_string(),
-                                        pending_log_id,
-                                        db_model.as_ref(),
-                                    )
-                                    .await;
-                                    return Err(proxy::upstream_fail(fail_status, &err_msg));
-                                }
-                            }
-                        }
+                let (resp_body, text_characters, resp_summary) = if resolved.target_type
+                    == "volcengine_tts"
+                {
+                    // 在所有权被 raw_response 消耗前提取响应头
+                    let upstream_hdrs = resp.headers().clone();
+                    let default_ct = if is_sse {
+                        "text/event-stream"
                     } else {
-                        // 其他 target_type（如 openai）：直接透传上游二进制音频流
-                        let upstream_ct = resp
-                            .headers()
-                            .get("content-type")
-                            .and_then(|v| v.to_str().ok())
-                            .unwrap_or(audio_content_type(&response_format))
-                            .to_string();
-                        let bytes = resp.bytes().await.unwrap_or_default();
-                        let summary = format!("音频数据 {} bytes", bytes.len());
-                        let body = Response::builder()
-                            .header("Content-Type", upstream_ct)
-                            .body(axum::body::Body::from(bytes))
-                            .unwrap();
-                        (body, request_text_chars, summary)
+                        audio_content_type(&response_format)
                     };
+                    let upstream_ct = upstream_headers::header_str(&upstream_hdrs, "content-type")
+                        .unwrap_or(default_ct)
+                        .to_string();
+
+                    let raw_response = resp.text().await.unwrap_or_default();
+
+                    // 检查并记录火山 TTS 的业务错误（原生路由退费并透传 200，兼容路由退费并返回推断状态码）
+                    if let Some(err_json) = detect_volcengine_tts_error(&raw_response) {
+                        let latency_ms = start_time.elapsed().as_millis() as u32;
+                        if is_native_route {
+                            let _ = record_volcengine_tts_error(
+                                &state,
+                                &token,
+                                &channel,
+                                &model,
+                                0.0,
+                                0.0,
+                                &ep,
+                                &err_json,
+                                latency_ms,
+                                &request_content_str,
+                                &raw_response,
+                                &upstream_body.to_string(),
+                                pending_log_id,
+                                db_model.as_ref(),
+                            )
+                            .await;
+
+                            let body = upstream_headers::with_content_type(
+                                &upstream_hdrs,
+                                &upstream_ct,
+                                raw_response,
+                            );
+                            return Ok(body);
+                        } else {
+                            let display_err = if let Ok(event) =
+                                serde_json::from_str::<VolcTtsEvent>(&err_json)
+                            {
+                                format!(
+                                    "火山 TTS 错误: code={}, message={}",
+                                    event.code, event.message
+                                )
+                            } else {
+                                err_json.clone()
+                            };
+                            let status_code = proxy::infer_error_status_code_from_str(&display_err);
+                            let bill = crate::relay::ha::FailBill::http(
+                                latency_ms,
+                                status_code,
+                                display_err.clone(),
+                                &request_content_str,
+                                upstream_body.to_string(),
+                            )
+                            .content(Some(raw_response))
+                            .client(display_err);
+                            return Err(crate::relay::ha::HaAttempt::park(
+                                &fail_buf,
+                                bill,
+                                Some(upstream_hdrs),
+                            ));
+                        }
+                    }
+
+                    if is_native_route {
+                        // 官方原生路由：透传上游 SSE/Chunked 响应原文，同时提取 usage.text_words 用于计费
+                        let chars = extract_volcengine_tts_usage(&raw_response)
+                            .unwrap_or(request_text_chars);
+                        let mode_str = if is_sse { "SSE" } else { "Chunked" };
+                        let summary = format!(
+                            "{} 透传 {} bytes, {}字符",
+                            mode_str,
+                            raw_response.len(),
+                            chars
+                        );
+                        let body = upstream_headers::with_content_type(
+                            &upstream_hdrs,
+                            &upstream_ct,
+                            raw_response.clone(),
+                        );
+                        (body, chars, summary)
+                    } else {
+                        // OpenAI 兼容路由：解析 SSE 事件流 → Base64 解码 → 返回二进制音频流
+                        match consume_volcengine_tts_sse(&raw_response, request_text_chars) {
+                            Ok((bytes, chars)) => {
+                                let summary =
+                                    format!("音频数据 {} bytes, {}字符", bytes.len(), chars);
+                                let content_type = audio_content_type(&response_format);
+                                let body = upstream_headers::with_content_type(
+                                    &upstream_hdrs,
+                                    content_type,
+                                    bytes,
+                                );
+                                (body, chars, summary)
+                            }
+                            Err(err_msg) => {
+                                // SSE 事件级错误（HTTP 200 但业务失败，如 Invalid X-Api-Key）
+                                let latency_ms = start_time.elapsed().as_millis() as u32;
+                                let status_code = proxy::infer_error_status_code_from_str(&err_msg);
+                                let bill = crate::relay::ha::FailBill::http(
+                                    latency_ms,
+                                    status_code,
+                                    err_msg.clone(),
+                                    &request_content_str,
+                                    upstream_body.to_string(),
+                                )
+                                .content(Some(raw_response))
+                                .client(err_msg);
+                                return Err(crate::relay::ha::HaAttempt::park(
+                                    &fail_buf,
+                                    bill,
+                                    Some(upstream_hdrs),
+                                ));
+                            }
+                        }
+                    }
+                } else {
+                    // 其他 target_type（如 openai）：直接透传上游二进制音频流
+                    let upstream_hdrs = resp.headers().clone();
+                    let upstream_ct = upstream_headers::header_str(&upstream_hdrs, "content-type")
+                        .unwrap_or(audio_content_type(&response_format))
+                        .to_string();
+                    let bytes = resp.bytes().await.unwrap_or_default();
+                    let summary = format!("音频数据 {} bytes", bytes.len());
+                    let body =
+                        upstream_headers::with_content_type(&upstream_hdrs, upstream_ct, bytes);
+                    (body, request_text_chars, summary)
+                };
 
                 let pre_deduct_gift = proxy::pre_deduct_or_intercept(
                     &state,
@@ -549,7 +509,7 @@ pub async fn audio_speech(
                     db_model.as_ref(),
                     db_rule.as_mut(),
                     &channel,
-                    &ctx_c,
+                    &ctx,
                     &usage_tokens,
                     &features,
                     mapping_source,
@@ -585,21 +545,31 @@ pub async fn audio_speech(
                     billing_model_hint: None,
                     plugin_tag: None,
                     db_model: db_model.as_ref(),
+                    time_multiplier: db_rule.as_ref().map(|r| r.applied_multiplier),
                 })
                 .await;
 
                 Ok(resp_body)
             }
-            .await;
-            let _ = result_tx.send(result);
         });
 
         match result_rx.await {
             Ok(result) => match result {
-                Ok(resp) => return Ok(resp),
+                Ok(resp) => {
+                    let ms = start_time.elapsed().as_millis() as u32;
+                    ha.ok(&state, &channel, &url, ms).await;
+                    return Ok(resp);
+                }
                 Err(e) => {
                     if ha
-                        .on_spawn_result_err(&state, &channel, e, Some(&url))
+                        .fail(
+                            &crate::relay::ha::HaBillCtx::new(&state, &token, model, &ep)
+                                .category(resolved_cat.as_str())
+                                .db(db_model.as_ref()),
+                            &channel,
+                            e,
+                            Some(&url),
+                        )
                         .await
                     {
                         ha.bump();
@@ -615,7 +585,11 @@ pub async fn audio_speech(
         }
     } // end while
 
-    Err(ha.finish())
+    Err(ha
+        .finish(
+            &crate::relay::ha::HaBillCtx::new(&state, &token, model, &entry_path).category("音频"),
+        )
+        .await)
 }
 
 // ── 火山 TTS V3 响应解析 ───────────────────────────────────

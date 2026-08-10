@@ -27,7 +27,7 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres",
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = "1"
 
 # HTTP client（gzip：上游 Content-Encoding；stream/multipart：SSE 与图床表单）
 reqwest = { version = "0.12", features = ["json", "stream", "gzip", "multipart"] }
@@ -73,7 +73,7 @@ sha2 = "0.10"
 hex = "0.4"
 urlencoding = "2.1"
 form_urlencoded = "1"
-url = "2"
+# url = "2"  # 源码无直接使用，通过 reqwest::Url 传递，不需要直接依赖
 # 支付验签：sha1/sha2/pem 均有渠道在用，勿再收窄
 rsa = { version = "0.9", features = ["sha1", "sha2", "pem"] }
 sha1 = { version = "0.10", default-features = false, features = ["oid"] }
@@ -96,10 +96,11 @@ openssl = { version = "0.10", optional = true, features = ["vendored"] }
 [build-dependencies]
 serde_json = "1"
 
-# 本地开发：减小调试信息 + 增量编译，缩短 watch 热重载等待（不影响 release）
+# 本地开发：减小调试信息 + 增量编译 + 最大并行编译单元，缩短冷编译时间（不影响 release）
 [profile.dev]
 debug = false
 incremental = true
+codegen-units = 256
 
 [profile.release]
 # opt-level = 's' 大幅压缩二进制与中间 AST，配合 --no-keep-memory 防止链接器 OOM
@@ -115,3 +116,16 @@ debug = false
 opt-level = 1
 debug = false
 incremental = false
+
+# 超重量级密码学依赖：关闭优化，纯追求编译速度（开发期不需要性能）
+[profile.dev.package.ring]
+opt-level = 0
+
+[profile.dev.package.rsa]
+opt-level = 0
+
+[profile.dev.package.num-bigint-dig]
+opt-level = 0
+
+[profile.dev.package.rustls]
+opt-level = 0

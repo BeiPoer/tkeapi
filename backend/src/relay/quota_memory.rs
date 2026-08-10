@@ -428,7 +428,7 @@ impl MemoryQuotaGuard {
         let map_key = Self::slot_key(token_id, &keys.day);
         self.slots.entry(map_key).or_insert(slot);
 
-        tracing::debug!(
+        tracing::info!(
             "[QuotaMemory] 水合成功 令牌ID={} 日期={}",
             token_id,
             keys.day

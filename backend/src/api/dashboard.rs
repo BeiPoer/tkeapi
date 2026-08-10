@@ -483,11 +483,8 @@ async fn calculate_dashboard_stats(
 
     if detail_days.iter().any(|d| *d == today_date) {
         let today_str = today_date.format("%Y-%m-%d").to_string();
-        let today_slices = crate::api::date_helper::calculate_query_slices(
-            Some(&today_str),
-            Some(&today_str),
-            tz,
-        );
+        let today_slices =
+            crate::api::date_helper::calculate_query_slices(Some(&today_str), Some(&today_str), tz);
         let today_stats = crate::relay::usage_stats::query_model_stats_by_slices(
             &state.db,
             user_filter,

@@ -1,6 +1,6 @@
 # Anthropic Claude Native API Guide
 
-The gateway supports direct calls to the official Anthropic Messages API. You can directly send native payloads to call Claude series models (such as `claude-3-5-sonnet-20241022`).
+Anthropic Messages–compatible path. Send Claude request payloads (such as `claude-3-5-sonnet-20241022`).
 
 ### 1. Message Generation Dialogue (Messages API)
 * **Request Path**: `/v1/messages`
@@ -36,7 +36,7 @@ curl -X POST https://{{domain}}/v1/messages \
 ```
 
 ### 2. API Authentication Methods
-When calling the native Claude API, the gateway supports the following two types of authentication request headers:
+Supported auth headers:
 1. **Unified Bearer Token Authentication (Recommended)**:
    ```http
    Authorization: Bearer sk-your_token

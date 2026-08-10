@@ -24,6 +24,9 @@ pub struct SiteSettings {
     pub logo: String,
     #[serde(default)]
     pub login_title: String,
+    /// 登录页标题点击跳转地址（留空则不可点击）
+    #[serde(default)]
+    pub login_title_url: String,
     #[serde(default)]
     pub login_subtitle: String,
     #[serde(default = "default_enable_multilingual")]
@@ -224,6 +227,80 @@ pub struct RegistrationSettings {
     /// 允许的邮箱域名列表
     #[serde(default = "default_email_whitelist")]
     pub email_whitelist: Vec<String>,
+    /// 是否要求绑定手机号（纳入绑定策略）
+    #[serde(default)]
+    pub require_bind_mobile: bool,
+    /// 是否要求绑定邮箱（纳入绑定策略）
+    #[serde(default)]
+    pub require_bind_email: bool,
+    /// 绑定执行方式：all=全部都要 / any=满足其一 / prompt_only=仅弹窗提示
+    #[serde(default = "default_bind_enforcement")]
+    pub bind_enforcement: String,
+    /// 是否开启站点用户实名认证（KYC）
+    #[serde(default)]
+    pub enable_user_kyc: bool,
+}
+
+fn default_bind_enforcement() -> String {
+    "all".to_string()
+}
+
+impl RegistrationSettings {
+    /// 是否启用了任一绑定通道
+    pub fn bind_policy_active(&self) -> bool {
+        self.require_bind_mobile || self.require_bind_email
+    }
+
+    pub fn has_valid_mobile(mobile: Option<&str>) -> bool {
+        mobile.map(|m| !m.trim().is_empty()).unwrap_or(false)
+    }
+
+    pub fn has_valid_email(email: &str) -> bool {
+        let email = email.trim();
+        !email.is_empty() && !email.ends_with("@tokensbyte.local")
+    }
+
+    /// 用户当前绑定是否满足策略（与执行方式无关；prompt_only 也用此判断是否弹窗）
+    pub fn is_bind_satisfied(&self, email: &str, mobile: Option<&str>) -> bool {
+        if !self.bind_policy_active() {
+            return true;
+        }
+        let has_mobile = Self::has_valid_mobile(mobile);
+        let has_email = Self::has_valid_email(email);
+        match (self.require_bind_mobile, self.require_bind_email) {
+            (true, true) => {
+                if self.bind_enforcement == "any" {
+                    has_mobile || has_email
+                } else {
+                    // all / prompt_only：双开时按「都要」判断是否已满足
+                    has_mobile && has_email
+                }
+            }
+            (true, false) => has_mobile,
+            (false, true) => has_email,
+            (false, false) => true,
+        }
+    }
+
+    /// 创建令牌等敏感操作是否应硬拦截
+    pub fn should_block_token_create(&self, email: &str, mobile: Option<&str>) -> bool {
+        self.bind_policy_active()
+            && self.bind_enforcement != "prompt_only"
+            && !self.is_bind_satisfied(email, mobile)
+    }
+
+    /// 生成创建令牌失败时的提示文案
+    pub fn token_bind_block_message(&self) -> String {
+        match (self.require_bind_mobile, self.require_bind_email) {
+            (true, true) if self.bind_enforcement == "any" => {
+                "创建 API 令牌前请先绑定手机号或邮箱".to_string()
+            }
+            (true, true) => "创建 API 令牌前请先绑定手机号和邮箱".to_string(),
+            (true, false) => "创建 API 令牌前请先绑定手机号".to_string(),
+            (false, true) => "创建 API 令牌前请先绑定邮箱".to_string(),
+            _ => "创建 API 令牌前请先完成账号绑定".to_string(),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -534,6 +611,439 @@ fn default_allinpay_sign_type() -> String {
     "RSA".to_string()
 }
 
+/// 支付渠道用户端展示配置（与各 payment_* 密钥配置解耦）
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct PaymentChannelsUiSettings {
+    #[serde(default)]
+    pub channels: Vec<PaymentChannelUiItem>,
+}
+
+/// 单个支付渠道的展示与排序
+///
+/// - 普通渠道 id 即用户端 payment_method（如 alipay / wechat）
+/// - 通联聚合渠道 id 为 `allinpay`；实际下单仍用 `allinpay_wechat` / `allinpay_alipay`
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct PaymentChannelUiItem {
+    #[serde(default)]
+    pub id: String,
+    /// 排序权重，数字越大越靠前
+    #[serde(default)]
+    pub sort_order: i32,
+    #[serde(default)]
+    pub enabled: bool,
+    /// 用户端显示名称；空则使用系统默认
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// 用户端副标题/角标；空则使用系统默认
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    /// Logo 图片 URL；空则使用系统默认图标
+    #[serde(default)]
+    pub logo_url: Option<String>,
+    /// 通联子渠道：微信（仅 id=allinpay 有效）
+    #[serde(default = "default_true")]
+    pub allinpay_wechat_enabled: bool,
+    /// 通联子渠道：支付宝（仅 id=allinpay 有效）
+    #[serde(default = "default_true")]
+    pub allinpay_alipay_enabled: bool,
+}
+
+/// 公开支付渠道（不含密钥）
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct PublicPaymentChannel {
+    pub id: String,
+    pub sort_order: i32,
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logo_url: Option<String>,
+    /// 通联已开启的子渠道 payment_method 列表（如 allinpay_wechat）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allinpay_methods: Vec<String>,
+}
+
+/// 系统内置支付渠道 ID 与默认排序（越大越靠前）
+pub fn payment_channel_catalog() -> &'static [(&'static str, i32)] {
+    &[
+        ("alipay", 70),
+        ("wechat", 60),
+        ("allinpay", 50),
+        ("stripe", 30),
+        ("bonuspay", 20),
+        ("hyperbc", 10),
+    ]
+}
+
+fn trim_opt(s: &Option<String>) -> Option<String> {
+    s.as_ref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+impl PaymentChannelUiItem {
+    pub fn normalized_display(&self) -> Option<String> {
+        trim_opt(&self.display_name)
+    }
+
+    pub fn normalized_subtitle(&self) -> Option<String> {
+        trim_opt(&self.subtitle)
+    }
+
+    pub fn normalized_logo_url(&self) -> Option<String> {
+        trim_opt(&self.logo_url)
+    }
+
+    pub fn allinpay_methods(&self) -> Vec<String> {
+        let mut methods = Vec::new();
+        if self.allinpay_wechat_enabled {
+            methods.push("allinpay_wechat".to_string());
+        }
+        if self.allinpay_alipay_enabled {
+            methods.push("allinpay_alipay".to_string());
+        }
+        methods
+    }
+}
+
+/// 用已存配置合并内置渠道目录；兼容旧版拆分的 allinpay_wechat / allinpay_alipay
+pub fn merge_payment_channels_ui(
+    saved: Option<PaymentChannelsUiSettings>,
+    gateway: &PaymentGatewayEnableFlags,
+) -> PaymentChannelsUiSettings {
+    let mut by_id: std::collections::HashMap<String, PaymentChannelUiItem> = saved
+        .unwrap_or_default()
+        .channels
+        .into_iter()
+        .filter(|c| !c.id.trim().is_empty())
+        .map(|c| (c.id.clone(), c))
+        .collect();
+
+    // 旧数据：两个通联子渠道 → 合并为 allinpay
+    let legacy_wechat = by_id.remove("allinpay_wechat");
+    let legacy_alipay = by_id.remove("allinpay_alipay");
+    if !by_id.contains_key("allinpay") && (legacy_wechat.is_some() || legacy_alipay.is_some()) {
+        let lw = legacy_wechat.as_ref();
+        let la = legacy_alipay.as_ref();
+        let sort_order = lw
+            .map(|c| c.sort_order)
+            .into_iter()
+            .chain(la.map(|c| c.sort_order))
+            .max()
+            .unwrap_or(50);
+        let enabled =
+            lw.map(|c| c.enabled).unwrap_or(false) || la.map(|c| c.enabled).unwrap_or(false);
+        let display = lw
+            .and_then(|c| c.normalized_display())
+            .or_else(|| la.and_then(|c| c.normalized_display()));
+        let subtitle = lw
+            .and_then(|c| c.normalized_subtitle())
+            .or_else(|| la.and_then(|c| c.normalized_subtitle()));
+        let logo = lw
+            .and_then(|c| c.normalized_logo_url())
+            .or_else(|| la.and_then(|c| c.normalized_logo_url()));
+        by_id.insert(
+            "allinpay".to_string(),
+            PaymentChannelUiItem {
+                id: "allinpay".to_string(),
+                sort_order,
+                enabled,
+                display_name: display,
+                subtitle,
+                logo_url: logo,
+                allinpay_wechat_enabled: lw.map(|c| c.enabled).unwrap_or(gateway.allinpay),
+                allinpay_alipay_enabled: la.map(|c| c.enabled).unwrap_or(gateway.allinpay),
+            },
+        );
+    }
+
+    let mut channels = Vec::with_capacity(payment_channel_catalog().len());
+    for &(id, default_sort) in payment_channel_catalog() {
+        if let Some(mut item) = by_id.remove(id) {
+            if item.id.is_empty() {
+                item.id = id.to_string();
+            }
+            if id == "allinpay"
+                && !item.allinpay_wechat_enabled
+                && !item.allinpay_alipay_enabled
+                && item.enabled
+            {
+                // 开启主开关但未指定子渠道时，默认两边都开
+                item.allinpay_wechat_enabled = true;
+                item.allinpay_alipay_enabled = true;
+            }
+            channels.push(item);
+        } else {
+            let gateway_on = gateway.default_enabled_for(id);
+            channels.push(PaymentChannelUiItem {
+                id: id.to_string(),
+                sort_order: default_sort,
+                enabled: gateway_on,
+                display_name: None,
+                subtitle: None,
+                logo_url: None,
+                allinpay_wechat_enabled: true,
+                allinpay_alipay_enabled: true,
+            });
+        }
+    }
+    PaymentChannelsUiSettings { channels }
+}
+
+/// 各网关当前启用状态（用于补齐渠道默认 enabled）
+#[derive(Debug, Clone, Default)]
+pub struct PaymentGatewayEnableFlags {
+    pub wechat: bool,
+    pub alipay: bool,
+    pub stripe: bool,
+    pub bonuspay: bool,
+    pub hyperbc: bool,
+    pub allinpay: bool,
+}
+
+impl PaymentGatewayEnableFlags {
+    pub fn default_enabled_for(&self, channel_id: &str) -> bool {
+        match channel_id {
+            "wechat" => self.wechat,
+            "alipay" => self.alipay,
+            "stripe" => self.stripe,
+            "bonuspay" => self.bonuspay,
+            "hyperbc" => self.hyperbc,
+            "allinpay" => self.allinpay,
+            _ => false,
+        }
+    }
+
+    pub fn gateway_ready_for(&self, channel_id: &str) -> bool {
+        self.default_enabled_for(channel_id)
+    }
+}
+
+/// 计算公开渠道列表：渠道 enabled ∧ 对应网关 enabled
+pub fn build_public_payment_channels(
+    ui: &PaymentChannelsUiSettings,
+    gateway: &PaymentGatewayEnableFlags,
+) -> Vec<PublicPaymentChannel> {
+    let mut list: Vec<PublicPaymentChannel> = ui
+        .channels
+        .iter()
+        .map(|c| {
+            let gateway_on = gateway.gateway_ready_for(&c.id);
+            let methods = if c.id == "allinpay" {
+                c.allinpay_methods()
+            } else {
+                Vec::new()
+            };
+            let channel_on = if c.id == "allinpay" {
+                c.enabled && !methods.is_empty()
+            } else {
+                c.enabled
+            };
+            PublicPaymentChannel {
+                id: c.id.clone(),
+                sort_order: c.sort_order,
+                enabled: channel_on && gateway_on,
+                display_name: c.normalized_display(),
+                subtitle: c.normalized_subtitle(),
+                logo_url: c.normalized_logo_url(),
+                allinpay_methods: if c.id == "allinpay" && gateway_on && c.enabled {
+                    methods
+                } else {
+                    Vec::new()
+                },
+            }
+        })
+        .collect();
+    list.sort_by(|a, b| {
+        b.sort_order
+            .cmp(&a.sort_order)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    list
+}
+
+/// 从公开渠道列表推导兼容旧字段的 PublicPaymentStatus
+pub fn public_payment_status_from_channels(
+    channels: &[PublicPaymentChannel],
+) -> PublicPaymentStatus {
+    let on = |id: &str| channels.iter().any(|c| c.id == id && c.enabled);
+    PublicPaymentStatus {
+        wechat_enabled: on("wechat"),
+        alipay_enabled: on("alipay"),
+        stripe_enabled: on("stripe"),
+        bonuspay_enabled: on("bonuspay"),
+        hyperbc_enabled: on("hyperbc"),
+        allinpay_enabled: on("allinpay"),
+    }
+}
+
+/// 查询某下单 payment_method 在 UI 配置中是否允许
+///
+/// - 普通渠道：对应 id 的 enabled
+/// - 通联子渠道：优先读聚合渠道 `allinpay` 的子开关；兼容旧版拆分 id
+/// - 配置完全缺失时默认 true（由网关 enabled 兜底，兼容未迁移数据）
+pub fn is_payment_channel_ui_enabled(ui: &PaymentChannelsUiSettings, channel_id: &str) -> bool {
+    if channel_id == "allinpay_wechat" || channel_id == "allinpay_alipay" {
+        if let Some(c) = ui.channels.iter().find(|c| c.id == "allinpay") {
+            return c.enabled
+                && if channel_id == "allinpay_wechat" {
+                    c.allinpay_wechat_enabled
+                } else {
+                    c.allinpay_alipay_enabled
+                };
+        }
+        // 兼容尚未迁移的拆分配置
+        if let Some(c) = ui.channels.iter().find(|c| c.id == channel_id) {
+            return c.enabled;
+        }
+        return true;
+    }
+
+    ui.channels
+        .iter()
+        .find(|c| c.id == channel_id)
+        .map(|c| c.enabled)
+        .unwrap_or(true)
+}
+
+#[cfg(test)]
+mod payment_channels_ui_tests {
+    use super::*;
+
+    #[test]
+    fn merge_fills_missing_channels_from_gateway() {
+        let gateway = PaymentGatewayEnableFlags {
+            alipay: true,
+            allinpay: true,
+            ..Default::default()
+        };
+        let merged = merge_payment_channels_ui(None, &gateway);
+        assert_eq!(merged.channels.len(), 6);
+        let alipay = merged.channels.iter().find(|c| c.id == "alipay").unwrap();
+        assert!(alipay.enabled);
+        assert_eq!(alipay.sort_order, 70);
+        let ap = merged.channels.iter().find(|c| c.id == "allinpay").unwrap();
+        assert!(ap.enabled);
+        assert!(ap.allinpay_wechat_enabled);
+        assert!(ap.allinpay_alipay_enabled);
+    }
+
+    #[test]
+    fn merge_legacy_split_allinpay_channels() {
+        let saved = PaymentChannelsUiSettings {
+            channels: vec![
+                PaymentChannelUiItem {
+                    id: "allinpay_wechat".into(),
+                    sort_order: 40,
+                    enabled: true,
+                    ..Default::default()
+                },
+                PaymentChannelUiItem {
+                    id: "allinpay_alipay".into(),
+                    sort_order: 50,
+                    enabled: false,
+                    display_name: Some("自定义通联".into()),
+                    ..Default::default()
+                },
+            ],
+        };
+        let merged = merge_payment_channels_ui(Some(saved), &PaymentGatewayEnableFlags::default());
+        let ap = merged.channels.iter().find(|c| c.id == "allinpay").unwrap();
+        assert!(ap.enabled);
+        assert_eq!(ap.sort_order, 50);
+        assert!(ap.allinpay_wechat_enabled);
+        assert!(!ap.allinpay_alipay_enabled);
+        assert_eq!(ap.display_name.as_deref(), Some("自定义通联"));
+    }
+
+    #[test]
+    fn public_channels_sort_desc_and_gate_by_gateway() {
+        let ui = PaymentChannelsUiSettings {
+            channels: vec![
+                PaymentChannelUiItem {
+                    id: "wechat".into(),
+                    sort_order: 10,
+                    enabled: true,
+                    ..Default::default()
+                },
+                PaymentChannelUiItem {
+                    id: "alipay".into(),
+                    sort_order: 90,
+                    enabled: true,
+                    display_name: Some("  我的支付宝  ".into()),
+                    subtitle: Some("".into()),
+                    logo_url: None,
+                    ..Default::default()
+                },
+            ],
+        };
+        let gateway = PaymentGatewayEnableFlags {
+            wechat: false,
+            alipay: true,
+            ..Default::default()
+        };
+        let pub_list = build_public_payment_channels(&ui, &gateway);
+        assert_eq!(pub_list[0].id, "alipay");
+        assert!(pub_list[0].enabled);
+        assert_eq!(pub_list[0].display_name.as_deref(), Some("我的支付宝"));
+        assert!(pub_list[0].subtitle.is_none());
+        let wechat = pub_list.iter().find(|c| c.id == "wechat").unwrap();
+        assert!(!wechat.enabled);
+    }
+
+    #[test]
+    fn allinpay_public_exposes_enabled_methods() {
+        let ui = PaymentChannelsUiSettings {
+            channels: vec![PaymentChannelUiItem {
+                id: "allinpay".into(),
+                sort_order: 50,
+                enabled: true,
+                allinpay_wechat_enabled: true,
+                allinpay_alipay_enabled: false,
+                ..Default::default()
+            }],
+        };
+        let gateway = PaymentGatewayEnableFlags {
+            allinpay: true,
+            ..Default::default()
+        };
+        let pub_list = build_public_payment_channels(&ui, &gateway);
+        let ap = pub_list.iter().find(|c| c.id == "allinpay").unwrap();
+        assert!(ap.enabled);
+        assert_eq!(ap.allinpay_methods, vec!["allinpay_wechat".to_string()]);
+        let st = public_payment_status_from_channels(&pub_list);
+        assert!(st.allinpay_enabled);
+        assert!(is_payment_channel_ui_enabled(&ui, "allinpay_wechat"));
+        assert!(!is_payment_channel_ui_enabled(&ui, "allinpay_alipay"));
+    }
+
+    #[test]
+    fn legacy_split_allinpay_respected_by_pay_guard() {
+        let ui = PaymentChannelsUiSettings {
+            channels: vec![
+                PaymentChannelUiItem {
+                    id: "allinpay_wechat".into(),
+                    enabled: false,
+                    ..Default::default()
+                },
+                PaymentChannelUiItem {
+                    id: "allinpay_alipay".into(),
+                    enabled: true,
+                    ..Default::default()
+                },
+            ],
+        };
+        assert!(!is_payment_channel_ui_enabled(&ui, "allinpay_wechat"));
+        assert!(is_payment_channel_ui_enabled(&ui, "allinpay_alipay"));
+
+        let merged = merge_payment_channels_ui(Some(ui), &PaymentGatewayEnableFlags::default());
+        assert!(is_payment_channel_ui_enabled(&merged, "allinpay_alipay"));
+        assert!(!is_payment_channel_ui_enabled(&merged, "allinpay_wechat"));
+    }
+}
+
 /// 谷歌 OAuth 2.0 设置
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct GoogleOAuthSettings {
@@ -754,6 +1264,9 @@ pub struct AllSettings {
     pub payment_hyperbc: Option<PaymentHyperbcSettings>,
     #[serde(default)]
     pub payment_allinpay: Option<PaymentAllinpaySettings>,
+    /// 支付渠道展示/排序/分渠道开关（与密钥配置解耦）
+    #[serde(default)]
+    pub payment_channels_ui: Option<PaymentChannelsUiSettings>,
     #[serde(default)]
     pub google_oauth: Option<GoogleOAuthSettings>,
     #[serde(default)]
@@ -804,6 +1317,8 @@ pub struct UpdateSettingsRequest {
     #[serde(default)]
     pub payment_allinpay: Option<serde_json::Value>,
     #[serde(default)]
+    pub payment_channels_ui: Option<serde_json::Value>,
+    #[serde(default)]
     pub google_oauth: Option<serde_json::Value>,
     #[serde(default)]
     pub wechat_oauth: Option<serde_json::Value>,
@@ -826,7 +1341,7 @@ pub struct UpdateSettingsRequest {
 // 不得添加到 PublicSettings。此原则必须被所有开发者（包括 AI）严格遵守。
 // ════════════════════════════════════════════════════════════════════════════
 
-/// 公开注册设置 — 仅暴露注册方式开关，隐藏 IP 限制、邮箱白名单等安全策略
+/// 公开注册设置 — 仅暴露注册方式开关与绑定策略，隐藏 IP 限制、邮箱白名单等防刷细节
 #[derive(Debug, Serialize, Clone)]
 pub struct PublicRegistrationSettings {
     #[serde(default)]
@@ -837,6 +1352,14 @@ pub struct PublicRegistrationSettings {
     pub enable_mobile_registration: bool,
     #[serde(default)]
     pub enable_password_recovery: bool,
+    #[serde(default)]
+    pub require_bind_mobile: bool,
+    #[serde(default)]
+    pub require_bind_email: bool,
+    #[serde(default = "default_bind_enforcement")]
+    pub bind_enforcement: String,
+    #[serde(default)]
+    pub enable_user_kyc: bool,
 }
 
 impl From<&RegistrationSettings> for PublicRegistrationSettings {
@@ -846,6 +1369,14 @@ impl From<&RegistrationSettings> for PublicRegistrationSettings {
             enable_email_registration: r.enable_email_registration,
             enable_mobile_registration: r.enable_mobile_registration,
             enable_password_recovery: r.enable_password_recovery,
+            require_bind_mobile: r.require_bind_mobile,
+            require_bind_email: r.require_bind_email,
+            bind_enforcement: if r.bind_enforcement.is_empty() {
+                default_bind_enforcement()
+            } else {
+                r.bind_enforcement.clone()
+            },
+            enable_user_kyc: r.enable_user_kyc,
         }
     }
 }
@@ -869,7 +1400,7 @@ impl From<&MarketingSettings> for PublicMarketingSettings {
 }
 
 /// 公开支付状态 — 仅暴露各支付渠道的启用开关，不含任何密钥/密码/私钥
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, Default)]
 pub struct PublicPaymentStatus {
     #[serde(default)]
     pub wechat_enabled: bool,
@@ -881,6 +1412,7 @@ pub struct PublicPaymentStatus {
     pub bonuspay_enabled: bool,
     #[serde(default)]
     pub hyperbc_enabled: bool,
+    #[serde(default)]
     pub allinpay_enabled: bool,
 }
 
@@ -939,9 +1471,12 @@ pub struct PublicSettings {
     pub registration: PublicRegistrationSettings,
     #[serde(default)]
     pub marketing: PublicMarketingSettings,
-    /// 各支付渠道启用状态（仅布尔值，不含密钥）
+    /// 各支付渠道启用状态（仅布尔值，不含密钥；兼容旧前端）
     #[serde(default)]
     pub payment: PublicPaymentStatus,
+    /// 支付渠道列表（排序/展示名/副标题/logo/启用，不含密钥）
+    #[serde(default)]
+    pub payment_channels: Vec<PublicPaymentChannel>,
     #[serde(default)]
     pub agreement: AgreementSettings,
     /// 微信 OAuth app_id（前端扫码绑定/登录需要），不含 app_secret

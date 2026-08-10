@@ -101,7 +101,35 @@ pub struct TimeMultiplier {
 }
 
 impl BillingRule {
+    /// 是否启用时间段价格倍率（须显式 `enable_time_multipliers: true`）
+    fn time_multipliers_enabled(&self) -> bool {
+        if self.extended_config.is_empty() || self.extended_config == "{}" {
+            return false;
+        }
+        let Ok(config) = serde_json::from_str::<serde_json::Value>(&self.extended_config) else {
+            return false;
+        };
+        config
+            .get("enable_time_multipliers")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// 按站点默认时区取「当前时刻」的时段倍率（请求开始时锁定用）
     pub fn get_current_multiplier(&self, default_tz: &str) -> f64 {
+        if !self.time_multipliers_enabled() {
+            return 1.0;
+        }
+        let tz: chrono_tz::Tz = default_tz.parse().unwrap_or(chrono_tz::Asia::Shanghai);
+        let local_now = chrono::Utc::now().with_timezone(&tz);
+        self.multiplier_at_local_time(local_now.time())
+    }
+
+    /// 按给定本地时钟（时分秒）匹配时段倍率；半开区间 `[start, end)`，支持跨天
+    fn multiplier_at_local_time(&self, current_time: chrono::NaiveTime) -> f64 {
+        if !self.time_multipliers_enabled() {
+            return 1.0;
+        }
         if self.extended_config.is_empty() || self.extended_config == "{}" {
             return 1.0;
         }
@@ -126,15 +154,12 @@ impl BillingRule {
             return 1.0;
         }
 
-        let tz: chrono_tz::Tz = default_tz.parse().unwrap_or(chrono_tz::Asia::Shanghai);
-        let local_now = chrono::Utc::now().with_timezone(&tz);
-        let current_time = local_now.time();
-
         for item in multipliers {
             let start = chrono::NaiveTime::parse_from_str(&item.start, "%H:%M");
             let end = chrono::NaiveTime::parse_from_str(&item.end, "%H:%M");
             if let (Ok(start_t), Ok(end_t)) = (start, end) {
                 let matched = if start_t > end_t {
+                    // 跨天：如 22:00-06:00 → [22:00,24:00) ∪ [00:00,06:00)
                     current_time >= start_t || current_time < end_t
                 } else {
                     current_time >= start_t && current_time < end_t
@@ -146,6 +171,11 @@ impl BillingRule {
         }
 
         1.0
+    }
+
+    /// 将当前时刻倍率写入 `applied_multiplier`（请求开始锁定）
+    pub fn lock_time_multiplier(&mut self, default_tz: &str) {
+        self.applied_multiplier = self.get_current_multiplier(default_tz);
     }
 }
 

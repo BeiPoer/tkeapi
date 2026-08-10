@@ -1,0 +1,151 @@
+/*
+ * tokensbyte opensource
+ * (c) 2026 tokensbyte.ai
+ * @copyright      Copyright netbcloud/wstianxia
+ * @license        MIT (https://www.tokensbyte.ai/)
+ */
+
+/** 列表级支付渠道 ID（通联聚合为 allinpay） */
+type PaymentChannelId =
+  | 'alipay'
+  | 'wechat'
+  | 'allinpay'
+  | 'stripe'
+  | 'bonuspay'
+  | 'hyperbc';
+
+/** 实际下单用的 payment_method（通联子渠道拆分） */
+export type PaymentMethodId =
+  | 'alipay'
+  | 'wechat'
+  | 'allinpay_alipay'
+  | 'allinpay_wechat'
+  | 'stripe'
+  | 'bonuspay'
+  | 'hyperbc';
+
+export interface PaymentChannelUiItem {
+  id: PaymentChannelId | string;
+  sort_order: number;
+  enabled: boolean;
+  display_name?: string | null;
+  subtitle?: string | null;
+  logo_url?: string | null;
+  /** 通联子渠道：微信 */
+  allinpay_wechat_enabled?: boolean;
+  /** 通联子渠道：支付宝 */
+  allinpay_alipay_enabled?: boolean;
+  /** 公开接口：已开启的通联子渠道 payment_method */
+  allinpay_methods?: string[];
+}
+
+export interface PaymentChannelDefaultMeta {
+  id: PaymentChannelId;
+  /** 系统默认名称（未自定义时使用） */
+  defaultName: string;
+  /** 系统默认副标题/角标 */
+  defaultSubtitle: string;
+  /** 所属网关配置 key */
+  gatewayKey:
+    | 'payment_wechat'
+    | 'payment_alipay'
+    | 'payment_stripe'
+    | 'payment_bonuspay'
+    | 'payment_hyperbc'
+    | 'payment_allinpay';
+  /** 默认排序，越大越靠前 */
+  defaultSort: number;
+  accent: string;
+}
+
+/** 内置渠道目录（与后端 payment_channel_catalog 保持一致） */
+const PAYMENT_CHANNEL_CATALOG: PaymentChannelDefaultMeta[] = [
+  { id: 'alipay', defaultName: '支付宝', defaultSubtitle: '快捷', gatewayKey: 'payment_alipay', defaultSort: 70, accent: '#1677ff' },
+  { id: 'wechat', defaultName: '微信支付', defaultSubtitle: '推荐', gatewayKey: 'payment_wechat', defaultSort: 60, accent: '#07c160' },
+  { id: 'allinpay', defaultName: '通联支付', defaultSubtitle: '聚合', gatewayKey: 'payment_allinpay', defaultSort: 50, accent: '#1677ff' },
+  { id: 'stripe', defaultName: 'Stripe 信用卡', defaultSubtitle: '国际外卡', gatewayKey: 'payment_stripe', defaultSort: 30, accent: '#635bff' },
+  { id: 'bonuspay', defaultName: 'BonusPay', defaultSubtitle: 'Web3', gatewayKey: 'payment_bonuspay', defaultSort: 20, accent: '#ff6a00' },
+  { id: 'hyperbc', defaultName: 'HyperBC', defaultSubtitle: '链上充值', gatewayKey: 'payment_hyperbc', defaultSort: 10, accent: '#8b5cf6' },
+];
+
+export const getChannelMeta = (id: string): PaymentChannelDefaultMeta | undefined =>
+  PAYMENT_CHANNEL_CATALOG.find((c) => c.id === id);
+
+export const resolveChannelName = (item: PaymentChannelUiItem): string => {
+  const custom = (item.display_name || '').trim();
+  if (custom) return custom;
+  return getChannelMeta(item.id)?.defaultName || item.id;
+};
+
+export const resolveChannelSubtitle = (item: PaymentChannelUiItem): string => {
+  const custom = (item.subtitle || '').trim();
+  if (custom) return custom;
+  return getChannelMeta(item.id)?.defaultSubtitle || '';
+};
+
+export const getAllinpayMethods = (item: PaymentChannelUiItem): PaymentMethodId[] => {
+  // 公开接口若带了 allinpay_methods（含空数组），以它为准，避免回退成「双开」
+  if (Array.isArray(item.allinpay_methods)) {
+    return item.allinpay_methods.filter(
+      (m): m is PaymentMethodId => m === 'allinpay_wechat' || m === 'allinpay_alipay',
+    );
+  }
+  const methods: PaymentMethodId[] = [];
+  if (item.allinpay_wechat_enabled !== false) methods.push('allinpay_wechat');
+  if (item.allinpay_alipay_enabled !== false) methods.push('allinpay_alipay');
+  return methods;
+};
+
+export const mergeChannelList = (
+  saved?: PaymentChannelUiItem[] | null,
+): PaymentChannelUiItem[] => {
+  const raw = saved || [];
+  const byId = new Map(raw.map((c) => [c.id, c]));
+
+  // 兼容旧版拆分渠道
+  const legacyWechat = byId.get('allinpay_wechat');
+  const legacyAlipay = byId.get('allinpay_alipay');
+  if (!byId.has('allinpay') && (legacyWechat || legacyAlipay)) {
+    byId.set('allinpay', {
+      id: 'allinpay',
+      sort_order: Math.max(legacyWechat?.sort_order || 0, legacyAlipay?.sort_order || 0, 50),
+      enabled: !!(legacyWechat?.enabled || legacyAlipay?.enabled),
+      display_name: legacyWechat?.display_name || legacyAlipay?.display_name || null,
+      subtitle: legacyWechat?.subtitle || legacyAlipay?.subtitle || null,
+      logo_url: legacyWechat?.logo_url || legacyAlipay?.logo_url || null,
+      allinpay_wechat_enabled: legacyWechat ? !!legacyWechat.enabled : true,
+      allinpay_alipay_enabled: legacyAlipay ? !!legacyAlipay.enabled : true,
+    });
+  }
+
+  return PAYMENT_CHANNEL_CATALOG.map((meta) => {
+    const existing = byId.get(meta.id);
+    if (existing) {
+      const wechatOn = existing.allinpay_wechat_enabled !== false;
+      const alipayOn = existing.allinpay_alipay_enabled !== false;
+      return {
+        id: meta.id,
+        sort_order: existing.sort_order ?? meta.defaultSort,
+        enabled: !!existing.enabled,
+        display_name: existing.display_name ?? null,
+        subtitle: existing.subtitle ?? null,
+        logo_url: existing.logo_url ?? null,
+        allinpay_wechat_enabled: meta.id === 'allinpay' ? wechatOn : undefined,
+        allinpay_alipay_enabled: meta.id === 'allinpay' ? alipayOn : undefined,
+      };
+    }
+    return {
+      id: meta.id,
+      sort_order: meta.defaultSort,
+      enabled: false,
+      display_name: null,
+      subtitle: null,
+      logo_url: null,
+      ...(meta.id === 'allinpay'
+        ? { allinpay_wechat_enabled: true, allinpay_alipay_enabled: true }
+        : {}),
+    };
+  }).sort((a, b) => (b.sort_order || 0) - (a.sort_order || 0) || a.id.localeCompare(b.id));
+};
+
+const isAllinpayChannel = (id: string) => id === 'allinpay';

@@ -1,6 +1,9 @@
-# Kling-v3 Video Generation Example
+# Kling Video Generation Guide
 
-kling-v3-omni is the flagship video generation model released by Kling AI, leading the industry in visual detail and motion dynamics. It operates in an **asynchronous two-stage flow**.
+Kling AI video models are available via the OpenAI-compatible API. Follow the examples below to integrate.
+
+* **Submit**: `POST /v1/video/generations`
+* **Poll**: `GET /v1/video/generations/{task_id}`
 
 ### 1. Step 1: Submit Video Generation Task (Submit Task)
 * **HTTP Method**: `POST`

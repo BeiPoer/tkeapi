@@ -34,6 +34,15 @@ interface TrendingPageProps {
   onSelectProvider?: (provider: any) => void;
 }
 
+const isVideoUrl = (url?: string): boolean => {
+  if (!url) return false;
+  const cleanUrl = url.split('?')[0].split('#')[0].toLowerCase();
+  if (/\.(mp4|webm|ogg|mov|m3u8|m4v|flv)$/i.test(cleanUrl)) return true;
+  if (url.startsWith('data:video/')) return true;
+  if (url.includes('video/mp4') || url.includes('video/webm')) return true;
+  return false;
+};
+
 const DEFAULT_HERO_SLIDES = [
   {
     id: 'hero-1',
@@ -283,7 +292,7 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
   const isEnglish = i18n.language?.startsWith('en');
   const [favorites, setFavorites] = useState<{ [key: string]: boolean }>({});
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [currentHeroIndex, setCurrentHeroIndex] = useState(0);
+  const [currentHeroIndex, setCurrentHeroIndex] = useState(() => Math.floor(Math.random() * 100));
   const [heroProgress, setHeroProgress] = useState<number>(0);
   const [isHeroHovered, setIsHeroHovered] = useState<boolean>(false);
   const [hoveredIndicatorIdx, setHoveredIndicatorIdx] = useState<number | null>(null);
@@ -330,8 +339,9 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
   const activeSlideIndex = (currentHeroIndex % heroSlidesList.length + heroSlidesList.length) % heroSlidesList.length;
   const activeSlide = heroSlidesList[activeSlideIndex] || heroSlidesList[0];
   const activeHeroTryModel = (() => {
-    const tryId = activeSlide.try_model_id;
-    if (tryId) {
+    const rawTryId = activeSlide.try_model_id;
+    if (rawTryId) {
+      const tryId = typeof rawTryId === 'string' && rawTryId.startsWith('orig:') ? rawTryId.replace('orig:', '') : rawTryId;
       const found = models.find(m => 
         m.mid === tryId || 
         m.id?.toString() === tryId || 
@@ -341,7 +351,8 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
         (m.original_id && m.original_id.toLowerCase() === tryId.toLowerCase()) ||
         (m.model_id && m.model_id.toLowerCase() === tryId.toLowerCase()) ||
         (m.name && m.name.toLowerCase() === tryId.toLowerCase()) ||
-        (m.mid && m.mid.toLowerCase() === tryId.toLowerCase())
+        (m.mid && m.mid.toLowerCase() === tryId.toLowerCase()) ||
+        (m.variants && m.variants.some((v: any) => (v.original_id || v.model_id || '').toLowerCase() === tryId.toLowerCase()))
       );
       if (found) return found;
       // Partial match fallback if try_model_id contains or is contained in model identifiers
@@ -775,13 +786,51 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
   const renderSectionTopic = (sec: any, secIdx: number) => {
     let itemsToRender: any[] = [];
 
-    if (sec.type === 'models') {
+    if (sec.type === 'models' || sec.type === 'groups') {
       if (Array.isArray(sec.items) && sec.items.length > 0) {
-        itemsToRender = validModels.filter(m => 
-          sec.items.includes(m.mid) || 
-          sec.items.includes(m.id?.toString()) || 
-          sec.items.includes(m.name)
-        );
+        const origItems = sec.items
+          .filter((it: string) => typeof it === 'string' && it.startsWith('orig:'))
+          .map((it: string) => it.replace('orig:', '').toLowerCase());
+
+        const groupItems = sec.items
+          .filter((it: string) => typeof it === 'string' && it.startsWith('group:'))
+          .map((it: string) => it.replace('group:', ''));
+
+        const directItems = sec.items.filter((it: string) => typeof it !== 'string' || (!it.startsWith('group:') && !it.startsWith('orig:')));
+
+        itemsToRender = validModels.filter(m => {
+          const mOrigId = (m.original_id || m.model_id || '').toLowerCase();
+          const mMid = (m.mid || m.id?.toString() || '').toLowerCase();
+
+          // 1. Original ID group match (orig: prefix or exact original_id)
+          if (origItems.length > 0) {
+            const isOrigMatch = origItems.some((o: string) => 
+              mOrigId === o || 
+              mMid === o ||
+              (m.variants && m.variants.some((v: any) => (v.original_id || v.model_id || '').toLowerCase() === o))
+            );
+            if (isOrigMatch) return true;
+          }
+
+          // 2. Direct ID or Name match
+          const directMatch = directItems.includes(m.mid) || 
+            directItems.includes(m.id?.toString()) || 
+            directItems.includes(m.original_id) ||
+            directItems.includes(m.model_id) ||
+            directItems.includes(m.name);
+          if (directMatch) return true;
+
+          // 3. Capability group / category match
+          if (groupItems.length > 0) {
+            const cat = (m.type_name || m.category || '').toLowerCase();
+            return groupItems.some((g: string) => {
+              const gLower = g.toLowerCase();
+              return cat.includes(gLower) || gLower.includes(cat);
+            });
+          }
+
+          return false;
+        });
       }
       if (itemsToRender.length === 0) {
         const titleStr = sec.title || '';
@@ -805,7 +854,7 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
                 color: isLight ? '#0284c7' : '#38bdf8',
                 fontWeight: 600
               }}>
-                展示 {displayItems.length} 项
+                {isEnglish ? `${displayItems.length} Items` : `展示 ${displayItems.length} 项`}
               </span>
             </div>
           </div>
@@ -845,7 +894,7 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
                 color: isLight ? '#475569' : '#a1a1aa',
                 fontWeight: 600
               }}>
-                共 {providersToRender.length} 家厂商
+                {isEnglish ? `${providersToRender.length} Providers` : `共 ${providersToRender.length} 家厂商`}
               </span>
             </div>
           </div>
@@ -918,35 +967,18 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
       color: c.text1 
     }}>
       <style>{`
-        @keyframes heroFadeUp {
-          from { opacity: 0; transform: translateY(18px); filter: blur(5px); }
-          to { opacity: 1; transform: translateY(0); filter: blur(0); }
+        @keyframes heroSlideEnter {
+          0% { opacity: 0; transform: translateY(22px) scale(0.97); filter: blur(6px); }
+          100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
         }
-        @keyframes heroFadeRight {
-          from { opacity: 0; transform: translateX(-24px); filter: blur(5px); }
-          to { opacity: 1; transform: translateX(0); filter: blur(0); }
+        @keyframes heroButtonSlideUp {
+          0% { opacity: 0; transform: translateY(28px); filter: blur(6px); }
+          100% { opacity: 1; transform: translateY(0); filter: blur(0); }
         }
-        @keyframes heroZoomIn {
-          from { opacity: 0; transform: scale(0.92); filter: blur(6px); }
-          to { opacity: 1; transform: scale(1); filter: blur(0); }
-        }
-        @keyframes heroPanDown {
-          from { opacity: 0; transform: translateY(-18px); filter: blur(5px); }
-          to { opacity: 1; transform: translateY(0); filter: blur(0); }
-        }
-        @keyframes heroFadeLeft {
-          from { opacity: 0; transform: translateX(24px); filter: blur(5px); }
-          to { opacity: 1; transform: translateX(0); filter: blur(0); }
-        }
-        .hero-anim-0 { animation: heroFadeUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        .hero-anim-1 { animation: heroFadeRight 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        .hero-anim-2 { animation: heroZoomIn 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        .hero-anim-3 { animation: heroPanDown 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        .hero-anim-4 { animation: heroFadeLeft 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        .hero-anim-5 { animation: heroFadeUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        .hero-content-anim {
-          animation: heroFadeUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-        }
+        .hero-stagger-1 { animation: heroSlideEnter 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.04s both; }
+        .hero-stagger-2 { animation: heroSlideEnter 0.55s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both; }
+        .hero-stagger-3 { animation: heroSlideEnter 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.16s both; }
+        .hero-stagger-4 { animation: heroButtonSlideUp 0.65s cubic-bezier(0.16, 1, 0.3, 1) 0.22s both; }
         .mp-trending-card {
           border: 1px solid ${isLight ? '#e5e7eb' : 'rgba(255,255,255,0.06)'} !important;
           background: ${isLight ? '#ffffff' : '#0f0f12'} !important;
@@ -1026,8 +1058,8 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
         style={{
           position: 'relative',
           width: '100%',
-          minHeight: '360px',
-          padding: '36px 48px 24px 48px',
+          minHeight: '420px',
+          padding: '44px 48px 32px 48px',
           background: isLight 
             ? 'linear-gradient(180deg, #f8fafc 0%, #ffffff 100%)' 
             : 'radial-gradient(ellipse at top, #1c1c24 0%, #000000 70%)',
@@ -1042,7 +1074,8 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
         {/* Smooth Sequential Cross-fading Slide Background Layers */}
         {heroSlidesList.map((slideItem: any, idx: number) => {
           const isActive = idx === activeSlideIndex;
-          const hasImage = Boolean(slideItem.bg_image);
+          const hasMedia = Boolean(slideItem.bg_image);
+          const isVideo = isVideoUrl(slideItem.bg_image);
 
           // Opaque base background so previous slide background images NEVER leak through
           const opaqueBaseBg = isLight 
@@ -1099,27 +1132,58 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
                 background: accentGradient
               }} />
 
-              {/* Background Image Container with Smooth Scale Cross-fade */}
-              {hasImage && (
-                <div 
-                  style={{
-                    position: 'absolute',
-                    inset: -20,
-                    backgroundImage: `url(${slideItem.bg_image})`,
-                    backgroundSize: 'cover',
-                    backgroundPosition: 'center',
-                    transform: isActive ? 'scale(1)' : 'scale(1.05)',
-                    transition: 'opacity 0.7s ease-in-out, transform 0.9s cubic-bezier(0.16, 1, 0.3, 1)',
-                    willChange: 'transform, opacity'
-                  }}
-                />
+              {/* Background Media Container (Video or Image) with Smooth Scale Cross-fade */}
+              {hasMedia && (
+                isVideo ? (
+                  <video
+                    src={slideItem.bg_image}
+                    autoPlay
+                    loop
+                    muted
+                    playsInline
+                    aria-hidden="true"
+                    style={{
+                      position: 'absolute',
+                      top: '50%',
+                      left: '50%',
+                      width: '100%',
+                      height: '100%',
+                      minWidth: '100%',
+                      minHeight: '100%',
+                      objectFit: 'cover',
+                      objectPosition: 'center',
+                      transform: isActive ? 'translate(-50%, -50%) scale(1.06)' : 'translate(-50%, -50%) scale(1.12)',
+                      transition: 'opacity 0.7s ease-in-out, transform 0.9s cubic-bezier(0.16, 1, 0.3, 1)',
+                      willChange: 'transform, opacity',
+                      pointerEvents: 'none'
+                    }}
+                  />
+                ) : (
+                  <div 
+                    style={{
+                      position: 'absolute',
+                      top: '50%',
+                      left: '50%',
+                      width: '100%',
+                      height: '100%',
+                      minWidth: '100%',
+                      minHeight: '100%',
+                      backgroundImage: `url(${slideItem.bg_image})`,
+                      backgroundSize: 'cover',
+                      backgroundPosition: 'center',
+                      transform: isActive ? 'translate(-50%, -50%) scale(1.06)' : 'translate(-50%, -50%) scale(1.12)',
+                      transition: 'opacity 0.7s ease-in-out, transform 0.9s cubic-bezier(0.16, 1, 0.3, 1)',
+                      willChange: 'transform, opacity'
+                    }}
+                  />
+                )
               )}
 
               {/* Text Contrast Mask Overlay */}
               <div style={{
                 position: 'absolute',
                 inset: 0,
-                background: hasImage 
+                background: hasMedia 
                   ? (isLight 
                       ? 'linear-gradient(90deg, rgba(255,255,255,0.96) 0%, rgba(255,255,255,0.82) 50%, rgba(255,255,255,0.3) 100%)'
                       : 'linear-gradient(90deg, rgba(9,9,11,0.95) 0%, rgba(9,9,11,0.78) 50%, rgba(9,9,11,0.4) 100%)')
@@ -1129,14 +1193,14 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
           );
         })}
 
-        <div key={`hero-content-${activeSlideIndex}`} className="hero-content-anim" style={{ maxWidth: '720px', position: 'relative', zIndex: 2 }}>
+        <div key={`hero-content-${activeSlideIndex}`} style={{ maxWidth: '720px', position: 'relative', zIndex: 2, marginTop: '56px' }}>
           {/* Category Badge Pill */}
           {(() => {
             const rawCategory = activeHeroTryModel?.type_name || activeHeroTryModel?.category || activeSlide?.category;
             const badgeCategory = rawCategory ? getCategoryLabel(rawCategory) : '推荐模型';
             const modelDisplayName = activeHeroTryModel?.name || activeHeroTryModel?.original_id || activeSlide?.try_model_id || '';
             return (
-              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
+              <div className="hero-stagger-1" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: '-14px', marginBottom: 16 }}>
                 <span style={{
                   fontSize: 11,
                   padding: '3px 10px',
@@ -1160,14 +1224,14 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
           })()}
 
           {/* Large Title */}
-          <div style={{ minHeight: '80px', marginBottom: 12, display: 'flex', alignItems: 'flex-start' }}>
+          <div className="hero-stagger-2" style={{ marginBottom: 12, display: 'flex', alignItems: 'flex-start' }}>
             <Title level={1} style={{ 
               color: isLight ? '#0f172a' : '#ffffff', 
-              fontSize: '34px', 
+              fontSize: '38px', 
               fontWeight: 700, 
               margin: 0, 
-              letterSpacing: '-1px',
-              lineHeight: 1.15,
+              letterSpacing: '-1.2px',
+              lineHeight: 1.18,
               display: '-webkit-box',
               WebkitLineClamp: 2,
               WebkitBoxOrient: 'vertical',
@@ -1179,7 +1243,7 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
           </div>
 
           {/* Subtitle */}
-          <div style={{ minHeight: '44px', marginBottom: 18, display: 'flex', alignItems: 'flex-start' }}>
+          <div className="hero-stagger-3" style={{ marginBottom: 32, display: 'flex', alignItems: 'flex-start' }}>
             <Paragraph style={{ 
               color: isLight ? '#475569' : '#a1a1aa', 
               fontSize: '15px', 
@@ -1198,7 +1262,7 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
           </div>
 
           {/* Buttons */}
-          <div style={{ minHeight: 40, display: 'flex', alignItems: 'center' }}>
+          <div className="hero-stagger-4" style={{ minHeight: 40, display: 'flex', alignItems: 'center', marginTop: 66 }}>
             <Space size="middle">
               <Button 
                 type="primary" 
@@ -1432,7 +1496,7 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
             return (
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
                 <span style={{ fontSize: 13, color: isLight ? '#64748b' : '#71717a', fontWeight: 500 }}>
-                  历史记录:
+                  {isEnglish ? 'History:' : '历史记录:'}
                 </span>
                 {displayTags.map((tagItem, idx) => (
                   <button
@@ -1475,7 +1539,7 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
                     marginLeft: 4
                   }}
                 >
-                  清空历史
+                  {isEnglish ? 'Clear' : '清空历史'}
                 </button>
               </div>
             );
@@ -1490,7 +1554,7 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
               onClick={() => onViewAllModels?.()}
             >
               <Title level={4} style={{ margin: 0, fontSize: 20, fontWeight: 700, color: c.text1, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                模型品牌 <RightOutlined style={{ fontSize: 14, color: isLight ? '#64748b' : '#a1a1aa' }} />
+                {isEnglish ? 'Model Providers' : '模型品牌'} <RightOutlined style={{ fontSize: 14, color: isLight ? '#64748b' : '#a1a1aa' }} />
               </Title>
             </div>
           </div>
@@ -1529,7 +1593,7 @@ const TrendingPage: React.FC<TrendingPageProps> = ({
                 <div style={{
                   width: 58,
                   height: 58,
-                  borderRadius: 8,
+                  borderRadius: 0,
                   background: '#ffffff',
                   display: 'flex',
                   alignItems: 'center',

@@ -24,13 +24,13 @@ pub fn is_openai_compatible_path(raw_path: &str) -> bool {
 }
 
 /// 统一格式化入口：对 OpenAI 兼容路由自动转换响应格式。
-/// fallback_id: 当响应体解析不到 task_id 时的兜底 ID（轮询场景传入已知的 task_id）
-pub async fn apply_format(
-    _pool: &sqlx::PgPool,
+/// - `is_poll`: true=异步轮询/结案（必须带正确终态 status）；false=同步或异步 POST
+/// - `fallback_id`: 轮询缺 id 时兜底；同步成功时可写入 id；不用于伪造 POST pending
+pub fn apply_format(
     raw_path: &str,
     category: &str,
     raw_response: &str,
-    is_async_submit: bool,
+    is_poll: bool,
     fallback_id: Option<&str>,
 ) -> String {
     // 仅对 OpenAI 兼容路由（/v1/...）启用格式转换
@@ -38,15 +38,14 @@ pub async fn apply_format(
         return raw_response.to_string();
     }
 
-    format_openai(category, raw_response, is_async_submit, fallback_id)
+    format_openai(category, raw_response, is_poll, fallback_id)
 }
 
 /// OpenAI 格式化核心逻辑
-/// fallback_id: 当 find_id 返回空时的兜底 ID（如即梦轮询响应不含 task_id）
 pub fn format_openai(
     category: &str,
     raw: &str,
-    is_async_submit: bool,
+    is_poll: bool,
     fallback_id: Option<&str>,
 ) -> String {
     let v: Value = match serde_json::from_str(raw) {
@@ -54,12 +53,17 @@ pub fn format_openai(
         Err(_) => return raw.to_string(),
     };
 
-    // 上游业务错误 → 标准 OpenAI（门禁仅在 format_as_openai_error 内判一次）
+    // 异步轮询/结案：一律 poll 骨架（正确 status；error+success → failed）
+    if is_poll {
+        return build_openai_poll(category, &v, fallback_id);
+    }
+
+    // 同步 / 异步 POST：业务错误 → 纯 error（无 status）
     if let Some(formatted) = format_as_openai_error(&v) {
         return formatted;
     }
 
-    // 上游已是 OpenAI 格式（有 created + data 数组且无 APIMart code 字段）→ 透传
+    // 上游已是 OpenAI 同步成功体 → 透传
     if v.get("created").is_some()
         && v.get("data").and_then(|d| d.as_array()).is_some()
         && v.get("code").is_none()
@@ -67,32 +71,18 @@ pub fn format_openai(
         return raw.to_string();
     }
 
-    // 异步提交
-    if is_async_submit {
-        let id = find_id(&v);
-        // find_id 为空时使用调用方传入的 fallback_id 兜底
-        let effective_id = if id.is_empty() {
-            fallback_id.unwrap_or_default().to_string()
-        } else {
-            id
-        };
-        if !effective_id.is_empty() {
-            return build_openai_submit(category, &v, &effective_id);
-        }
-    }
-
-    // 含异步任务字段 → 轮询结果
-    if has_task_fields(&v) {
-        return build_openai_poll(category, &v, fallback_id);
-    }
-
-    // 同步结果：无异步任务字段且有媒体数据
+    // 同步结果：有媒体（无 status）
     let urls = find_urls(&v);
     if !urls.is_empty() {
         return build_openai_sync(category, &v, urls, fallback_id);
     }
 
-    // 其他情况（如错误响应）→ 原样透传，避免包装为假的 200 成功
+    // 异步 POST 成功：仅当上游响应自身带 task_id（勿用 log fallback 冒充 pending）
+    let id = find_id(&v);
+    if !id.is_empty() {
+        return build_openai_submit(category, &v, &id);
+    }
+
     raw.to_string()
 }
 
@@ -109,7 +99,7 @@ pub fn find_id(v: &Value) -> String {
         .or_else(|| v.pointer("/data/task_id"))
         .or_else(|| v.pointer("/data/id"))
         .or_else(|| v.pointer("/data/0/task_id"))
-        .or_else(|| v.pointer("/data/0/id"))
+        .or_else(|| v.pointer("/data/0/id")) // 可灵 3.0 按任务ID查询: data[].id
         .or_else(|| v.pointer("/output/task_id"))
         .or_else(|| v.pointer("/data/task/id"))
         .or_else(|| v.pointer("/Response/TaskId"))
@@ -126,12 +116,11 @@ pub fn find_id(v: &Value) -> String {
 
     if id.is_empty() {
         if let Some(resp) = v.get("Response") {
-            if let Some(task_type) = resp.get("TaskType").and_then(|t| t.as_str()) {
-                if let Some(task) = resp.get(task_type) {
-                    if let Some(val) = task.get("TaskId").and_then(|val| val.as_str()) {
-                        id = val.to_string();
-                    }
-                }
+            if let Some(val) = tencent_aigc_task(resp)
+                .and_then(|task| task.get("TaskId"))
+                .and_then(|val| val.as_str())
+            {
+                id = val.to_string();
             }
         }
     }
@@ -150,51 +139,73 @@ pub fn extract_async_task_id(v: &Value) -> String {
     }
 }
 
-// ── 任务状态字段检测 ──
-fn has_task_fields(v: &Value) -> bool {
-    v.get("status").is_some()
-        || v.get("task_status").is_some()
-        || v.get("task_id").is_some()
-        || v.pointer("/task/status").is_some() // MiniMax H3: 状态嵌套在 task 下
-        || v.pointer("/data/status").is_some()
-        || v.pointer("/data/task_status").is_some()
-        || v.pointer("/data/0/status").is_some()
-        || v.pointer("/data/0/task_id").is_some()
-        || v.pointer("/output/task_status").is_some()
-        || v.pointer("/Response/TaskId").is_some()
-        || v.pointer("/Response/Status").is_some()
+// ── 异步结案失败体 / 状态提取 ──
+
+/// 异步结案失败最小任务体（约定：HTTP 200 + status=failed + id + error）
+pub fn async_task_failed_body(task_id: &str, message: &str) -> String {
+    json!({
+        "id": task_id,
+        "status": "failed",
+        "error": {
+            "message": crate::relay::proxy::sanitize_error_message(message),
+            "type": "api_error"
+        }
+    })
+    .to_string()
+}
+
+/// 强制根节点对外任务号：写 `id`；若已有根 `task_id` 则同步（与 `find_id` 优先级对齐，避免仍提取到上游号）
+pub fn force_json_task_id(s: &mut String, task_id: &str) {
+    if task_id.is_empty() {
+        return;
+    }
+    if let Ok(mut v) = serde_json::from_str::<Value>(s) {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("id".to_string(), json!(task_id));
+            if obj.contains_key("task_id") {
+                obj.insert("task_id".to_string(), json!(task_id));
+            }
+            *s = serde_json::to_string(&v).unwrap_or_else(|_| s.clone());
+        }
+    }
+}
+
+/// 结案失败客户端体：OpenAI 兼容路径经 apply_format（轮询态），并固定对外 id
+pub fn format_async_task_failed(
+    raw_path: &str,
+    category: &str,
+    task_id: &str,
+    message: &str,
+) -> String {
+    let body = async_task_failed_body(task_id, message);
+    let mut s = apply_format(raw_path, category, &body, true, Some(task_id));
+    force_json_task_id(&mut s, task_id);
+    s
+}
+
+/// 腾讯云 AIGC 任务节点：TaskType 动态键优先，已知键兜底（ErrCode / Message / FileInfos 共用）
+fn tencent_aigc_task(resp: &Value) -> Option<&Value> {
+    resp.get("TaskType")
+        .and_then(|t| t.as_str())
+        .and_then(|tt| resp.get(tt))
+        .or_else(|| {
+            ["AigcVideoTask", "AigcImageTask"]
+                .iter()
+                .find_map(|k| resp.get(*k))
+        })
 }
 
 /// 从任意厂商响应 JSON 中提取原始状态字，并自动应用特定平台的校验（如腾讯云 ErrCode、即梦 code）
 pub fn extract_raw_status(v: &Value) -> String {
-    // 腾讯云 DescribeTaskDetail 特殊处理：Status="FINISH" 时校验任务节点的 ErrCode，非 0 视为 FAILED
+    // 腾讯云 DescribeTaskDetail：Status="FINISH" 时校验任务节点 ErrCode，非 0 视为 FAILED
     if let Some(resp) = v.get("Response") {
         if let Some(status) = resp.get("Status").and_then(|s| s.as_str()) {
             if status.eq_ignore_ascii_case("FINISH") {
-                const TASK_KEYS: &[&str] =
-                    &["AigcVideoTask", "AigcImageTask", "SceneAigcImageTask"];
-                let mut err_code = 0i64;
-                let mut found_err_code = false;
-                for key in TASK_KEYS {
-                    if let Some(task) = resp.get(*key) {
-                        if let Some(val) = task.get("ErrCode").and_then(|val| val.as_i64()) {
-                            err_code = val;
-                            found_err_code = true;
-                            break;
-                        }
-                    }
-                }
-                if !found_err_code {
-                    if let Some(task_type) = resp.get("TaskType").and_then(|t| t.as_str()) {
-                        if let Some(task) = resp.get(task_type) {
-                            if let Some(val) = task.get("ErrCode").and_then(|val| val.as_i64()) {
-                                err_code = val;
-                                found_err_code = true;
-                            }
-                        }
-                    }
-                }
-                if found_err_code && err_code != 0 {
+                if tencent_aigc_task(resp)
+                    .and_then(|t| t.get("ErrCode"))
+                    .and_then(|c| c.as_i64())
+                    .is_some_and(|c| c != 0)
+                {
                     return "FAILED".to_string();
                 }
             }
@@ -202,7 +213,7 @@ pub fn extract_raw_status(v: &Value) -> String {
         }
     }
 
-    // 即梦AI特殊处理：data.status="done" 时需检查外层 code。10000 为成功，否则失败。
+    // 即梦AI：data.status="done" 时需检查外层 code。10000 为成功，否则失败。
     if let Some(status) = v.pointer("/data/status").and_then(|s| s.as_str()) {
         if status == "done" {
             let code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
@@ -219,7 +230,7 @@ pub fn extract_raw_status(v: &Value) -> String {
         .or_else(|| v.pointer("/task/status")) // MiniMax H3 v2: { task: { status, content } }
         .or_else(|| v.pointer("/data/status"))
         .or_else(|| v.pointer("/data/task_status"))
-        .or_else(|| v.pointer("/data/0/status"))
+        .or_else(|| v.pointer("/data/0/status")) // 可灵 3.0: data[].status
         .or_else(|| v.pointer("/data/task/status"))
         .or_else(|| v.pointer("/final_result/status"))
         .or_else(|| v.pointer("/output/task_status"))
@@ -243,26 +254,34 @@ pub fn parse_raw_status_to_standard(raw: &str) -> &'static str {
     }
 }
 
-// ── 状态归一化 ──
-fn find_status(v: &Value) -> String {
-    let raw = extract_raw_status(v);
-    parse_raw_status_to_standard(&raw).to_string()
+/// JSON 体（或已格式化串）是否已是标准 `status=failed`
+pub fn is_failed_task_status(raw: &str) -> bool {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .is_some_and(|v| parse_raw_status_to_standard(&extract_raw_status(&v)) == "failed")
 }
 
 /// URL 提取：优先从标准字段路径直接提取，递归扫描兜底（供 tos_persist 复用）
 pub fn find_urls(v: &Value) -> Vec<String> {
     let mut urls: Vec<String> = Vec::new();
 
-    // 1. OpenAI 标准: data[].url
+    // 1. OpenAI: data[].url；可灵 3.0: data[].outputs[].url
     if let Some(arr) = v.get("data").and_then(|d| d.as_array()) {
         for item in arr {
             if let Some(u) = item.get("url").and_then(|u| u.as_str()) {
                 push_unique(&mut urls, u);
             }
+            if let Some(outputs) = item.get("outputs").and_then(|a| a.as_array()) {
+                for out in outputs {
+                    if let Some(u) = out.get("url").and_then(|u| u.as_str()) {
+                        push_unique(&mut urls, u);
+                    }
+                }
+            }
         }
     }
 
-    // 2. 可灵: data.task_result.images/videos[].url 或 data.task.task_result.images/videos[].url
+    // 2. 可灵旧协议: data.task_result.images/videos[].url
     for path in &[
         "/data/task_result/images",
         "/data/task_result/videos",
@@ -278,7 +297,7 @@ pub fn find_urls(v: &Value) -> Vec<String> {
         }
     }
 
-    // 即梦AI: data.image_urls[] (字符串数组，非对象数组)
+    // 即梦AI / MiniMax: data.image_urls[] (字符串数组，非对象数组)
     if let Some(arr) = v.pointer("/data/image_urls").and_then(|a| a.as_array()) {
         for item in arr {
             if let Some(u) = item.as_str() {
@@ -287,15 +306,21 @@ pub fn find_urls(v: &Value) -> Vec<String> {
         }
     }
 
-    // 即梦AI: data.binary_data_base64[] (base64 数组，return_url=false 时返回，与 image_urls 互斥)
+    // 即梦 binary_data_base64 / MiniMax image_base64（与 image_urls 互斥）
     if urls.is_empty() {
-        if let Some(arr) = v
-            .pointer("/data/binary_data_base64")
-            .and_then(|a| a.as_array())
-        {
-            for item in arr {
-                if let Some(b64) = item.as_str() {
-                    push_unique(&mut urls, &format!("data:image/png;base64,{}", b64));
+        for path in ["/data/binary_data_base64", "/data/image_base64"] {
+            if let Some(arr) = v.pointer(path).and_then(|a| a.as_array()) {
+                for item in arr {
+                    if let Some(b64) = item.as_str().filter(|s| !s.is_empty()) {
+                        if b64.starts_with("data:") {
+                            push_unique(&mut urls, b64);
+                        } else {
+                            push_unique(&mut urls, &format!("data:image/png;base64,{}", b64));
+                        }
+                    }
+                }
+                if !urls.is_empty() {
+                    break;
                 }
             }
         }
@@ -450,33 +475,15 @@ pub fn find_urls(v: &Value) -> Vec<String> {
 
     // 6b. 腾讯云 VOD / 混元 AIGC: Response.{TaskType}.Output.FileInfos[].FileUrl / Url
     if let Some(resp) = v.get("Response") {
-        const TASK_KEYS: &[&str] = &["AigcVideoTask", "AigcImageTask", "SceneAigcImageTask"];
-        for key in TASK_KEYS {
-            if let Some(task) = resp.get(*key) {
-                if let Some(arr) = task.pointer("/Output/FileInfos").and_then(|a| a.as_array()) {
-                    for item in arr {
-                        if let Some(u) = item
-                            .get("FileUrl")
-                            .or_else(|| item.get("Url"))
-                            .and_then(|u| u.as_str())
-                        {
-                            push_unique(&mut urls, u);
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(task_type) = resp.get("TaskType").and_then(|t| t.as_str()) {
-            if let Some(task) = resp.get(task_type) {
-                if let Some(arr) = task.pointer("/Output/FileInfos").and_then(|a| a.as_array()) {
-                    for item in arr {
-                        if let Some(u) = item
-                            .get("FileUrl")
-                            .or_else(|| item.get("Url"))
-                            .and_then(|u| u.as_str())
-                        {
-                            push_unique(&mut urls, u);
-                        }
+        if let Some(task) = tencent_aigc_task(resp) {
+            if let Some(arr) = task.pointer("/Output/FileInfos").and_then(|a| a.as_array()) {
+                for item in arr {
+                    if let Some(u) = item
+                        .get("FileUrl")
+                        .or_else(|| item.get("Url"))
+                        .and_then(|u| u.as_str())
+                    {
+                        push_unique(&mut urls, u);
                     }
                 }
             }
@@ -491,7 +498,7 @@ pub fn find_urls(v: &Value) -> Vec<String> {
     urls
 }
 
-pub fn push_unique(urls: &mut Vec<String>, url: &str) {
+fn push_unique(urls: &mut Vec<String>, url: &str) {
     if !url.is_empty() && !urls.iter().any(|u| u == url) {
         urls.push(url.to_string());
     }
@@ -571,6 +578,16 @@ fn find_ts(v: &Value, keys: &[&str]) -> i64 {
     0
 }
 
+/// 提交/轮询骨架共用的 created 时间戳
+fn resolve_created(v: &Value) -> i64 {
+    let ts = find_ts(v, &["created_at", "created", "submit_time"]);
+    if ts > 0 {
+        ts
+    } else {
+        chrono::Utc::now().timestamp()
+    }
+}
+
 fn to_json(v: &Value) -> String {
     serde_json::to_string(v).unwrap_or_default()
 }
@@ -587,10 +604,26 @@ fn openai_object(category: &str) -> &'static str {
     }
 }
 
-fn openai_status(v: &Value) -> String {
-    let s = find_status(v);
-    match s.as_str() {
-        "completed" | "failed" | "pending" | "in_progress" => s,
+fn openai_status(v: &Value, urls: &[String]) -> String {
+    let raw = extract_raw_status(v);
+    let std = if raw.is_empty() {
+        if is_upstream_error_response(v) {
+            return "failed".to_string();
+        }
+        if urls.is_empty() {
+            "in_progress"
+        } else {
+            "completed"
+        }
+    } else {
+        parse_raw_status_to_standard(&raw)
+    };
+    // error + 成功类 status → failed（计费安全）
+    if std == "completed" && is_upstream_error_response(v) {
+        return "failed".to_string();
+    }
+    match std {
+        s @ ("completed" | "failed" | "pending" | "in_progress") => s.to_string(),
         _ => "in_progress".to_string(),
     }
 }
@@ -664,48 +697,41 @@ fn build_openai_sync(
     to_json(&resp)
 }
 
-// ── 异步提交 ──
+// ── 异步 POST 提交 ack（带 status:pending；终态 status 只在轮询响应）──
 fn build_openai_submit(category: &str, v: &Value, id: &str) -> String {
-    let now = chrono::Utc::now().timestamp();
-    let created = find_ts(v, &["created_at", "created", "submit_time"]);
     to_json(&json!({
         "id": id,
         "object": openai_object(category),
         "status": "pending",
-        "created": if created > 0 { created } else { now }
+        "created": resolve_created(v)
     }))
 }
 
 // ── 异步轮询 ──
-/// fallback_id: 当 find_id 解析不到 task_id 时的兜底 ID（如即梦轮询响应不含 task_id）
+/// fallback_id: 客户端轮询钥匙（path / logs.task_id）；优先于上游体内 id（级联 cgt 等）
 fn build_openai_poll(category: &str, v: &Value, fallback_id: Option<&str>) -> String {
-    let status = openai_status(v);
-    let id = find_id(v);
-    // 即梦等厂商轮询响应不含 task_id，使用调用方已知的任务 ID 兜底
-    let id = if id.is_empty() {
-        fallback_id.unwrap_or_default().to_string()
-    } else {
-        id
-    };
-    let created = find_ts(v, &["created_at", "created", "submit_time"]);
-    let now = chrono::Utc::now().timestamp();
+    let urls = find_urls(v);
+    let status = openai_status(v, &urls);
+    let id = fallback_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| find_id(v));
 
     let mut resp = json!({
         "id": id,
         "object": openai_object(category),
         "status": status,
-        "created": if created > 0 { created } else { now }
+        "created": resolve_created(v)
     });
 
     if status == "completed" {
-        let urls = find_urls(v);
         if !urls.is_empty() {
             let extra = scan_extra_metadata(v);
             let items: Vec<Value> = urls
                 .iter()
                 .map(|u| {
                     let mut item = build_data_item(u);
-                    // 注入厂商附加重要元数据（last_frame_url、cover_url）
                     for (k, ev) in &extra {
                         item[k] = ev.clone();
                     }
@@ -718,8 +744,7 @@ fn build_openai_poll(category: &str, v: &Value, fallback_id: Option<&str>) -> St
     }
 
     if status == "failed" {
-        let msg = extract_error_message(v);
-        resp["error"] = json!({"message": crate::relay::proxy::sanitize_error_message(&msg)});
+        resp["error"] = openai_error_object(v);
     }
 
     to_json(&resp)
@@ -732,7 +757,9 @@ pub fn extract_error_message_from_value(v: &Value) -> Option<String> {
         .or_else(|| v.pointer("/error/message"))
         .or_else(|| v.pointer("/error"))
         .or_else(|| v.pointer("/task/error/message")) // MiniMax H3: { task: { error: { message } } }
+        .or_else(|| v.pointer("/base_resp/status_msg")) // MiniMax 图片/部分接口
         .or_else(|| v.pointer("/data/task/task_status_msg"))
+        .or_else(|| v.pointer("/data/0/message")) // 可灵 3.0 失败说明
         .or_else(|| v.pointer("/data/errorMsg"))
         .or_else(|| v.get("message"))
         .or_else(|| v.pointer("/output/message"))
@@ -757,19 +784,9 @@ pub fn extract_error_message_from_value(v: &Value) -> Option<String> {
         })
 }
 
-/// 腾讯云 VOD/混元任务节点 Message：TaskType 动态路径优先，硬编码键兜底
+/// 腾讯云 VOD/混元任务节点 Message：复用 [`tencent_aigc_task`]
 fn tencent_task_message(v: &Value) -> Option<&Value> {
-    let resp = v.get("Response")?;
-    let task = resp
-        .get("TaskType")
-        .and_then(|t| t.as_str())
-        .and_then(|tt| resp.get(tt))
-        .or_else(|| {
-            ["AigcVideoTask", "AigcImageTask"]
-                .iter()
-                .find_map(|k| resp.get(*k))
-        })?;
-    let msg = task.get("Message")?;
+    let msg = tencent_aigc_task(v.get("Response")?)?.get("Message")?;
     match msg.as_str() {
         Some(s) if !s.is_empty() => Some(msg),
         _ => None,
@@ -790,6 +807,7 @@ pub fn extract_error_code_from_value(v: &Value) -> Option<String> {
     v.pointer("/error/code")
         .or_else(|| v.pointer("/data/error/code"))
         .or_else(|| v.pointer("/task/error/code")) // MiniMax H3
+        .or_else(|| v.pointer("/base_resp/status_code")) // MiniMax 图片/部分接口
         .or_else(|| v.pointer("/Response/Error/Code"))
         .or_else(|| v.pointer("/ResponseMetadata/Error/Code"))
         // 方舟/智算等扁平错误：{"ErrorCode":"PERMISSION_ERROR","ErrorMessage":"..."}
@@ -802,18 +820,21 @@ pub fn extract_error_code_from_value(v: &Value) -> Option<String> {
         })
 }
 
+/// 尾帧图：`content.last_frame_url` 或顶层 `last_frame_url`（火山方舟等）
+pub fn find_last_frame_url(v: &Value) -> Option<&str> {
+    v.pointer("/content/last_frame_url")
+        .or_else(|| v.get("last_frame_url"))
+        .and_then(|u| u.as_str())
+        .filter(|s| !s.is_empty())
+}
+
 /// 从上游响应中扫描厂商特有的重要附加字段
 fn scan_extra_metadata(v: &Value) -> serde_json::Map<String, Value> {
     let mut meta = serde_json::Map::new();
-    // last_frame_url: 火山方舟视频生成的尾帧图片
-    let last_frame = v
-        .pointer("/content/last_frame_url")
-        .or_else(|| v.get("last_frame_url"))
-        .and_then(|u| u.as_str());
-    if let Some(url) = last_frame {
+    if let Some(url) = find_last_frame_url(v) {
         meta.insert("last_frame_url".to_string(), json!(url));
     }
-    // cover_url / thumbnail_url: 封面图（可灵、火山等）
+    // cover_url / thumbnail_url: 封面图（可灵旧协议、火山等）
     let cover = v
         .pointer("/data/task_result/videos/0/cover_url")
         .or_else(|| v.pointer("/output/thumbnail_url"))
@@ -886,18 +907,17 @@ pub fn is_upstream_error_response(v: &Value) -> bool {
             return true;
         }
     }
+    // 7. MiniMax: base_resp.status_code != 0（图片等同步接口 HTTP 仍可能 200）
+    if let Some(code) = v.pointer("/base_resp/status_code").and_then(|c| c.as_i64()) {
+        if code != 0 {
+            return true;
+        }
+    }
     false
 }
 
-/// 将上游错误 Value 转为标准 OpenAI error JSON：`{"error":{"message","type","code"}}`。
-/// - 厂商扁平错误（ErrorCode 等）→ 转换
-/// - 已有 `error.message` 但夹带 `success` / 数字 type 等 → 规范化
-/// - 非错误体 → `None`（调用方透传原文）
-pub fn format_as_openai_error(v: &Value) -> Option<String> {
-    if !is_upstream_error_response(v) {
-        return None;
-    }
-
+/// 标准 OpenAI `error` 对象（poll failed / 纯 error 体共用）
+fn openai_error_object(v: &Value) -> Value {
     // 优先 OpenAI 路径 message，避免 extract 抢先命中 /data/error/message
     let msg = v
         .pointer("/error/message")
@@ -928,11 +948,20 @@ pub fn format_as_openai_error(v: &Value) -> Option<String> {
         raw_type
     };
 
-    Some(to_json(&json!({
-        "error": {
-            "message": crate::relay::proxy::sanitize_error_message(&msg),
-            "type": err_type,
-            "code": code
-        }
-    })))
+    json!({
+        "message": crate::relay::proxy::sanitize_error_message(&msg),
+        "type": err_type,
+        "code": code
+    })
+}
+
+/// 将上游错误 Value 转为标准 OpenAI error JSON：`{"error":{"message","type","code"}}`。
+/// - 厂商扁平错误（ErrorCode 等）→ 转换
+/// - 已有 `error.message` 但夹带 `success` / 数字 type 等 → 规范化
+/// - 非错误体 → `None`（调用方透传原文）
+pub fn format_as_openai_error(v: &Value) -> Option<String> {
+    if !is_upstream_error_response(v) {
+        return None;
+    }
+    Some(to_json(&json!({ "error": openai_error_object(v) })))
 }

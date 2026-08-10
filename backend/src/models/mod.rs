@@ -20,6 +20,7 @@ pub mod settings;
 pub mod task_log;
 pub mod upstream;
 pub mod user;
+pub mod user_kyc;
 pub mod user_level;
 pub mod verification;
 
@@ -36,6 +37,7 @@ pub use settings::*;
 pub use task_log::*;
 pub use upstream::*;
 pub use user::*;
+pub use user_kyc::*;
 pub use user_level::*;
 
 pub use api_token::ApiToken;

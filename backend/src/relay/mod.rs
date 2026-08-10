@@ -20,6 +20,7 @@ pub mod router;
 pub mod stream;
 pub mod task;
 pub mod token_quota;
+pub mod upstream_headers;
 pub mod url_utils;
 pub mod usage_extractor;
 pub mod usage_stats;
@@ -55,9 +56,22 @@ pub mod model_list;
 pub mod response_formatter;
 pub mod tos_persist;
 
+use std::future::Future;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
+
+/// 连接保护：独立 task 执行 `fut`，结果经 oneshot 回传；客户端断开不影响 fut 跑完
+#[inline]
+pub fn spawn_protected<T: Send + 'static>(
+    fut: impl Future<Output = T> + Send + 'static,
+) -> tokio::sync::oneshot::Receiver<T> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _ = tx.send(fut.await);
+    });
+    rx
+}
 
 struct ConfigCache {
     pub timezone: String,
@@ -152,7 +166,7 @@ pub async fn calculate_relay_cost(
     model_name: &str,
     resolved_model: &str,
 ) -> (f64, String) {
-    let (timezone, is_ha_enabled) = get_cached_config(state).await;
+    let (_, is_ha_enabled) = get_cached_config(state).await;
 
     let umd = db_model
         .and_then(|m| crate::relay::proxy::parse_user_model_discount(&ctx.model_discounts, &m.mid));
@@ -178,16 +192,11 @@ pub async fn calculate_relay_cost(
     let discount_replace = format!("{:.2}倍率({})", applied_discount, discount_source);
     detail = detail.replace(&discount_target, &discount_replace);
 
-    // 后置时间段倍率折算（保留原单价，在结算最终价格后应用时间倍率）
+    // 后置时间段倍率：优先 billing_features 快照（异步结算），否则用请求开始锁定的 applied_multiplier
     if let Some(rule) = db_rule {
-        let time_multiplier = rule.get_current_multiplier(&timezone);
-        if (time_multiplier - 1.0).abs() > 0.00001 {
-            if !rule.is_multiplier_applied {
-                cost *= time_multiplier;
-                rule.is_multiplier_applied = true; // 状态更新防重复计算
-            }
-            detail = format!("{} * {:.2}倍(时段倍率)", detail, time_multiplier);
-        }
+        let (new_cost, new_detail) = apply_locked_time_multiplier(cost, detail, rule, features);
+        cost = new_cost;
+        detail = new_detail;
     }
     if is_ha_enabled && channel.rate != 1.0 {
         detail = format!("{} * {:.2}倍(渠道倍率)", detail, channel.rate);
@@ -199,7 +208,32 @@ pub async fn calculate_relay_cost(
     (crate::money::round_money(cost), detail)
 }
 
+/// 应用已锁定的峰谷时段倍率（请求开始 / billing_features 快照），防重复乘价与重复明细
+pub fn apply_locked_time_multiplier(
+    mut cost: f64,
+    mut detail: String,
+    rule: &mut crate::models::BillingRule,
+    features: &usage_extractor::ExtractedFeatures,
+) -> (f64, String) {
+    // 快照优先（异步任务结算），否则用请求开始时写入的 applied_multiplier
+    let time_multiplier = features.time_multiplier.unwrap_or(rule.applied_multiplier);
+    rule.applied_multiplier = time_multiplier;
+
+    if (time_multiplier - 1.0).abs() <= 0.00001 {
+        return (cost, detail);
+    }
+    if rule.is_multiplier_applied {
+        // 已乘过价：不再改金额，也不再追加明细文案
+        return (cost, detail);
+    }
+    cost *= time_multiplier;
+    rule.is_multiplier_applied = true;
+    detail = format!("{} * {:.2}倍(时段倍率)", detail, time_multiplier);
+    (cost, detail)
+}
+
 /// 统一计费逻辑（返回金额已 round 到 6 位小数）
+/// 若 `db_rule.applied_multiplier` 已在请求开始锁定（或 features.time_multiplier 有快照），会后置乘时段倍率
 pub fn compute_cost(
     db_model: Option<&crate::models::Model>,
     db_rule: Option<&crate::models::BillingRule>,
@@ -208,6 +242,16 @@ pub fn compute_cost(
     features: &usage_extractor::ExtractedFeatures,
 ) -> (f64, String) {
     let (cost, detail) = compute_cost_raw(db_model, db_rule, usage, discount, features);
+    let (cost, detail) = if let Some(rule) = db_rule {
+        let tm = features.time_multiplier.unwrap_or(rule.applied_multiplier);
+        if (tm - 1.0).abs() > 0.00001 {
+            (cost * tm, format!("{} * {:.2}倍(时段倍率)", detail, tm))
+        } else {
+            (cost, detail)
+        }
+    } else {
+        (cost, detail)
+    };
     (crate::money::round_money(cost), detail)
 }
 
@@ -560,13 +604,13 @@ fn compute_cost_raw(
                 count = chars / 10000.0;
                 detail_desc = format!("按字符计费({}字符)", chars as i32);
             } else if rule.billing_rule == "volc_seedream_pro" {
-                // 火山 Seedream Pro 计费逻辑：
-                // 1. 输入图：prompt_rate 存储单张价格，超 1 张计费（首张免费）
-                // 2. 输出图：通过 pricing_tiers 数组定义总像素（万像素）不同阶梯的单张价格
+                // 火山 Seedream Pro：输入图超额（free_image_count，缺省 1=首张免费）
+                // + 输出图按总像素万阶梯单价
 
                 // 1) 输入图费：
+                let free_images = free_image_count_from_ext(&rule.extended_config, 1);
                 let input_images = features.image_ref_count.unwrap_or(0);
-                let billable_inputs = (input_images - 1).max(0);
+                let billable_inputs = (input_images - free_images).max(0);
                 let input_rate = rule.prompt_rate;
                 let input_cost = billable_inputs as f64 * input_rate;
 
@@ -638,8 +682,15 @@ fn compute_cost_raw(
                 let total_cost = (input_cost + output_cost) * discount;
 
                 let detail = format!(
-                    "火山SeedreamPro计费 -> (输入图: {}张[扣除首张首免]*{}元/张 + 输出图: {}张*[总像素: {:.2}万, {}])*{:.2}倍率",
-                    billable_inputs, input_rate, image_count, total_pixels_wan, match_desc, discount
+                    "火山SeedreamPro计费 -> (输入图超额:{}张(共{}张,免费{}张)*{}元/张 + 输出图: {}张*[总像素: {:.2}万, {}])*{:.2}倍率",
+                    billable_inputs,
+                    input_images,
+                    free_images,
+                    input_rate,
+                    image_count,
+                    total_pixels_wan,
+                    match_desc,
+                    discount
                 );
                 return (total_cost, detail);
             }
@@ -704,20 +755,12 @@ fn compute_cost_raw(
                     detail_desc = desc;
                 }
             } else if rule.billing_rule == "minimax_h3" {
-                // MiniMax H3：usage.total_seconds（含输入+输出参考视频秒）× 分辨率秒单价
-                // + max(usage.image_count - free_image_count, 0) × 输入图单价
+                // 分辨率秒单价 × total_seconds + 输入图超额（free_image_count，缺省 5）
                 let (r, desc) = match_res_rate(features.resolution.as_deref(), true);
                 rate = r;
-                detail_desc = format!("MiniMax H3 {}", desc);
+                detail_desc = format!("视频秒价+输入图 {}", desc);
 
-                let free_images = serde_json::from_str::<serde_json::Value>(&rule.extended_config)
-                    .ok()
-                    .and_then(|ext| {
-                        ext.get("free_image_count")
-                            .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
-                    })
-                    .unwrap_or(5)
-                    .max(0) as i32;
+                let free_images = free_image_count_from_ext(&rule.extended_config, 5);
                 let input_images = features.image_ref_count.unwrap_or(0).max(0);
                 let billable_images = (input_images - free_images).max(0);
                 let image_rate = rule.prompt_rate;
@@ -859,6 +902,7 @@ fn compute_cost_raw(
                     if let Some(ref m) = features.mode {
                         raw_mode = m;
                     } else if let Some(ref res) = features.resolution {
+                        // 新可灵无 mode，仅有 resolution（720p/1080p/…）时映射到查表键
                         let res_lower = res.to_lowercase();
                         if res_lower == "720p" {
                             mapped_mode = "std".to_string();
@@ -1568,6 +1612,18 @@ pub fn translate_billing_key(key: &str) -> String {
 /// 阶梯 enabled 缺省视为启用（与前端 Switch / RateDisplay 语义一致）
 pub(crate) fn default_tier_enabled() -> bool {
     true
+}
+
+/// 从 extended_config 读取输入图免费张数（缺省用 default，且不为负）
+fn free_image_count_from_ext(extended_config: &str, default: i32) -> i32 {
+    serde_json::from_str::<serde_json::Value>(extended_config)
+        .ok()
+        .and_then(|ext| {
+            ext.get("free_image_count")
+                .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+        })
+        .unwrap_or(default as i64)
+        .max(0) as i32
 }
 
 /// 将 size 参数统一为像素分辨率格式（小写 x 分隔）

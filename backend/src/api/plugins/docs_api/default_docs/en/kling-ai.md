@@ -1,6 +1,6 @@
 # Kling AI Native Protocol Guide
 
-Kling AI has gained widespread use due to its extremely high standard of video quality and motion control. The gateway has established dedicated Kling routing, fully aligned with the official Kling API.
+Kling-compatible paths on this platform. Use your platform API Key.
 
 ### 1. Video Model API
 * **Text-to-Video**: `/v1/videos/text2video` (`POST`)

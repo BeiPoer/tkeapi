@@ -9,10 +9,12 @@ use crate::models::{ApiToken, BillingRule, Channel, Model};
 use crate::AppState;
 use std::sync::Arc;
 
-use axum::response::{IntoResponse, Response};
+use axum::response::IntoResponse;
 use futures::StreamExt;
 use reqwest::Response as ReqwestResponse;
 use tokio::sync::mpsc;
+
+use super::upstream_headers;
 
 /// 流结束后统一结算：resolve_model → calculate_relay_cost → 可选 detail_extra → record_and_bill_inner
 async fn settle_after_stream(
@@ -82,6 +84,7 @@ async fn settle_after_stream(
         billing_model_hint: None,
         plugin_tag: None,
         db_model,
+        time_multiplier: db_rule.as_ref().map(|r| r.applied_multiplier),
     })
     .await;
 }
@@ -109,6 +112,7 @@ pub async fn handle_chat_stream(
     db_model: Option<Model>,
     mut db_rule: Option<BillingRule>,
 ) -> impl IntoResponse {
+    let upstream_hdrs = response.headers().clone();
     let (tx, rx) = mpsc::channel(100);
     let mut upstream_stream = response.bytes_stream();
 
@@ -221,12 +225,10 @@ pub async fn handle_chat_stream(
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
-    Response::builder()
-        .header("Content-Type", "text/event-stream")
-        .header("Cache-Control", "no-cache")
-        .header("Connection", "keep-alive")
-        .body(axum::body::Body::from_stream(stream))
-        .unwrap()
+    upstream_headers::sse_with_upstream_headers(
+        &upstream_hdrs,
+        axum::body::Body::from_stream(stream),
+    )
 }
 
 /// Responses API 流式处理：完全透传上游 SSE（event: + data: 格式），流结束后提取 usage 计费
@@ -249,6 +251,7 @@ pub async fn handle_responses_stream(
     db_model: Option<Model>,
     mut db_rule: Option<BillingRule>,
 ) -> impl IntoResponse {
+    let upstream_hdrs = response.headers().clone();
     let (tx, rx) = mpsc::channel(100);
     let mut upstream_stream = response.bytes_stream();
 
@@ -317,12 +320,10 @@ pub async fn handle_responses_stream(
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
-    Response::builder()
-        .header("Content-Type", "text/event-stream")
-        .header("Cache-Control", "no-cache")
-        .header("Connection", "keep-alive")
-        .body(axum::body::Body::from_stream(stream))
-        .unwrap()
+    upstream_headers::sse_with_upstream_headers(
+        &upstream_hdrs,
+        axum::body::Body::from_stream(stream),
+    )
 }
 
 // SSE 转换函数已迁移至 forward.rs 模块统一维护
@@ -348,6 +349,7 @@ pub async fn handle_image_stream(
     db_model: Option<Model>,
     mut db_rule: Option<BillingRule>,
 ) -> impl IntoResponse {
+    let upstream_hdrs = response.headers().clone();
     let (tx, rx) = mpsc::channel(100);
     let mut upstream_stream = response.bytes_stream();
 
@@ -409,12 +411,10 @@ pub async fn handle_image_stream(
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
-    Response::builder()
-        .header("Content-Type", "text/event-stream")
-        .header("Cache-Control", "no-cache")
-        .header("Connection", "keep-alive")
-        .body(axum::body::Body::from_stream(stream))
-        .unwrap()
+    upstream_headers::sse_with_upstream_headers(
+        &upstream_hdrs,
+        axum::body::Body::from_stream(stream),
+    )
 }
 
 /// 原生协议流式处理
@@ -440,6 +440,7 @@ pub async fn handle_native_stream(
     mut db_rule: Option<BillingRule>,
     hint_category: String,
 ) -> impl IntoResponse {
+    let upstream_hdrs = response.headers().clone();
     let (tx, rx) = mpsc::channel(100);
     let mut upstream_stream = response.bytes_stream();
 
@@ -530,10 +531,8 @@ pub async fn handle_native_stream(
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
-    Response::builder()
-        .header("Content-Type", "text/event-stream")
-        .header("Cache-Control", "no-cache")
-        .header("Connection", "keep-alive")
-        .body(axum::body::Body::from_stream(stream))
-        .unwrap()
+    upstream_headers::sse_with_upstream_headers(
+        &upstream_hdrs,
+        axum::body::Body::from_stream(stream),
+    )
 }

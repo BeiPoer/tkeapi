@@ -12,6 +12,29 @@ use crate::AppState;
 use rand::Rng;
 use std::sync::Arc;
 
+/// 同档加权随机：`weight` 越大被选概率越高；负权重按 0 计，合计 ≤0 时取首项。
+fn pick_weighted_by<T, F>(items: &[T], weight_of: F) -> &T
+where
+    F: Fn(&T) -> i32,
+{
+    debug_assert!(!items.is_empty());
+    let weight = |item: &T| weight_of(item).max(0);
+    let total_weight: i32 = items.iter().map(|i| weight(i)).sum();
+    if total_weight <= 0 {
+        return &items[0];
+    }
+    let mut rng = rand::rngs::OsRng;
+    let random_value = rng.gen_range(0..total_weight);
+    let mut current_sum = 0;
+    for item in items {
+        current_sum += weight(item);
+        if random_value < current_sum {
+            return item;
+        }
+    }
+    &items[0]
+}
+
 /// Select the best channel for a given model based on priority and load balancing.
 /// `allow_ha`: 是否允许选中高可用虚拟组（插件+令牌，见 `ha::policy`）。
 pub async fn select_channel(
@@ -141,7 +164,7 @@ pub async fn select_channel(
         .await
         .unwrap_or_default();
         for p in &presets {
-            if p.status != 1 || !p.has_available_quota(&now_day, &now_week, &now_month) {
+            if p.status != 1 || !p.has_available_quota(&tz_name, &now_week, &now_month) {
                 unusable_presets.insert(p.id);
             }
         }
@@ -203,7 +226,7 @@ pub async fn select_channel(
         return Err(AppError::NotFound(err_msg));
     }
 
-    // 物理渠加权选；HA 子渠：priority → weight → 绑定序（确定性）
+    // 物理渠 / HA 子渠：最高 priority 档内按 weight 比例随机分流
     // 顺序不变量：HA 子配注入并清 preset_id →（仅剩 preset 时）查 preset → 最后 volc
     let mut ch = loop {
         let highest_priority = channels[0].priority;
@@ -212,24 +235,7 @@ pub async fn select_channel(
             .take_while(|c| c.priority == highest_priority)
             .cloned()
             .collect();
-
-        let total_weight: i32 = top_tier.iter().map(|c| c.weight).sum();
-        let picked = if total_weight <= 0 {
-            top_tier[0].clone()
-        } else {
-            let mut rng = rand::rngs::OsRng;
-            let random_value = rng.gen_range(0..total_weight);
-            let mut current_sum = 0;
-            let mut selected = &top_tier[0];
-            for channel in &top_tier {
-                current_sum += channel.weight;
-                if random_value < current_sum {
-                    selected = channel;
-                    break;
-                }
-            }
-            selected.clone()
-        };
+        let picked = pick_weighted_by(&top_tier, |c| c.weight).clone();
 
         if picked.provider_type != "high_availability_group" {
             break picked;
@@ -272,7 +278,7 @@ pub async fn select_channel(
                     return false;
                 }
                 // 上游预设额度耗尽则不可选
-                sub_c.has_available_quota(&now_day, &now_week, &now_month)
+                sub_c.has_available_quota(&tz_name, &now_week, &now_month)
             })
             .collect();
 
@@ -287,20 +293,27 @@ pub async fn select_channel(
             continue;
         }
 
-        // 子渠：priority 高档优先；同档 weight 高者优先；再同则按绑定序（确定性，不随机）
-        let bind_idx = |id: i64| {
-            sub_channel_ids
-                .iter()
-                .position(|&x| x == id)
-                .unwrap_or(usize::MAX)
-        };
-        sub_configs.sort_by(|a, b| {
-            b.priority
-                .cmp(&a.priority)
-                .then_with(|| b.weight.cmp(&a.weight))
-                .then_with(|| bind_idx(a.id).cmp(&bind_idx(b.id)))
-        });
-        let selected_sub = &sub_configs[0];
+        // 子渠：最高 priority 档；同档按 weight 比例随机（绑定序仅作 weight≤0 时的兜底顺序）
+        let highest_sub_priority = sub_configs.iter().map(|c| c.priority).max().unwrap_or(0);
+        let top_subs: Vec<&_> = sub_channel_ids
+            .iter()
+            .filter_map(|&id| {
+                sub_configs
+                    .iter()
+                    .find(|c| c.id == id && c.priority == highest_sub_priority)
+            })
+            .collect();
+        if top_subs.is_empty() {
+            channels.retain(|c| c.id != group_id);
+            if channels.is_empty() {
+                return Err(AppError::NotFound(format!(
+                    "No available channels found for model {}",
+                    model
+                )));
+            }
+            continue;
+        }
+        let selected_sub = *pick_weighted_by(&top_subs, |c| c.weight);
 
         let mut resolved = picked;
         apply_ha_sub_mapped(&mut resolved, selected_sub);
@@ -319,17 +332,13 @@ pub async fn select_channel(
         .await
         {
             if preset.status != 1 {
-                tracing::warn!(
-                    "[SelectChannel] 预设已禁用 渠道={} 预设id={}",
-                    ch.id,
-                    pid
-                );
+                tracing::warn!("[SelectChannel] 预设已禁用 渠道={} 预设id={}", ch.id, pid);
                 return Err(AppError::NotFound(format!(
                     "上游渠道配置已禁用 (preset_id={})",
                     pid
                 )));
             }
-            tracing::debug!(
+            tracing::info!(
                 "[SelectChannel] 套用预设 渠道={} 子渠标识={:?} 预设id={} {} -> {}",
                 ch.id,
                 ch.group_aid,
@@ -339,7 +348,7 @@ pub async fn select_channel(
             );
             apply_config_base(&mut ch, &preset);
         } else {
-            tracing::debug!(
+            tracing::warn!(
                 "[SelectChannel] 预设缺失 渠道={} 子渠标识={:?} 预设id={}",
                 ch.id,
                 ch.group_aid,
@@ -373,11 +382,13 @@ fn apply_config_base(ch: &mut crate::models::Channel, cfg: &crate::models::Chann
     ch.yid = Some(cfg.yid.clone());
 }
 
-/// HA 子配注入：写 base/key/rate/yid/provider/group_aid，清 preset_id
+/// HA 子配注入：写 base/key/rate/yid/name/provider/group_aid，清 preset_id
+/// `name` 用子配名（内存态，供 ha_usage_logs）；父渠 DB 名不变，logs JOIN 仍显示组名
 #[inline]
 fn apply_ha_sub(ch: &mut crate::models::Channel, cfg: &crate::models::ChannelConfig) {
     let group_id = ch.id;
     apply_config_base(ch, cfg);
+    ch.name = cfg.name.clone();
     ch.provider_type = cfg.provider_type.clone();
     ch.group_aid = Some(format!("ha_group_{}_config_{}", group_id, cfg.id));
     ch.preset_id = None; // 防止后续父行 preset 覆盖子配

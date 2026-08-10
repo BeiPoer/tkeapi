@@ -11,7 +11,7 @@ Giao diện tạo hình ảnh của Gateway tương thích hoàn hảo với đ�
 | :--- | :--- | :--- | :--- |
 | `model` | `string` | Có | Tên mô hình tạo hình ảnh, ví dụ `dall-e-3` (OpenAI), `wanx-v1` (Alibaba Wanxiang), `seedream-5.0-lite` (Jimeng) |
 | `prompt` | `string` | Có | Câu lệnh gợi ý (prompt) dạng văn bản mô tả hình ảnh |
-| `n` | `integer` | Không | Số lượng hình ảnh mong muốn tạo ra (mặc định là `1`). Gateway sẽ tự động chuyển đổi sang tham số tương ứng của kênh thượng nguồn gốc |
+| `n` | `integer` | Không | Số lượng hình ảnh mong muốn tạo ra (mặc định là `1`).  |
 | `size` | `string` | Không | Độ phân giải (ví dụ `1024x1024`). Hệ thống sẽ tự động chuyển dịch kích thước sang thông số tiêu chuẩn được hỗ trợ bởi nhà cung cấp tương ứng |
 | `watermark` | `boolean` | Không | Có thêm hình mờ (watermark) vào ảnh hay không (hỗ trợ một số kênh như Volcengine, Alibaba Bailian) |
 | `web_search` | `boolean` | Không | Bật tìm kiếm web (boolean tương thích OpenAI, mặc định `false`). Gateway sẽ tự chuyển đổi cho Volcengine Seedream, v.v. |

@@ -11,7 +11,7 @@ import AppSwitch from '../../components/AppSwitch';
 import MobileCardList, { MobileCard, CardRow, CardActions } from '../../components/MobileCardList';
 import { PlusOutlined, EditOutlined, DeleteOutlined, CopyOutlined, SyncOutlined, EyeOutlined, EyeInvisibleOutlined, KeyOutlined, CheckOutlined, ArrowLeftOutlined, DollarOutlined, BarChartOutlined, EllipsisOutlined, PieChartOutlined, InfoCircleOutlined, FileTextOutlined, ClearOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
 import { useThemeStore } from '../../store/theme';
 import useSettingsStore from '../../store/settings';
@@ -20,16 +20,19 @@ import type { ApiToken } from '../../types';
 import dayjs from 'dayjs';
 import { getPeriodicUsed, getQuotaRefreshText, hasPeriodicLimits } from './quotaUtils';
 import { resolveTimedisplay } from '../../utils/timedisplay';
+import { shouldBlockTokenCreate, tokenBindBlockMessage } from '../../utils/bindPolicy';
 
 const { Title, Text } = Typography;
 const { useBreakpoint } = Grid;
 
 const Tokens: React.FC = () => {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const { token: themeToken } = theme.useToken();
   const { themeMode } = useThemeStore();
   const { settings, fetchSettings } = useSettingsStore();
-  const userTimezone = useAuthStore((s) => s.user?.timezone);
+  const user = useAuthStore((s) => s.user);
+  const userTimezone = user?.timezone;
   // 与后端令牌热路径一致：用户 timedisplay（个人时区 > 站点默认）
   const quotaTz = (userTimezone?.trim() || resolveTimedisplay() || settings?.site?.default_timezone || 'Asia/Shanghai');
   const isLight = themeMode === 'light';
@@ -211,11 +214,21 @@ const Tokens: React.FC = () => {
   };
 
   const handleAdd = () => {
+    if (shouldBlockTokenCreate(settings?.registration, user)) {
+      Modal.confirm({
+        title: '需要完成账号绑定',
+        content: tokenBindBlockMessage(settings?.registration),
+        okText: '去绑定',
+        cancelText: '取消',
+        onOk: () => navigate('/profile'),
+      });
+      return;
+    }
     setEditingToken(null);
     setSaving(false);
     form.resetFields();
     form.setFieldsValue({
-      high_availability: false,
+      high_availability: true,
       daily_quota_limit: -1,
       weekly_quota_limit: -1,
       monthly_quota_limit: -1,

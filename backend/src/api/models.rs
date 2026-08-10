@@ -153,7 +153,12 @@ pub async fn create_model(
 
     let pre_deduction = req.pre_deduction.unwrap_or(0.0);
     let site_discount = req.site_discount.unwrap_or(1.0);
-    let site_discount_enabled = req.site_discount_enabled.unwrap_or(0);
+    let site_discount_enabled = req.site_discount_enabled.unwrap_or(1);
+    if site_discount_enabled == 1 && site_discount <= 0.0 {
+        return Err(crate::error::AppError::BadRequest(
+            "开启折扣限价时，折扣限价倍率必须大于 0".to_string(),
+        ));
+    }
     let global_discount = req.global_discount.unwrap_or(1.0);
     let global_discount_enabled = req.global_discount_enabled.unwrap_or(0);
 
@@ -428,6 +433,11 @@ pub async fn update_model(
         .await?;
     }
     if let Some(sd) = req.site_discount {
+        if sd <= 0.0 {
+            return Err(crate::error::AppError::BadRequest(
+                "折扣限价倍率必须大于 0".to_string(),
+            ));
+        }
         sqlx::query(
             &state
                 .db
@@ -439,6 +449,25 @@ pub async fn update_model(
         .await?;
     }
     if let Some(sde) = req.site_discount_enabled {
+        if sde == 1 {
+            let current_sd: f64 = match req.site_discount {
+                Some(v) => v,
+                None => sqlx::query_scalar(
+                    &state
+                        .db
+                        .format_query("SELECT site_discount FROM models WHERE id = ?"),
+                )
+                .bind(id)
+                .fetch_optional(&state.db.pool)
+                .await?
+                .unwrap_or(1.0),
+            };
+            if current_sd <= 0.0 {
+                return Err(crate::error::AppError::BadRequest(
+                    "开启折扣限价时，折扣限价倍率必须大于 0".to_string(),
+                ));
+            }
+        }
         sqlx::query(
             &state
                 .db

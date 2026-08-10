@@ -154,9 +154,9 @@ pub async fn get_model_billing_rule(
     .await
     .unwrap_or(None)?;
 
-    // 使用缓存时区计算并赋能运行时 applied_multiplier，但不改变实体内的单价，实现安全的后置计费
+    // 请求开始时刻锁定峰谷倍率到 applied_multiplier（结算时不再按当前时钟重算）
     let (default_site_tz, _) = super::get_cached_config(state).await;
-    rule.applied_multiplier = rule.get_current_multiplier(&default_site_tz);
+    rule.lock_time_multiplier(&default_site_tz);
 
     Some(rule)
 }
@@ -1009,12 +1009,14 @@ pub struct BillRecord<'a> {
     pub billing_model_hint: Option<&'a str>,
     pub plugin_tag: Option<&'a str>,
     pub db_model: Option<&'a crate::models::Model>,
+    /// 请求开始已锁定的峰谷倍率；`None` 时由本函数按当前规则快照写入 billing_features
+    pub time_multiplier: Option<f64>,
 }
 
 /// 计费记录统一入口
 /// 【一条日志原则】pending_log_id 有值时 UPDATE 预记录行，无值时 INSERT 新行
 /// billing_model_hint: 插件解析后的实际模型（用于正确查询 billing_pid 等元信息），普通场景传 None
-/// plugin_tag: INSERT 时写入库；UPDATE 不覆盖库值，但可传入以补齐 billing_features（级联 version/resolution）
+/// plugin_tag: INSERT 时写入；UPDATE 时非空则覆盖（级联需回写 s1_task_id）
 /// db_model: 调用方已查询的 Model 记录，传入后 resolve_model_meta 走主键精确定位，避免重复查库
 /// channel: 已水合渠道（含最终 base_url/api_key/yid），禁止再查空父行覆盖
 pub async fn record_and_bill_inner(p: BillRecord<'_>) {
@@ -1043,6 +1045,7 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
         billing_model_hint,
         plugin_tag,
         db_model,
+        time_multiplier: bill_time_multiplier,
     } = p;
     let pre_deducted = crate::money::round_money(pre_deducted);
     let pre_deduct_gift = crate::money::round_money(pre_deduct_gift);
@@ -1112,6 +1115,19 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
                 feat.get_or_insert_with(Default::default).resolution = Some(res);
             }
         }
+        // 峰谷倍率快照：优先用调用方传入的请求开始锁定值；否则按当前规则锁定写入
+        if feat.as_ref().and_then(|f| f.time_multiplier).is_none() {
+            let locked = if let Some(tm) = bill_time_multiplier {
+                Some(tm)
+            } else {
+                get_model_billing_rule(state, model_name, Some(channel), db_model)
+                    .await
+                    .map(|r| r.applied_multiplier)
+            };
+            if let Some(tm) = locked {
+                feat.get_or_insert_with(Default::default).time_multiplier = Some(tm);
+            }
+        }
         feat.and_then(|f| serde_json::to_string(&f).ok())
     };
 
@@ -1176,7 +1192,8 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
         let mut tx = state.db.pool.begin().await?;
         // 从响应体自动提取异步任务 ID（复用 response_formatter::extract_async_task_id 统一逻辑）
         // 提前解析提取，用于判断当前是否为异步任务预扣冻结阶段
-        let task_id = resp_content.as_deref()
+        let task_id = resp_content
+            .as_deref()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
             .map(|v| super::response_formatter::extract_async_task_id(&v))
             .unwrap_or_default();
@@ -1289,8 +1306,7 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
         };
 
         // 【一条日志原则】有 pending_log_id 时 UPDATE 预记录行，否则 INSERT 新行
-        // 成功：写入本次成功子渠的 channel_id / channel_config_id（可覆盖先前失败快照）
-        // 全失败：由 HA on_spawn_result_err reinstate / 仅首次落库 保证仍为子渠 1
+        // 成功写成功子渠；HA 全失败由 ha.fail 按首败一次落库
         if let Some(log_id) = pending_log_id {
             sqlx::query(&state.db.format_query(
                 "UPDATE logs SET channel_id = ?, model = ?, \
@@ -1301,7 +1317,8 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
                  task_id = CASE WHEN ? = '' OR ? IS NULL THEN task_id ELSE ? END, \
                  action_type = ?, billing_pid = ?, \
                  billing_features = ?, pre_deduct_gift = ?, is_completed = ?, \
-                 channel_config_id = ?, is_ha = ? \
+                 channel_config_id = ?, is_ha = ?, \
+                 plugin_tag = CASE WHEN ? = '' THEN plugin_tag ELSE ? END \
                  WHERE id = ?",
             ))
             .bind(channel_id)
@@ -1328,6 +1345,8 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
             .bind(if is_freeze { 0i16 } else { 1i16 })  // is_completed: 冻结任务=0(待结算), 同步请求=1(已完成)
             .bind(channel_config_id)
             .bind(is_ha)
+            .bind(plugin_tag.unwrap_or(""))
+            .bind(plugin_tag.unwrap_or(""))
             .bind(log_id)
             .execute(&mut *tx)
             .await?;
@@ -1622,9 +1641,9 @@ pub fn sanitize_error_message(msg: &str) -> String {
     re_key.replace_all(&result, "***").to_string()
 }
 
-/// 上游失败对外 HTTP 状态：仅保留 4xx/5xx，其余按网关 502（与日志、HA first_fail 共用）
+/// 上游失败对外 HTTP 状态：仅保留 4xx/5xx，其余按 502（含非 HTTP 业务码）。
 #[inline]
-fn norm_status(status: u16) -> u16 {
+pub fn normalize_error_http_status(status: u16) -> u16 {
     if (400..600).contains(&status) {
         status
     } else {
@@ -1632,11 +1651,24 @@ fn norm_status(status: u16) -> u16 {
     }
 }
 
+/// 异步轮询传输层可重试 HTTP（业务失败走 body.status=failed，不经此判定）。
+#[inline]
+pub fn is_poll_transport_retryable(status: u16) -> bool {
+    matches!(
+        normalize_error_http_status(status),
+        429 | 500 | 502 | 503 | 504
+    )
+}
+
 /// 上游失败对外错误：日志与客户端共用同一 HTTP 状态码（4xx/5xx 透出，其余按 502）
-/// 错误体经 `format_as_openai_error` 收成标准 OpenAI error
-pub fn upstream_fail(status: u16, raw_msg: &str) -> crate::error::AppError {
+/// 错误体经 `format_as_openai_error` 收成标准 OpenAI error；`headers` 可选透传上游诊断头
+pub fn upstream_fail(
+    status: u16,
+    raw_msg: &str,
+    headers: Option<axum::http::HeaderMap>,
+) -> crate::error::AppError {
     let msg = sanitize_error_message(&norm_err_msg(raw_msg));
-    crate::error::AppError::UpstreamHttpError(norm_status(status), msg)
+    crate::error::AppError::UpstreamHttpError(normalize_error_http_status(status), msg, headers)
 }
 
 /// 零费用/失败结算参数（检测仍由调用方完成；本结构负责记账，可选再包成 `upstream_fail`）。
@@ -1669,12 +1701,12 @@ pub struct ZeroCostUpstreamFail<'a> {
 }
 
 /// 失败记账（cost=0）：返回 `(status_code, client_msg)`，由调用方决定 `upstream_fail` / `BadRequest` 等。
-/// `status_code` 已经过 `norm_status`，与后续 `upstream_fail` / HA first_fail 一致。
+/// `status_code` 已经过 `normalize_error_http_status`，与后续 `upstream_fail` / HA first_fail 一致。
 pub async fn record_zero_cost_fail(p: ZeroCostUpstreamFail<'_>) -> (u16, String) {
     let raw_status = p
         .prefer_http_status
         .unwrap_or_else(|| infer_error_status_code_from_str(&p.response_body));
-    let status_code = norm_status(raw_status);
+    let status_code = normalize_error_http_status(raw_status);
     let error_msg = match p.prefer_http_status {
         Some(_) => upstream_error_text(status_code, &p.response_body),
         None => extract_error_message(&p.response_body),
@@ -1705,15 +1737,74 @@ pub async fn record_zero_cost_fail(p: ZeroCostUpstreamFail<'_>) -> (u16, String)
         billing_model_hint: p.billing_model_hint,
         plugin_tag: None,
         db_model: p.db_model,
+        time_multiplier: None,
     })
     .await;
     (status_code, client_owned)
 }
 
-/// 失败记账 + 返回 `upstream_fail`（上游失败主路径）
-pub async fn record_zero_cost_upstream_fail(p: ZeroCostUpstreamFail<'_>) -> crate::error::AppError {
-    let (status, msg) = record_zero_cost_fail(p).await;
-    upstream_fail(status, &msg)
+/// HA 续试：退预扣但保持 pending（status_code=0），供下一子渠成功后再结算
+pub async fn refund_pending(
+    state: &Arc<AppState>,
+    log_id: i64,
+    user_id: &str,
+    cost: f64,
+    pre_deduct_gift: f64,
+) {
+    let cost = crate::money::round_money(cost);
+    let pre_deduct_gift = crate::money::round_money(pre_deduct_gift);
+    if cost <= 0.0 && pre_deduct_gift <= 0.0 {
+        return;
+    }
+    let mut tx = match state.db.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!("[HA] refund_pending 开事务失败 日志ID={}: {:?}", log_id, e);
+            return;
+        }
+    };
+    let touched = match sqlx::query(&state.db.format_query(
+        "UPDATE logs SET cost = 0.0, pre_deduct_gift = 0.0 WHERE id = ? AND status_code = 0",
+    ))
+    .bind(log_id)
+    .execute(&mut *tx)
+    .await
+    {
+        Ok(r) => r.rows_affected(),
+        Err(e) => {
+            tracing::error!(
+                "[HA] refund_pending 更新日志失败 日志ID={}: {:?}",
+                log_id,
+                e
+            );
+            let _ = tx.rollback().await;
+            return;
+        }
+    };
+    if touched == 0 {
+        let _ = tx.rollback().await;
+        return;
+    }
+    if let Err(e) = refund_wallet_sql(&state.db, &mut *tx, user_id, cost, pre_deduct_gift).await {
+        tracing::error!(
+            "[HA] refund_pending 退款失败 用户={} 日志ID={}: {:?}",
+            user_id,
+            log_id,
+            e
+        );
+        let _ = tx.rollback().await;
+        return;
+    }
+    if let Err(e) = tx.commit().await {
+        tracing::error!("[HA] refund_pending 提交失败 日志ID={}: {:?}", log_id, e);
+        return;
+    }
+    tracing::info!(
+        "[HA] 续试退预扣 日志ID={} 金额={:.6} 赠送={:.6}",
+        log_id,
+        cost,
+        pre_deduct_gift
+    );
 }
 
 /// JSON 则走统一 OpenAI 错误规范化；非 JSON 原样返回
@@ -1749,26 +1840,32 @@ pub fn extract_error_message(resp_body: &str) -> String {
     resp_body.to_string()
 }
 
-/// 根据错误响应 JSON 推断业务 HTTP 状态码
-/// 优先从结构化 error.code 精确识别；非 HTTP 业务码或无 code 时从 message 文本关键词兜底
+/// 推断业务 HTTP 状态码（error.code → 文案关键词），结果保证为 4xx/5xx。
 pub fn infer_error_status_code(body: &serde_json::Value) -> u16 {
-    if let Some(code) = super::response_formatter::extract_error_code_from_value(body) {
+    let raw = if let Some(code) = super::response_formatter::extract_error_code_from_value(body) {
         if let Some(status) = classify_error_code(&code) {
-            return status;
+            status
+        } else {
+            classify_error_text(
+                &super::response_formatter::extract_error_message_from_value(body)
+                    .unwrap_or_default(),
+            )
         }
-    }
-    let msg = super::response_formatter::extract_error_message_from_value(body).unwrap_or_default();
-    classify_error_text(&msg)
+    } else {
+        classify_error_text(
+            &super::response_formatter::extract_error_message_from_value(body).unwrap_or_default(),
+        )
+    };
+    normalize_error_http_status(raw)
 }
 
-/// 纯文本/网络错误场景的快捷入口（无完整 JSON 结构时）
-/// 自动尝试从文本中提取 JSON，再委托 infer_error_status_code 处理
+/// 文本错误快捷推断：尝试 JSON，否则文案关键词；结果保证 4xx/5xx。
 pub fn infer_error_status_code_from_str(err: &str) -> u16 {
     let raw = err.find('{').map(|i| &err[i..]).unwrap_or(err);
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
         return infer_error_status_code(&v);
     }
-    classify_error_text(err)
+    normalize_error_http_status(classify_error_text(err))
 }
 
 /// 按 error.code 字符串分类 HTTP 状态码。
@@ -1878,8 +1975,10 @@ fn classify_error_text(msg: &str) -> u16 {
     {
         return 401;
     }
-    // 限流/超额/欠费
-    if m.contains("limit")
+    // 限流/超额/欠费（含 Too Many Requests，避免无 rate/limit 子串时误落 400）
+    if m.contains("too many requests")
+        || m.contains("too_many_requests")
+        || m.contains("limit")
         || m.contains("quota")
         || m.contains("exceeded")
         || m.contains("rate")

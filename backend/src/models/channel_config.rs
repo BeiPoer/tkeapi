@@ -62,6 +62,15 @@ pub struct ChannelConfig {
     pub last_reset_week: String,
     #[sqlx(default)]
     pub last_reset_month: String,
+    /// 日额度刷新时（0-23），站点时区；默认 0 即自然日 00:00
+    #[sqlx(default)]
+    pub daily_reset_hour: i32,
+    /// 日额度刷新分（0-59）
+    #[sqlx(default)]
+    pub daily_reset_minute: i32,
+    /// 到达刷新时刻后再冷却多少分钟才真正刷新日已用（0=立即）
+    #[sqlx(default)]
+    pub daily_reset_cooldown_minutes: i32,
     /// 1=启用, 0=禁用（迁移后列恒有值；缺列时 sqlx 回退为 0）
     #[sqlx(default)]
     pub status: i32,
@@ -71,14 +80,25 @@ pub struct ChannelConfig {
 }
 
 impl ChannelConfig {
-    pub fn has_available_quota(&self, now_day: &str, now_week: &str, now_month: &str) -> bool {
+    /// 按本配置的刷新时刻 + 冷却，计算当前额度日键
+    pub fn quota_day_key(&self, tz_name: &str) -> String {
+        crate::time_system::quota_day_key_with_cutover(
+            tz_name,
+            self.daily_reset_hour,
+            self.daily_reset_minute,
+            self.daily_reset_cooldown_minutes,
+        )
+    }
+
+    pub fn has_available_quota(&self, tz_name: &str, now_week: &str, now_month: &str) -> bool {
+        let now_day = self.quota_day_key(tz_name);
         crate::models::channel_quota::has_available_quota(
             self.quota_limit,
             self.quota_used,
             self.daily_quota_limit,
             self.daily_quota_used,
             &self.last_reset_day,
-            now_day,
+            &now_day,
             self.weekly_quota_limit,
             self.weekly_quota_used,
             &self.last_reset_week,
@@ -112,6 +132,12 @@ pub struct CreateChannelConfigRequest {
     pub daily_quota_limit: Option<f64>,
     pub weekly_quota_limit: Option<f64>,
     pub monthly_quota_limit: Option<f64>,
+    /// 日额度刷新时（0-23）
+    pub daily_reset_hour: Option<i32>,
+    /// 日额度刷新分（0-59）
+    pub daily_reset_minute: Option<i32>,
+    /// 刷新冷却分钟（0=立即）
+    pub daily_reset_cooldown_minutes: Option<i32>,
     /// 1=启用, 0=禁用；缺省为启用
     #[serde(default = "default_status")]
     pub status: i32,
@@ -133,10 +159,19 @@ pub struct UpdateChannelConfigRequest {
     pub daily_quota_limit: Option<f64>,
     pub weekly_quota_limit: Option<f64>,
     pub monthly_quota_limit: Option<f64>,
+    /// 日额度刷新时（0-23）
+    pub daily_reset_hour: Option<i32>,
+    /// 日额度刷新分（0-59）
+    pub daily_reset_minute: Option<i32>,
+    /// 刷新冷却分钟（0=立即）
+    pub daily_reset_cooldown_minutes: Option<i32>,
     /// 1=启用, 0=禁用
     pub status: Option<i32>,
     /// None = 未传不改；Some(None) = 清空；Some(Some(id)) = 设置
-    #[serde(default, deserialize_with = "crate::models::user::deserialize_some_option")]
+    #[serde(
+        default,
+        deserialize_with = "crate::models::user::deserialize_some_option"
+    )]
     pub category_id: Option<Option<i64>>,
 }
 
@@ -173,6 +208,9 @@ pub struct ChannelConfigSafe {
     pub last_reset_day: String,
     pub last_reset_week: String,
     pub last_reset_month: String,
+    pub daily_reset_hour: i32,
+    pub daily_reset_minute: i32,
+    pub daily_reset_cooldown_minutes: i32,
     pub status: i32,
     pub category_id: Option<i64>,
 }
@@ -213,6 +251,9 @@ impl ChannelConfigSafe {
             last_reset_day: c.last_reset_day,
             last_reset_week: c.last_reset_week,
             last_reset_month: c.last_reset_month,
+            daily_reset_hour: c.daily_reset_hour,
+            daily_reset_minute: c.daily_reset_minute,
+            daily_reset_cooldown_minutes: c.daily_reset_cooldown_minutes,
             status: c.status,
             category_id: c.category_id,
         }

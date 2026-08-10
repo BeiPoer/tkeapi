@@ -1,6 +1,6 @@
 # Video Generation Endpoints
 
-With the explosion of video foundation models in the AIGC field, the gateway has extended the `/v1/video/generations` endpoint under the standard OpenAI protocol framework, providing an out-of-the-box unified access route for mainstream video generation engines such as Volcengine Ark, Bailian Wanxiang, Kling AI, Jimeng AI, and Bytefor. Since most video models operate in asynchronous computing mode, the calling process is split into two steps: **submitting the task** and **polling for the result**.
+OpenAI-compatible async video API at `/v1/video/generations`. Most video models are asynchronous: **submit a task**, then **poll for the result**.
 
 ### 1. Submit Video Task
 * **Path**: `/v1/video/generations`
@@ -15,12 +15,12 @@ With the explosion of video foundation models in the AIGC field, the gateway has
 | `images` / `image_urls` | `array` | No | Array of reference images (URLs or base64). `image_urls` has the exact same effect as `images`. One image serves as first frame; two serve as start/end frames; 3+ serve as multi-image reference |
 | `videos` | `array` | No | Array of reference video links for video-to-video or video control (e.g. Kling Omni reference, Bytefor reference) |
 | `audios` | `array` | No | Array of reference audio links for background music/voiceovers (e.g. Volcengine, Bytefor) |
-| `resolution` | `string` | No | Target resolution (e.g., `1080p`, `720p`, `480p`). The gateway auto-adapts this (e.g. Kling `1080p` maps to `pro`, `720p` maps to `std`) |
+| `resolution` | `string` | No | Target resolution (e.g., `1080p`, `720p`, `480p`) |
 | `ratio` | `string` | No | Aspect ratio options (e.g., `16:9`, `9:16`, `4:3`, `3:4`, `1:1`) |
-| `duration` | `integer` | No | Generated video duration in seconds (e.g., `5` or `10`). Auto-converted to `121` or `241` frames for Jimeng AI |
+| `duration` | `integer` | No | Generated video duration in seconds (e.g., `5` or `10`) |
 | `generate_audio` | `boolean` | No | Whether to concurrently generate matching background sound/voiceovers (default is `false`) |
-| `watermark` | `boolean` | No | Whether to add a watermark to the generated video (supported by Volcengine, Alibaba, etc.) |
-| `web_search` | `boolean` | No | Enable web search (OpenAI-style boolean, default `false`). the gateway converts it for Volcengine Seedance, etc. |
+| `watermark` | `boolean` | No | Whether to add a watermark to the generated video |
+| `web_search` | `boolean` | No | Enable web search (default `false`) |
 | `seed` | `integer` | No | Random seed for video generation determinism |
 
 #### Submit Task Example

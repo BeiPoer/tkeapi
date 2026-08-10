@@ -36,6 +36,7 @@ pub mod task_logs;
 pub mod tokens;
 pub mod upstreams;
 pub mod user;
+pub mod user_kyc;
 pub mod user_levels;
 pub mod users;
 
@@ -50,6 +51,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/users/{id}/recharge", post(users::recharge_user))
         .route("/users/{id}/impersonate", post(users::impersonate_user))
         .route("/users/{id}/level-logs", get(users::get_user_level_logs))
+        .route(
+            "/users/{id}/kyc",
+            get(user_kyc::admin_get_user_kyc).put(user_kyc::admin_upsert_user_kyc),
+        )
         .route("/channels", post(channels::create_channel))
         .route(
             "/channels/{id}",
@@ -297,6 +302,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/user/bind/wechat", get(user::bind_wechat))
         .route("/user/bind/google", get(user::bind_google))
         .route("/user/unbind/{bind_type}", post(user::unbind_third_party))
+        .route(
+            "/user/kyc",
+            get(user_kyc::get_my_kyc).put(user_kyc::submit_my_kyc),
+        )
+        .route("/user/kyc/upload", post(user_kyc::upload_kyc_document))
         .route("/task_logs", get(task_logs::list_task_logs))
         .route("/task_logs/{log_id}/sync", post(task_logs::sync_task_log))
         .route(

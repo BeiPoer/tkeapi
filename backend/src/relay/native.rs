@@ -10,6 +10,7 @@
 //! while still running through the gateway's auth / billing / logging pipeline.
 
 use super::proxy;
+use super::upstream_headers;
 use super::url_utils::join_url;
 use crate::models::ApiToken;
 use crate::{
@@ -160,68 +161,57 @@ pub async fn gemini_proxy(
 
         // 【一条日志原则】请求前预记录日志（HA 重试复用同一条）
         if ha.pending_log_id.is_none() {
-            ha.pending_log_id = proxy::record_pending_log(proxy::PendingLog {
-                state: &state,
-                user_id: &token.user_id,
-                token_id: token.id,
-                model: model,
-                endpoint: &endpoint,
-                is_stream: is_stream,
-                request_content: Some(&request_content_str),
-                upstream_url: Some(&url),
-                channel: &channel,
-                billing_model_hint: None,
-                plugin_tag: None,
-                category: Some(resolved_cat.as_str()),
-                db_model: db_model.as_ref(),
-                forward_eid: None,
-                requested_log_id: None,
-            })
-            .await;
+            ha.set_pending(
+                proxy::record_pending_log(proxy::PendingLog {
+                    state: &state,
+                    user_id: &token.user_id,
+                    token_id: token.id,
+                    model: model,
+                    endpoint: &endpoint,
+                    is_stream: is_stream,
+                    request_content: Some(&request_content_str),
+                    upstream_url: Some(&url),
+                    channel: &channel,
+                    billing_model_hint: None,
+                    plugin_tag: None,
+                    category: Some(resolved_cat.as_str()),
+                    db_model: db_model.as_ref(),
+                    forward_eid: None,
+                    requested_log_id: None,
+                })
+                .await,
+            );
         }
 
-        let mut native_builder = state
-            .http_client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .body(body.to_vec());
-        // 流式不设总超时，避免切断长 SSE；非流式挂防挂死上限
-        if is_stream == 0 {
-            native_builder =
-                crate::services::http_client::with_upstream_timeout(native_builder);
-        }
+        let bill_ctx = crate::relay::ha::HaBillCtx::new(&state, &token, model, &endpoint)
+            .category(resolved_cat.as_str())
+            .db(db_model.as_ref());
+
+        let native_builder = crate::services::http_client::with_timeout_if(
+            state
+                .http_client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .body(body.to_vec()),
+            is_stream == 0,
+            ha.attempt_timeout(),
+        );
         let resp = match native_builder.send().await {
             Ok(r) => r,
             Err(e) => {
                 let err_msg = e.to_string();
                 let latency_ms = start_time.elapsed().as_millis() as u32;
-                let app_err = proxy::record_zero_cost_upstream_fail(proxy::ZeroCostUpstreamFail {
-                    state: &state,
-                    token: &token,
-                    channel: &channel,
-                    model,
-                    prefer_http_status: Some(502),
-                    endpoint: &endpoint,
+                let bill = crate::relay::ha::FailBill::transport(
                     latency_ms,
-                    is_stream,
-                    request_content: request_content_str.clone(),
-                    response_body: err_msg.clone(),
-                    response_content: None,
-                    upstream_req_content: Some(request_content_str.clone()),
-                    billing_detail: None,
-                    hint_category: Some(resolved_cat.as_str()),
-                    pending_log_id: ha.pending_log_id,
-                    billing_model_hint: None,
-                    db_model: db_model.as_ref(),
-                    client_msg: Some(&err_msg),
-                    pre_deducted: 0.0,
-                    pre_deduct_gift: 0.0,
-                })
-                .await;
-                if ha
-                    .on_spawn_result_err(&state, &channel, app_err, Some(&url))
-                    .await
-                {
+                    err_msg.clone(),
+                    &request_content_str,
+                    request_content_str.clone(),
+                )
+                .content(None)
+                .client(err_msg)
+                .stream(is_stream);
+                let err = crate::relay::ha::HaAttempt::park(&ha.buf(), bill, None);
+                if ha.fail(&bill_ctx, &channel, err, Some(&url)).await {
                     ha.bump();
                     continue;
                 }
@@ -232,35 +222,20 @@ pub async fn gemini_proxy(
         let status = resp.status().as_u16();
 
         if !resp.status().is_success() {
+            let upstream_hdrs = resp.headers().clone();
             let err = resp.text().await.unwrap_or_default();
             let latency_ms = start_time.elapsed().as_millis() as u32;
-            let app_err = proxy::record_zero_cost_upstream_fail(proxy::ZeroCostUpstreamFail {
-                state: &state,
-                token: &token,
-                channel: &channel,
-                model,
-                prefer_http_status: Some(status),
-                endpoint: &endpoint,
+            let bill = crate::relay::ha::FailBill::http(
                 latency_ms,
-                is_stream,
-                request_content: request_content_str.clone(),
-                response_body: err,
-                response_content: None,
-                upstream_req_content: Some(request_content_str.clone()),
-                billing_detail: None,
-                hint_category: Some(resolved_cat.as_str()),
-                pending_log_id: ha.pending_log_id,
-                billing_model_hint: None,
-                db_model: db_model.as_ref(),
-                client_msg: None,
-                pre_deducted: 0.0,
-                pre_deduct_gift: 0.0,
-            })
-            .await;
-            if ha
-                .on_spawn_result_err(&state, &channel, app_err, Some(&url))
-                .await
-            {
+                status,
+                err,
+                &request_content_str,
+                request_content_str.clone(),
+            )
+            .content(None)
+            .stream(is_stream);
+            let err = crate::relay::ha::HaAttempt::park(&ha.buf(), bill, Some(upstream_hdrs));
+            if ha.fail(&bill_ctx, &channel, err, Some(&url)).await {
                 ha.bump();
                 continue;
             }
@@ -298,6 +273,8 @@ pub async fn gemini_proxy(
             proxy::get_model_billing_rule(&state, model, Some(&channel), db_model.as_ref()).await;
 
         if action.starts_with("streamGenerateContent") || is_stream == 1 {
+            let ms = start_time.elapsed().as_millis() as u32;
+            ha.ok(&state, &channel, &url, ms).await;
             return Ok(crate::relay::stream::handle_native_stream(
                 state.clone(),
                 token.clone(),
@@ -321,6 +298,7 @@ pub async fn gemini_proxy(
             .await
             .into_response());
         } else {
+            let upstream_hdrs = resp.headers().clone();
             let data = resp.bytes().await?;
             let response_content_str = String::from_utf8_lossy(&data).to_string();
 
@@ -361,53 +339,59 @@ pub async fn gemini_proxy(
 
             let latency_ms = start_time.elapsed().as_millis() as u32;
             // 【连接保护】计费放入独立 task（resolved_cat 随闭包移入，无额外 clone）
-            let rsc = response_content_str.clone();
-            let (s, t, ch, m, ep2, rc) = (
-                state.clone(),
-                token.clone(),
-                channel.clone(),
-                model.to_string(),
-                endpoint.clone(),
-                request_content_str.clone(),
-            );
-            let pending_log_id = ha.pending_log_id;
-            tokio::spawn(async move {
-                proxy::record_and_bill_inner(proxy::BillRecord {
-                    state: &s,
-                    token: &t,
-                    channel: &ch,
-                    model: &m,
-                    prompt_tokens: usage.prompt,
-                    completion_tokens: usage.completion,
-                    cached_tokens: usage.cached,
-                    cost: cost,
-                    pre_deducted: pre_deduction,
-                    pre_deduct_gift: pre_deduct_gift,
-                    status_code: 200,
-                    endpoint: &ep2,
-                    error_msg: None,
-                    latency_ms: latency_ms,
-                    is_stream: is_stream,
-                    request_content: Some(rc.clone()),
-                    response_content: Some(rsc),
-                    upstream_req_content: Some(rc),
-                    billing_detail: Some(detail),
-                    hint_category: Some(resolved_cat.as_str()),
-                    pending_log_id: pending_log_id,
-                    billing_model_hint: None,
-                    plugin_tag: None,
-                    db_model: db_model.as_ref(),
-                })
-                .await;
-            });
-            return Ok(Response::builder()
-                .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(data))
-                .unwrap());
+            {
+                let state = state.clone();
+                let token = token.clone();
+                let channel = channel.clone();
+                let model = model.to_string();
+                let endpoint = endpoint.clone();
+                let request_content = request_content_str.clone();
+                let response_content = response_content_str.clone();
+                let pending_log_id = ha.pending_log_id;
+                tokio::spawn(async move {
+                    proxy::record_and_bill_inner(proxy::BillRecord {
+                        state: &state,
+                        token: &token,
+                        channel: &channel,
+                        model: &model,
+                        prompt_tokens: usage.prompt,
+                        completion_tokens: usage.completion,
+                        cached_tokens: usage.cached,
+                        cost: cost,
+                        pre_deducted: pre_deduction,
+                        pre_deduct_gift: pre_deduct_gift,
+                        status_code: 200,
+                        endpoint: &endpoint,
+                        error_msg: None,
+                        latency_ms: latency_ms,
+                        is_stream: is_stream,
+                        request_content: Some(request_content.clone()),
+                        response_content: Some(response_content),
+                        upstream_req_content: Some(request_content),
+                        billing_detail: Some(detail),
+                        hint_category: Some(resolved_cat.as_str()),
+                        pending_log_id: pending_log_id,
+                        billing_model_hint: None,
+                        plugin_tag: None,
+                        db_model: db_model.as_ref(),
+                        time_multiplier: db_rule.as_ref().map(|r| r.applied_multiplier),
+                    })
+                    .await;
+                });
+            }
+            ha.ok(&state, &channel, &url, latency_ms).await;
+            return Ok(upstream_headers::json_with_upstream_headers(
+                &upstream_hdrs,
+                data,
+            ));
         }
     } // end while
 
-    Err(ha.finish())
+    Err(ha
+        .finish(
+            &crate::relay::ha::HaBillCtx::new(&state, &token, model, &entry_ep).category(entry_cat),
+        )
+        .await)
 }
 
 // 素材代理 API 白名单（单资源读写删做归属校验；列表按本地归属过滤，确保数据隔离）
@@ -1157,18 +1141,16 @@ pub async fn volcengine_task_list(
         .await
         .map_err(|e| AppError::UpstreamError(format!("请求上游失败: {}", e)))?;
 
+    let upstream_hdrs = resp.headers().clone();
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let err_body = resp.text().await.unwrap_or_default();
-        return Err(AppError::UpstreamError(format!(
-            "上游返回错误状态码: {} - {}",
-            status, err_body
-        )));
+        return Err(proxy::upstream_fail(status, &err_body, Some(upstream_hdrs)));
     }
 
     let body = resp.bytes().await.unwrap_or_default();
-    Ok(Response::builder()
-        .header("Content-Type", "application/json")
-        .body(axum::body::Body::from(body))
-        .unwrap())
+    Ok(upstream_headers::json_with_upstream_headers(
+        &upstream_hdrs,
+        body,
+    ))
 }

@@ -6,11 +6,13 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { Table, Button, Space, Tag, Modal, Form, Input, InputNumber, Switch, Segmented, message, Popconfirm, Card, Typography, AutoComplete, Grid, Tooltip, Progress, Select, Divider } from 'antd';
+import { Table, Button, Space, Tag, Modal, Form, Input, InputNumber, Switch, Segmented, message, Popconfirm, Card, Typography, AutoComplete, Grid, Tooltip, Progress, Select, Divider, TimePicker } from 'antd';
 import MobileCardList, { MobileCard, CardRow, CardActions } from '../../components/MobileCardList';
 import { PlusOutlined, EditOutlined, DeleteOutlined, SyncOutlined, ClearOutlined, StopOutlined, PlayCircleOutlined, SettingOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
+import dayjs from 'dayjs';
 import request from '../../utils/request';
+import { timedisplayOffsetSuffix } from '../../utils/timedisplay';
 import useSettingsStore from '../../store/settings';
 import { useThemeStore } from '../../store/theme';
 import type { ChannelConfig, ChannelCategory, Upstream } from '../../types';
@@ -25,6 +27,19 @@ import {
 
 const { Title, Text } = Typography;
 const { useBreakpoint } = Grid;
+
+function formatDailyResetSummary(
+  hour: number,
+  minute: number,
+  cooldown: number,
+  tzSuffix: string,
+): string {
+  const hh = String(Math.min(23, Math.max(0, hour))).padStart(2, '0');
+  const mm = String(Math.min(59, Math.max(0, minute))).padStart(2, '0');
+  const cool = Math.max(0, cooldown);
+  const timeText = `刷新 ${hh}:${mm}${tzSuffix}`;
+  return cool > 0 ? `${timeText} · 冷却 ${cool} 分钟` : timeText;
+}
 
 const ChannelConfigs: React.FC = () => {
   const { t } = useTranslation();
@@ -45,6 +60,8 @@ const ChannelConfigs: React.FC = () => {
   const [categoryFilter, setCategoryFilter] = useState<number | 'all' | 'unclassified'>('all');
   const [enableQuota, setEnableQuota] = useState(false);
   const [isCategoryManagerVisible, setIsCategoryManagerVisible] = useState(false);
+  const [dailyResetModalOpen, setDailyResetModalOpen] = useState(false);
+  const [dailyResetDraft, setDailyResetDraft] = useState({ hour: 0, minute: 0, cooldown: 0 });
   const [form] = Form.useForm();
 
   const fetchConfigs = async () => {
@@ -105,6 +122,9 @@ const ChannelConfigs: React.FC = () => {
       daily_quota_limit: -1,
       weekly_quota_limit: -1,
       monthly_quota_limit: -1,
+      daily_reset_hour: 0,
+      daily_reset_minute: 0,
+      daily_reset_cooldown_minutes: 0,
     });
     setIsModalVisible(true);
   };
@@ -125,6 +145,9 @@ const ChannelConfigs: React.FC = () => {
       daily_quota_limit: record.daily_quota_limit ?? -1,
       weekly_quota_limit: record.weekly_quota_limit ?? -1,
       monthly_quota_limit: record.monthly_quota_limit ?? -1,
+      daily_reset_hour: record.daily_reset_hour ?? 0,
+      daily_reset_minute: record.daily_reset_minute ?? 0,
+      daily_reset_cooldown_minutes: record.daily_reset_cooldown_minutes ?? 0,
     });
     setIsModalVisible(true);
   };
@@ -162,6 +185,29 @@ const ChannelConfigs: React.FC = () => {
     }
   };
 
+  const openDailyResetModal = () => {
+    setDailyResetDraft({
+      hour: Number(form.getFieldValue('daily_reset_hour') ?? 0),
+      minute: Number(form.getFieldValue('daily_reset_minute') ?? 0),
+      cooldown: Number(form.getFieldValue('daily_reset_cooldown_minutes') ?? 0),
+    });
+    setDailyResetModalOpen(true);
+  };
+
+  const saveDailyResetModal = () => {
+    form.setFieldsValue({
+      daily_reset_hour: Math.min(23, Math.max(0, Number(dailyResetDraft.hour) || 0)),
+      daily_reset_minute: Math.min(59, Math.max(0, Number(dailyResetDraft.minute) || 0)),
+      daily_reset_cooldown_minutes: Math.max(0, Number(dailyResetDraft.cooldown) || 0),
+    });
+    setDailyResetModalOpen(false);
+  };
+
+  const closeConfigModal = () => {
+    setDailyResetModalOpen(false);
+    setIsModalVisible(false);
+  };
+
   const handleSave = async (values: any) => {
     if (submitting) return;
     setSubmitting(true);
@@ -179,6 +225,9 @@ const ChannelConfigs: React.FC = () => {
         daily_quota_limit: (!enableQuota || values.daily_quota_limit === undefined || values.daily_quota_limit === null) ? -1 : Number(values.daily_quota_limit),
         weekly_quota_limit: (!enableQuota || values.weekly_quota_limit === undefined || values.weekly_quota_limit === null) ? -1 : Number(values.weekly_quota_limit),
         monthly_quota_limit: (!enableQuota || values.monthly_quota_limit === undefined || values.monthly_quota_limit === null) ? -1 : Number(values.monthly_quota_limit),
+        daily_reset_hour: Math.min(23, Math.max(0, Number(values.daily_reset_hour) || 0)),
+        daily_reset_minute: Math.min(59, Math.max(0, Number(values.daily_reset_minute) || 0)),
+        daily_reset_cooldown_minutes: Math.max(0, Number(values.daily_reset_cooldown_minutes) || 0),
       };
       if (enableQuota) {
         const hierarchyErr = validateQuotaHierarchy(payload);
@@ -205,6 +254,7 @@ const ChannelConfigs: React.FC = () => {
         message.success(t('common.success'));
       }
       setIsModalVisible(false);
+      setDailyResetModalOpen(false);
       fetchConfigs();
     } catch (e) {
       console.error(e);
@@ -619,82 +669,114 @@ const ChannelConfigs: React.FC = () => {
       <Modal
         title={editingConfig ? "编辑上游渠道配置" : "添加上游渠道配置"}
         open={isModalVisible}
-        onCancel={() => setIsModalVisible(false)}
+        onCancel={closeConfigModal}
         onOk={() => form.submit()}
         confirmLoading={submitting}
-        width={640}
+        width={560}
+        styles={{ body: { paddingTop: 12, paddingBottom: 4 } }}
       >
-        <Form form={form} layout="vertical" onFinish={handleSave} autoComplete="off">
-          <Form.Item name="name" label={
-            <Space>
-              <span>配置名称</span>
-              {editingConfig?.yid && (
-                <Text type="secondary" style={{ fontSize: 12 }}>YID: {editingConfig.yid}</Text>
-              )}
-            </Space>
-          } rules={[{ required: true }]}>
-            <Input placeholder="例如：OpenAI 官方渠道接口" autoComplete="off" />
-          </Form.Item>
-          <Form.Item name="provider_type" label="服务商类型(模型广场展示)">
-            <Input placeholder="可自由输入 (如: custom)" autoComplete="off" />
-          </Form.Item>
-          <Form.Item name="category_id" label="上游分类">
-            <Select
-              allowClear
-              placeholder="选择分类"
-              options={activeCategories.map(c => ({ label: c.name, value: c.id }))}
-              dropdownRender={(menu) => (
-                <>
-                  {menu}
-                  <Divider style={{ margin: '8px 0' }} />
-                  <Button
-                    type="link"
-                    icon={<SettingOutlined />}
-                    onClick={() => setIsCategoryManagerVisible(true)}
-                    style={{ width: '100%' }}
-                  >
-                    管理分类
-                  </Button>
-                </>
-              )}
-            />
-          </Form.Item>
-          <div style={{ display: 'flex', gap: '16px' }}>
-            <Form.Item name="rate" label="渠道倍率" rules={[{ required: true }]} style={{ flex: 1 }}>
+        <Form
+          form={form}
+          layout="vertical"
+          size="small"
+          onFinish={handleSave}
+          autoComplete="off"
+          style={{ marginBottom: 0 }}
+        >
+          <div style={{ display: 'flex', gap: 12 }}>
+            <Form.Item
+              name="name"
+              label={
+                <Space size={6}>
+                  <span>配置名称</span>
+                  {editingConfig?.yid && (
+                    <Text type="secondary" style={{ fontSize: 11 }}>YID: {editingConfig.yid}</Text>
+                  )}
+                </Space>
+              }
+              rules={[{ required: true, message: '请输入配置名称' }]}
+              style={{ flex: 1.4, marginBottom: 10 }}
+            >
+              <Input placeholder="例如：OpenAI 官方渠道" autoComplete="off" />
+            </Form.Item>
+            <Form.Item
+              name="provider_type"
+              label="服务商类型(模型广场展示)"
+              style={{ flex: 1, marginBottom: 10 }}
+            >
+              <Input placeholder="如: custom / openai" autoComplete="off" />
+            </Form.Item>
+          </div>
+
+          <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+            <Form.Item name="category_id" label="上游分类" style={{ flex: 1, marginBottom: 10 }}>
+              <Select
+                allowClear
+                placeholder="选择分类"
+                options={activeCategories.map(c => ({ label: c.name, value: c.id }))}
+                dropdownRender={(menu) => (
+                  <>
+                    {menu}
+                    <Divider style={{ margin: '6px 0' }} />
+                    <Button
+                      type="link"
+                      size="small"
+                      icon={<SettingOutlined />}
+                      onClick={() => setIsCategoryManagerVisible(true)}
+                      style={{ width: '100%' }}
+                    >
+                      管理分类
+                    </Button>
+                  </>
+                )}
+              />
+            </Form.Item>
+            <Form.Item
+              name="sort_order"
+              label={
+                <Tooltip title="数字越大在页面中越靠前">
+                  <span>页面排序</span>
+                </Tooltip>
+              }
+              style={{ width: 96, marginBottom: 10 }}
+            >
+              <InputNumber placeholder="0" style={{ width: '100%' }} />
+            </Form.Item>
+          </div>
+
+          <div style={{ display: 'flex', gap: 12 }}>
+            <Form.Item name="rate" label="渠道倍率" rules={[{ required: true }]} style={{ flex: 1, marginBottom: 10 }}>
               <InputNumber min={0} step={0.1} placeholder="1.0" style={{ width: '100%' }} />
             </Form.Item>
-            <Form.Item name="priority" label="优先级" rules={[{ required: true }]} style={{ flex: 1 }}>
+            <Form.Item name="priority" label="优先级" rules={[{ required: true }]} style={{ flex: 1, marginBottom: 10 }}>
               <InputNumber min={0} placeholder="0" style={{ width: '100%' }} />
             </Form.Item>
-            <Form.Item name="weight" label="权重" rules={[{ required: true }]} style={{ flex: 1 }}>
+            <Form.Item name="weight" label="权重" rules={[{ required: true }]} style={{ flex: 1, marginBottom: 10 }}>
               <InputNumber min={1} placeholder="1" style={{ width: '100%' }} />
             </Form.Item>
           </div>
-          <Form.Item label="额度配置" style={{ marginBottom: 16 }}>
-            <Switch 
+
+          <Form.Item label="额度限额" style={{ marginBottom: 10 }}>
+            <Switch
               checked={enableQuota}
               onChange={(checked) => {
                 setEnableQuota(checked);
-                if (!checked) {
-                  form.setFieldsValue({
-                    quota_limit: -1,
-                    daily_quota_limit: -1,
-                    weekly_quota_limit: -1,
-                    monthly_quota_limit: -1,
-                  });
-                } else {
-                  form.setFieldsValue({
-                    quota_limit: -1,
-                    daily_quota_limit: -1,
-                    weekly_quota_limit: -1,
-                    monthly_quota_limit: -1,
-                  });
-                }
+                form.setFieldsValue({
+                  quota_limit: -1,
+                  daily_quota_limit: -1,
+                  weekly_quota_limit: -1,
+                  monthly_quota_limit: -1,
+                });
               }}
               checkedChildren="已开启限额"
               unCheckedChildren="默认不限额"
             />
           </Form.Item>
+
+          <Form.Item name="daily_reset_hour" hidden initialValue={0}><InputNumber /></Form.Item>
+          <Form.Item name="daily_reset_minute" hidden initialValue={0}><InputNumber /></Form.Item>
+          <Form.Item name="daily_reset_cooldown_minutes" hidden initialValue={0}><InputNumber /></Form.Item>
+
           {enableQuota && (
             <Form.Item
               noStyle
@@ -702,7 +784,10 @@ const ChannelConfigs: React.FC = () => {
                 prev.quota_limit !== curr.quota_limit ||
                 prev.daily_quota_limit !== curr.daily_quota_limit ||
                 prev.weekly_quota_limit !== curr.weekly_quota_limit ||
-                prev.monthly_quota_limit !== curr.monthly_quota_limit
+                prev.monthly_quota_limit !== curr.monthly_quota_limit ||
+                prev.daily_reset_hour !== curr.daily_reset_hour ||
+                prev.daily_reset_minute !== curr.daily_reset_minute ||
+                prev.daily_reset_cooldown_minutes !== curr.daily_reset_cooldown_minutes
               }
             >
               {() => {
@@ -747,78 +832,123 @@ const ChannelConfigs: React.FC = () => {
                     }
                   },
                 });
+                const quotaItemStyle: React.CSSProperties = { marginBottom: 10 };
+                const resetHour = Number(form.getFieldValue('daily_reset_hour') ?? 0);
+                const resetMinute = Number(form.getFieldValue('daily_reset_minute') ?? 0);
+                const resetCooldown = Number(form.getFieldValue('daily_reset_cooldown_minutes') ?? 0);
+                const tzSuffix = timedisplayOffsetSuffix(quotaTz);
+                const resetSummary = formatDailyResetSummary(resetHour, resetMinute, resetCooldown, tzSuffix);
                 return (
-                  <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
-                    <Form.Item
-                      name="quota_limit"
-                      label="总额度"
-                      initialValue={-1}
-                      style={{ flex: 1, minWidth: 120 }}
-                      dependencies={quotaDeps as unknown as string[]}
-                      validateTrigger={['onChange', 'onBlur']}
-                      rules={[fieldValidator('quota_limit')]}
+                  <div style={{ marginBottom: 4 }}>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '1fr 1fr',
+                        columnGap: 12,
+                      }}
                     >
-                      <InputNumber
-                        min={-1}
-                        style={{ width: '100%' }}
-                        formatter={formatQuotaLimitDisplay}
-                        parser={parseQuotaLimitInput}
-                      />
-                    </Form.Item>
-                    <Form.Item
-                      name="monthly_quota_limit"
-                      label="月额度"
-                      initialValue={-1}
-                      style={{ flex: 1, minWidth: 120 }}
-                      dependencies={quotaDeps as unknown as string[]}
-                      validateTrigger={['onChange', 'onBlur']}
-                      rules={[fieldValidator('monthly_quota_limit')]}
+                      <Form.Item
+                        name="quota_limit"
+                        label="总额度"
+                        initialValue={-1}
+                        style={quotaItemStyle}
+                        dependencies={quotaDeps as unknown as string[]}
+                        validateTrigger={['onChange', 'onBlur']}
+                        rules={[fieldValidator('quota_limit')]}
+                      >
+                        <InputNumber
+                          min={-1}
+                          style={{ width: '100%' }}
+                          formatter={formatQuotaLimitDisplay}
+                          parser={parseQuotaLimitInput}
+                        />
+                      </Form.Item>
+                      <Form.Item
+                        name="monthly_quota_limit"
+                        label="月额度"
+                        initialValue={-1}
+                        style={quotaItemStyle}
+                        dependencies={quotaDeps as unknown as string[]}
+                        validateTrigger={['onChange', 'onBlur']}
+                        rules={[fieldValidator('monthly_quota_limit')]}
+                      >
+                        <InputNumber
+                          min={-1}
+                          style={{ width: '100%' }}
+                          formatter={formatQuotaLimitDisplay}
+                          parser={parseQuotaLimitInput}
+                        />
+                      </Form.Item>
+                      <Form.Item
+                        name="weekly_quota_limit"
+                        label="周额度"
+                        initialValue={-1}
+                        style={quotaItemStyle}
+                        dependencies={quotaDeps as unknown as string[]}
+                        validateTrigger={['onChange', 'onBlur']}
+                        rules={[fieldValidator('weekly_quota_limit')]}
+                      >
+                        <InputNumber
+                          min={-1}
+                          style={{ width: '100%' }}
+                          formatter={formatQuotaLimitDisplay}
+                          parser={parseQuotaLimitInput}
+                        />
+                      </Form.Item>
+                      <Form.Item
+                        name="daily_quota_limit"
+                        label="日额度"
+                        initialValue={-1}
+                        style={quotaItemStyle}
+                        dependencies={quotaDeps as unknown as string[]}
+                        validateTrigger={['onChange', 'onBlur']}
+                        rules={[fieldValidator('daily_quota_limit')]}
+                      >
+                        <InputNumber
+                          min={-1}
+                          style={{ width: '100%' }}
+                          formatter={formatQuotaLimitDisplay}
+                          parser={parseQuotaLimitInput}
+                        />
+                      </Form.Item>
+                    </div>
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: 10,
+                        marginBottom: 10,
+                        padding: '8px 12px',
+                        borderRadius: 8,
+                        border: isLight ? '1px solid rgba(0,0,0,0.06)' : '1px solid rgba(255,255,255,0.08)',
+                        background: isLight ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.04)',
+                      }}
                     >
-                      <InputNumber
-                        min={-1}
-                        style={{ width: '100%' }}
-                        formatter={formatQuotaLimitDisplay}
-                        parser={parseQuotaLimitInput}
-                      />
-                    </Form.Item>
-                    <Form.Item
-                      name="weekly_quota_limit"
-                      label="周额度"
-                      initialValue={-1}
-                      style={{ flex: 1, minWidth: 120 }}
-                      dependencies={quotaDeps as unknown as string[]}
-                      validateTrigger={['onChange', 'onBlur']}
-                      rules={[fieldValidator('weekly_quota_limit')]}
-                    >
-                      <InputNumber
-                        min={-1}
-                        style={{ width: '100%' }}
-                        formatter={formatQuotaLimitDisplay}
-                        parser={parseQuotaLimitInput}
-                      />
-                    </Form.Item>
-                    <Form.Item
-                      name="daily_quota_limit"
-                      label="日额度"
-                      initialValue={-1}
-                      style={{ flex: 1, minWidth: 120 }}
-                      dependencies={quotaDeps as unknown as string[]}
-                      validateTrigger={['onChange', 'onBlur']}
-                      rules={[fieldValidator('daily_quota_limit')]}
-                    >
-                      <InputNumber
-                        min={-1}
-                        style={{ width: '100%' }}
-                        formatter={formatQuotaLimitDisplay}
-                        parser={parseQuotaLimitInput}
-                      />
-                    </Form.Item>
+                      <Text strong style={{ fontSize: 12, flexShrink: 0, lineHeight: '22px' }}>日额度刷新</Text>
+                      <Text
+                        type="secondary"
+                        title={resetSummary}
+                        style={{ fontSize: 12, flex: 1, minWidth: 0, lineHeight: '22px', wordBreak: 'break-word' }}
+                      >
+                        {resetSummary}
+                      </Text>
+                      <Button
+                        type="link"
+                        size="small"
+                        icon={<SettingOutlined />}
+                        onClick={openDailyResetModal}
+                        style={{ paddingInline: 0, flexShrink: 0, height: 22 }}
+                      >
+                        配置
+                      </Button>
+                    </div>
                   </div>
                 );
               }}
             </Form.Item>
           )}
-          <Form.Item name="base_url" label="端点基础地址 (Base URL)" rules={[{ required: true }]}>
+
+          <Form.Item name="base_url" label="端点基础地址 (Base URL)" rules={[{ required: true }]} style={{ marginBottom: 10 }}>
             <AutoComplete
               options={[
                 { value: 'https://ark.cn-beijing.volces.com', label: '火山方舟 (https://ark.cn-beijing.volces.com)' },
@@ -829,7 +959,7 @@ const ChannelConfigs: React.FC = () => {
                 { value: 'https://vod.tencentcloudapi.com', label: '腾讯云 VOD AIGC (https://vod.tencentcloudapi.com)' },
                 { value: 'https://visual.volcengineapi.com', label: '即梦AI/火山CV (https://visual.volcengineapi.com)' },
               ]}
-              placeholder="可直接选择预设地址或自由输入"
+              placeholder="选择预设或自由输入"
               filterOption={(inputValue, option) =>
                 String(option?.label || '').toUpperCase().indexOf(inputValue.toUpperCase()) !== -1 ||
                 String(option?.value || '').toUpperCase().indexOf(inputValue.toUpperCase()) !== -1
@@ -838,33 +968,102 @@ const ChannelConfigs: React.FC = () => {
           </Form.Item>
           <Form.Item
             name="api_key"
-            label="请求鉴权密钥 (API Key)"
-            extra={editingConfig ? '保持不变直接保存即可，输入新值将覆盖旧密钥' : '可灵 AI 格式：access_key:secret_key；腾讯云 VOD 格式：SecretId:SecretKey:SubAppId；即梦AI 格式：AccessKeyID:SecretAccessKey；其他：sk-xxx'}
+            label={
+              <Tooltip
+                title={
+                  editingConfig
+                    ? '保持不变直接保存即可，输入新值将覆盖旧密钥'
+                    : '可灵新协议(kling_video)：官方 API Key 直传 Bearer；可灵旧协议(kling)：access_key:secret_key（自动 JWT）；腾讯云 VOD：SecretId:SecretKey:SubAppId；即梦AI：AccessKeyID:SecretAccessKey；其他：sk-xxx'
+                }
+              >
+                <span>请求鉴权密钥 (API Key)</span>
+              </Tooltip>
+            }
+            style={{ marginBottom: 10 }}
           >
-            <Input.Password 
+            <Input.Password
               autoComplete="new-password"
-              placeholder={editingConfig ? '保持当前密钥或输入新值覆盖' : 'sk-... 或 access_key:secret_key'} 
+              placeholder={editingConfig ? '保持当前密钥或输入新值覆盖' : 'API Key / sk-... / access_key:secret_key'}
             />
           </Form.Item>
-          <Form.Item name="remark" label="备注说明" extra="在这里记录您的渠道归属、适用场景等信息，方便自己查阅">
-            <Input.TextArea rows={2} placeholder="例如：这是供图片生成的官方主通道..." />
+          <Form.Item
+            name="remark"
+            label={
+              <Tooltip title="记录渠道归属、适用场景等，方便查阅">
+                <span>备注说明</span>
+              </Tooltip>
+            }
+            style={{ marginBottom: 10 }}
+          >
+            <Input.TextArea rows={1} placeholder="例如：图片生成主通道..." autoSize={{ minRows: 1, maxRows: 3 }} />
           </Form.Item>
-          <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-            <Form.Item name="sort_order" label="页面排序" extra="数字越大在页面中越靠前" style={{ marginBottom: 0 }}>
-              <InputNumber placeholder="0" style={{ width: '120px' }} />
-            </Form.Item>
-            <Form.Item
-              name="status"
-              label="状态"
-              initialValue={1}
-              valuePropName="checked"
-              getValueFromEvent={(checked: boolean) => (checked ? 1 : 0)}
-              getValueProps={(value) => ({ checked: value !== 0 })}
-              style={{ marginBottom: 0 }}
-            >
-              <Switch checkedChildren={t('common.active')} unCheckedChildren={t('common.disabled')} />
-            </Form.Item>
-          </div>
+          <Form.Item
+            name="status"
+            label="状态"
+            initialValue={1}
+            valuePropName="checked"
+            getValueFromEvent={(checked: boolean) => (checked ? 1 : 0)}
+            getValueProps={(value) => ({ checked: value !== 0 })}
+            style={{ marginBottom: 0 }}
+          >
+            <Switch checkedChildren={t('common.active')} unCheckedChildren={t('common.disabled')} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="日额度刷新设置"
+        open={dailyResetModalOpen}
+        onCancel={() => setDailyResetModalOpen(false)}
+        onOk={saveDailyResetModal}
+        okText="保存"
+        cancelText="取消"
+        width={360}
+        destroyOnHidden
+        getContainer={() => document.body}
+        zIndex={1100}
+      >
+        <Form layout="vertical" size="small" style={{ marginTop: 8 }}>
+          <Form.Item
+            label={`每天刷新时间点${timedisplayOffsetSuffix(quotaTz)}`}
+            style={{ marginBottom: 12 }}
+          >
+            <TimePicker
+              format="HH:mm"
+              allowClear={false}
+              style={{ width: '100%' }}
+              getPopupContainer={(node) => node.parentElement || document.body}
+              value={dayjs().hour(dailyResetDraft.hour).minute(dailyResetDraft.minute).second(0)}
+              onChange={(t) => {
+                setDailyResetDraft((prev) => ({
+                  ...prev,
+                  hour: t ? t.hour() : 0,
+                  minute: t ? t.minute() : 0,
+                }));
+              }}
+            />
+          </Form.Item>
+          <Form.Item
+            label="刷新冷却（分钟）"
+            extra="到达时间点后再等待该时长才清零日已用"
+            style={{ marginBottom: 8 }}
+          >
+            <InputNumber
+              min={0}
+              max={1440}
+              placeholder="0"
+              style={{ width: '100%' }}
+              addonAfter="分钟"
+              value={dailyResetDraft.cooldown}
+              onChange={(v) => setDailyResetDraft((prev) => ({
+                ...prev,
+                cooldown: v == null ? 0 : Number(v),
+              }))}
+            />
+          </Form.Item>
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            按站点默认时区计算（非系统运行时区）；默认 00:00 / 冷却 0 即自然日刷新
+          </Text>
         </Form>
       </Modal>
 

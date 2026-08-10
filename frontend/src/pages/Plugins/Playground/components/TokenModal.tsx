@@ -18,7 +18,9 @@ import { usePlayground } from '../context/PlaygroundContext';
 import { useThemeStore } from '../../../../store/theme';
 import request from '../../../../utils/request';
 import useSettingsStore from '../../../../store/settings';
+import useAuthStore from '../../../../store/auth';
 import { formatApiDateTime } from '../../../../utils/timedisplay';
+import { shouldBlockTokenCreate, tokenBindBlockMessage } from '../../../../utils/bindPolicy';
 
 const TokenModal: React.FC = React.memo(() => {
   const {
@@ -27,6 +29,7 @@ const TokenModal: React.FC = React.memo(() => {
   } = usePlayground();
   const { themeMode } = useThemeStore();
   const { settings } = useSettingsStore();
+  const user = useAuthStore((s) => s.user);
   const currencySymbol = settings?.currency?.currency_symbol || '¥';
   const _isLight = themeMode === 'light';
   const navigate = useNavigate();
@@ -55,6 +58,11 @@ const TokenModal: React.FC = React.memo(() => {
   }, [showCreateForm]);
 
   const handleCreateToken = async () => {
+    if (shouldBlockTokenCreate(settings?.registration, user)) {
+      toast.error(tokenBindBlockMessage(settings?.registration));
+      navigate('/profile');
+      return;
+    }
     const tokenName = newName.trim();
     if (!tokenName) {
       toast.error('请输入密钥名称');

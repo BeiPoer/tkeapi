@@ -1,6 +1,6 @@
 # List of Available Endpoints
 
-The system has fully wrapped the gateway interfaces for industry-leading large language models and media processing APIs, providing corresponding routing paths for the protocols of various providers. You can use your unified API Key to access all of the following endpoints directly through the gateway:
+Call the following endpoints with your platform API Key:
 
 ### 1. OpenAI Protocol Routes
 | Endpoint Name | Path | HTTP Method | Protocol Type |

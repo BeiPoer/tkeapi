@@ -12,10 +12,12 @@ use crate::models::{
 };
 use crate::AppState;
 use axum::{
-    extract::{Extension, Path, Query, State},
+    extract::{ConnectInfo, Extension, Path, Query, State},
+    http::HeaderMap,
     Json,
 };
 use dashmap::DashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -87,7 +89,8 @@ pub async fn list_redemption_groups(
              MAX(expires_at) as expires_at, \
              SUM(used_count) as total_used_count, \
              MAX(max_uses) as max_uses, \
-             MAX(per_user_limit) as per_user_limit \
+             MAX(per_user_limit) as per_user_limit, \
+             MAX(per_user_activity_limit) as per_user_activity_limit \
              FROM redemptions \
              GROUP BY name \
              ORDER BY MAX(created_at) DESC \
@@ -143,27 +146,48 @@ pub async fn generate_redemptions(
         Some(normalize_expiry_date(exp, &tz_name)?)
     };
 
-    let (max_uses, per_user_limit) = if request.allow_multiple {
-        if request.max_uses < -1 || request.per_user_limit < -1 {
+    // allow_multiple 只约束「单码可兑次数」；活动级单用户参与次数与之独立
+    let max_uses = if request.allow_multiple {
+        if request.max_uses < -1 {
             return Err(AppError::BadRequest(
                 "兑换次数无效（-1 表示不限制）".to_string(),
             ));
         }
-        // 约定 -1 = 不限；兼容前端/历史传入的 0，统一落库为 -1
-        (
-            if request.max_uses == 0 {
-                -1
-            } else {
-                request.max_uses
-            },
-            if request.per_user_limit == 0 {
-                -1
-            } else {
-                request.per_user_limit
-            },
-        )
+        if request.max_uses == 0 {
+            -1
+        } else {
+            request.max_uses
+        }
     } else {
-        (1, 1)
+        1
+    };
+
+    // 单码单用户：关闭多次兑换时固定为 1；开启时默认不限（由活动参与次数统一约束）
+    let per_user_limit = if request.allow_multiple {
+        if request.per_user_limit < -1 {
+            return Err(AppError::BadRequest(
+                "单用户兑换次数无效（-1 表示不限制）".to_string(),
+            ));
+        }
+        if request.per_user_limit == 0 {
+            -1
+        } else {
+            request.per_user_limit
+        }
+    } else {
+        1
+    };
+
+    if request.per_user_activity_limit < -1 {
+        return Err(AppError::BadRequest(
+            "活动参与次数无效（-1 表示不限制）".to_string(),
+        ));
+    }
+    // 约定：-1/0 = 不限；>0 为上限（与 allow_multiple / max_uses 相互独立）
+    let per_user_activity_limit = if request.per_user_activity_limit <= 0 {
+        -1
+    } else {
+        request.per_user_activity_limit
     };
 
     let mut codes = Vec::new();
@@ -203,7 +227,7 @@ pub async fn generate_redemptions(
 
     if !codes.is_empty() {
         let mut query_builder = sqlx::QueryBuilder::new(
-            "INSERT INTO redemptions (name, code, quota, expires_at, max_uses, used_count, per_user_limit, is_used) "
+            "INSERT INTO redemptions (name, code, quota, expires_at, max_uses, used_count, per_user_limit, per_user_activity_limit, is_used) "
         );
         let name = request.name.clone();
         let q = request.quota;
@@ -215,6 +239,7 @@ pub async fn generate_redemptions(
                 .push_bind(max_uses)
                 .push_bind(0)
                 .push_bind(per_user_limit)
+                .push_bind(per_user_activity_limit)
                 .push_bind(0);
         });
 
@@ -394,24 +419,26 @@ fn is_expired(expires_at: Option<&str>, tz_name: &str) -> bool {
 pub async fn redeem_code(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<auth::Claims>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(request): Json<RedeemRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let settings = crate::api::settings::load_all_settings(&state).await?;
-    if !settings.marketing.enable_redemption {
-        return Err(AppError::Forbidden("兑换功能未开启".to_string()));
-    }
-
-    let code = request.code.trim().to_ascii_uppercase();
-    if code.is_empty() {
-        return Err(AppError::BadRequest("请输入兑换码".to_string()));
-    }
-
     let user_id = claims.sub;
+    let client_ip = crate::api::auth::extract_client_ip(&headers, &addr);
 
-    // Rate Limiting (5 requests / min per user_id)
+    // 0) IP 防刷：1 分钟超 20 次 → 封禁该 IP 24 小时（优先于用户限流与查库）
+    if let Err(msg) = state.rate_limiter.check_redeem_ip(&client_ip) {
+        return Err(AppError::Forbidden(msg));
+    }
+
+    // 1) 限流放最前：未过限流前不碰库（防刷）
+    //    每用户 5 次/分钟；顺带清理过期条目，避免 DashMap 无限增长
     static REDEEM_RL: OnceLock<DashMap<String, (u32, Instant)>> = OnceLock::new();
     let rl = REDEEM_RL.get_or_init(|| DashMap::new());
     let now = Instant::now();
+    if rl.len() > 10_000 {
+        rl.retain(|_, (_, last_reset)| now.duration_since(*last_reset) <= Duration::from_secs(120));
+    }
     let mut allowed = true;
     if let Some(mut entry) = rl.get_mut(&user_id) {
         let (count, last_reset) = *entry;
@@ -425,57 +452,102 @@ pub async fn redeem_code(
     } else {
         rl.insert(user_id.clone(), (1, now));
     }
-
     if !allowed {
         return Err(AppError::BadRequest("请求过于频繁，请稍后再试".to_string()));
     }
 
-    // Start transaction to ensure atomicity
-    let mut tx = state.db.pool.begin().await?;
+    // 2) 输入校验：空码 / 过长直接拒绝（兑换码为 8 位，放宽到 32 兼容历史）
+    let code = request.code.trim().to_ascii_uppercase();
+    if code.is_empty() {
+        return Err(AppError::BadRequest("请输入兑换码".to_string()));
+    }
+    if code.len() > 32 {
+        return Err(AppError::BadRequest("兑换码无效，请检查后重试".to_string()));
+    }
 
-    let existing: Option<Redemption> = sqlx::query_as(
+    // 3) 只读 marketing 开关（避免 load_all_settings 每次 ~20 次查库）
+    let marketing_raw: Option<String> = sqlx::query_scalar(
+        &state
+            .db
+            .format_query("SELECT value FROM settings WHERE key = 'marketing_settings'"),
+    )
+    .fetch_optional(&state.db.pool)
+    .await?;
+    let enable_redemption = marketing_raw
+        .and_then(|v| {
+            serde_json::from_str::<crate::models::MarketingSettings>(&v)
+                .ok()
+                .map(|m| m.enable_redemption)
+        })
+        .unwrap_or_else(|| crate::api::settings::default_marketing_settings().enable_redemption);
+    if !enable_redemption {
+        return Err(AppError::Forbidden("兑换功能未开启".to_string()));
+    }
+
+    // 4) 事务外预检：无效/禁用/过期/用尽快速失败，不占用连接做写事务
+    let preview: Option<Redemption> = sqlx::query_as(
         &state
             .db
             .format_query("SELECT * FROM redemptions WHERE code = ? LIMIT 1"),
     )
     .bind(&code)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&state.db.pool)
     .await?;
 
-    let redemption = match existing {
+    let preview = match preview {
         None => {
             return Err(AppError::BadRequest("兑换码无效，请检查后重试".to_string()));
         }
         Some(r) => r,
     };
 
-    if redemption.status == 0 {
+    if preview.status == 0 {
         return Err(AppError::BadRequest("该兑换码已被禁用".to_string()));
     }
-    if redemption.status == -1 {
+    if preview.status == -1 {
         return Err(AppError::BadRequest("该兑换码已作废".to_string()));
     }
 
-    let tz_name = {
-        let t = settings.site.default_timezone.trim();
-        if t.is_empty() {
-            "Asia/Shanghai".to_string()
+    let (tz_name, _) = crate::relay::get_cached_config(&state).await;
+    if is_expired(preview.expires_at.as_deref(), &tz_name) {
+        return Err(AppError::BadRequest("兑换码已过期".to_string()));
+    }
+
+    let max_uses_preview = preview.max_uses;
+    if max_uses_preview > 0 && preview.used_count >= max_uses_preview {
+        return Err(AppError::BadRequest("该兑换码兑换次数已用完".to_string()));
+    }
+    if max_uses_preview == 1 && preview.is_used != 0 && preview.used_count == 0 {
+        return Err(AppError::BadRequest("该兑换码已被使用".to_string()));
+    }
+
+    // 5) 写事务：活动顾问锁 + 乐观更新，防超发 / 防并发突破活动上限
+    let mut tx = state.db.pool.begin().await?;
+
+    let redemption: Redemption = sqlx::query_as(
+        &state
+            .db
+            .format_query("SELECT * FROM redemptions WHERE id = ? LIMIT 1"),
+    )
+    .bind(preview.id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::BadRequest("兑换码无效，请检查后重试".to_string()))?;
+
+    if redemption.status != 1 {
+        return Err(AppError::BadRequest(if redemption.status == -1 {
+            "该兑换码已作废".to_string()
         } else {
-            t.to_string()
-        }
-    };
+            "该兑换码已被禁用".to_string()
+        }));
+    }
     if is_expired(redemption.expires_at.as_deref(), &tz_name) {
         return Err(AppError::BadRequest("兑换码已过期".to_string()));
     }
 
-    // 单兑换码次数：<=0（-1 约定 / 历史 0）表示不限；兼容旧单次码 is_used
     let max_uses = redemption.max_uses;
     if max_uses > 0 && redemption.used_count >= max_uses {
         return Err(AppError::BadRequest("该兑换码兑换次数已用完".to_string()));
-    }
-    if max_uses == 1 && redemption.is_used != 0 && redemption.used_count == 0 {
-        // 旧数据兜底
-        return Err(AppError::BadRequest("该兑换码已被使用".to_string()));
     }
 
     // 单兑换码单用户限制：<=0（-1 约定 / 历史 0）表示不限
@@ -490,7 +562,6 @@ pub async fn redeem_code(
         .await
         .unwrap_or(0);
 
-        // 兼容旧单次码：无 logs 时用 used_by 判断
         let legacy_used = redemption.used_by.as_deref() == Some(user_id.as_str())
             && user_used == 0
             && redemption.is_used != 0
@@ -503,7 +574,39 @@ pub async fn redeem_code(
         }
     }
 
-    // 乐观锁：原子更新主表，防止超发
+    // 活动级单用户参与次数
+    let per_user_activity_limit = redemption.per_user_activity_limit;
+    if per_user_activity_limit > 0 {
+        sqlx::query(
+            &state
+                .db
+                .format_query("SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))"),
+        )
+        .bind(format!("redemption_activity:{}", redemption.name))
+        .bind(&user_id)
+        .execute(&mut *tx)
+        .await?;
+
+        // 先按 user_id 过滤，配合 idx_redemption_logs_user_id，避免大活动全表扫 logs
+        let activity_used: i64 = sqlx::query_scalar(&state.db.format_query(
+            "SELECT COUNT(*) FROM redemption_logs \
+             WHERE user_id = ? \
+               AND redemption_id IN (SELECT id FROM redemptions WHERE name = ?)",
+        ))
+        .bind(&user_id)
+        .bind(&redemption.name)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or(0);
+
+        if activity_used >= per_user_activity_limit as i64 {
+            return Err(AppError::BadRequest(
+                "您已达到该活动的参与次数上限".to_string(),
+            ));
+        }
+    }
+
+    // 乐观锁：要求 status=1，防止预检后被禁用仍兑入账
     let rows_affected = sqlx::query(&state.db.format_query(
         "UPDATE redemptions SET \
          used_count = used_count + 1, \
@@ -511,7 +614,7 @@ pub async fn redeem_code(
          used_at = CURRENT_TIMESTAMP, \
          used_by = CASE WHEN ? = 1 THEN ? ELSE used_by END, \
          updated_at = CURRENT_TIMESTAMP \
-         WHERE id = ? AND (? <= 0 OR used_count < ?)",
+         WHERE id = ? AND status = 1 AND (? <= 0 OR used_count < ?)",
     ))
     .bind(max_uses)
     .bind(max_uses)
@@ -530,7 +633,6 @@ pub async fn redeem_code(
         ));
     }
 
-    // 入账
     sqlx::query(&state.db.format_query(
         "UPDATE users SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
     ))
@@ -539,7 +641,6 @@ pub async fn redeem_code(
     .execute(&mut *tx)
     .await?;
 
-    // 写兑换日志
     sqlx::query(&state.db.format_query(
         "INSERT INTO redemption_logs (redemption_id, user_id, amount) VALUES (?, ?, ?)",
     ))
@@ -549,7 +650,6 @@ pub async fn redeem_code(
     .execute(&mut *tx)
     .await?;
 
-    // 充值记录
     let recharge_id: i64 = sqlx::query_scalar::<_, i64>(
         &state.db.format_query("INSERT INTO recharge_records (user_id, amount, recharge_type, remark) VALUES (?, ?, 'redemption', ?) RETURNING id")
     )

@@ -14,6 +14,7 @@ import request from '../../utils/request';
 import useSettingsStore from '../../store/settings';
 import RateDisplay from './RateDisplay';
 import { useThemeStore } from '../../store/theme';
+import { formDefaultFreeImageCount, resolveFreeImageCount } from '../../utils/billingFreeImages';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import timezone from 'dayjs/plugin/timezone';
@@ -557,7 +558,7 @@ const BillingRules: React.FC = () => {
       image_prompt_rate: ext.image_prompt_rate || 0,
       prompt_extend_multiplier: ext.prompt_extend_multiplier || 1,
       image_ref_multiplier: ext.image_ref_multiplier ?? 1,
-      free_image_count: ext.free_image_count ?? 5,
+      free_image_count: resolveFreeImageCount(ext.free_image_count, item.billing_rule),
       quality_pricing_enabled: !!ext.quality_pricing_enabled
         || (item.billing_rule === 'image_size_pixel' && tiers.some((t: any) => t.quality_pricing)),
       doubao_fast_enabled: !!ext.doubao_fast_enabled,
@@ -632,6 +633,10 @@ const BillingRules: React.FC = () => {
       let timeMultipliers = form.getFieldValue(['extended_config', 'time_multipliers']) || [];
 
       if (enableTimeMultipliers) {
+        if (!timeMultipliers.length) {
+          message.error("已开启时间段价格倍率，请至少添加一个时段");
+          return;
+        }
         const intervals: { start: number; end: number; index: number }[] = [];
         for (let i = 0; i < timeMultipliers.length; i++) {
           const item = timeMultipliers[i];
@@ -644,6 +649,11 @@ const BillingRules: React.FC = () => {
 
           if (startMin === endMin) {
             message.error(`第 ${i + 1} 个时间段的起止时间不能相同`);
+            return;
+          }
+
+          if (item.multiplier === undefined || item.multiplier === null || Number(item.multiplier) < 0) {
+            message.error(`第 ${i + 1} 个时间段的倍率无效`);
             return;
           }
 
@@ -784,11 +794,12 @@ const BillingRules: React.FC = () => {
       } else if (values.billing_rule === 'doubao_chat') {
         const fastEnabled = form.getFieldValue('doubao_fast_enabled') === true;
         extConfig = { ...extConfig, doubao_fast_enabled: fastEnabled };
-      } else if (values.billing_rule === 'minimax_h3') {
+      } else if (values.billing_rule === 'minimax_h3' || values.billing_rule === 'volc_seedream_pro') {
+        const freeDefault = formDefaultFreeImageCount(values.billing_rule);
         const freeCount = Number(values.free_image_count);
         extConfig = {
           ...extConfig,
-          free_image_count: Number.isFinite(freeCount) && freeCount >= 0 ? freeCount : 5,
+          free_image_count: Number.isFinite(freeCount) && freeCount >= 0 ? freeCount : freeDefault,
         };
       }
       if (Array.isArray(values.supported_models) && values.supported_models.length > 0) {
@@ -1379,7 +1390,8 @@ const BillingRules: React.FC = () => {
                             <Form.List name="sd2_resolutions" initialValue={[
                               { resolution: '480p', enabled: false, with_video: 0, without_video: 0 },
                               { resolution: '720p', enabled: false, with_video: 0, without_video: 0 },
-                              { resolution: '1080p', enabled: false, with_video: 0, without_video: 0 }
+                              { resolution: '1080p', enabled: false, with_video: 0, without_video: 0 },
+                              { resolution: '4k', enabled: false, with_video: 0, without_video: 0 }
                             ]}>
                               {(fields, { add, remove }) => (
                                 <>
@@ -1887,7 +1899,7 @@ const BillingRules: React.FC = () => {
                             description={
                               <div>
                                 <Text type="secondary" style={{ fontSize: '13px', display: 'block', marginBottom: '8px' }}>
-                                  计费说明：适用于火山方舟图像生成模型。输入图按超过 1 张后的单价计费（首张免费）。输出图按分辨率相乘获得总像素值（单位：万像素），匹配满足该总像素上限的最小价格阶梯（若均未命中则按最高价格档位兜底）。
+                                  计费说明：适用于火山方舟图像生成模型。输入图超过免费张数后按张累加；输出图按分辨率相乘获得总像素值（单位：万像素），匹配满足该总像素上限的最小价格阶梯（若均未命中则按最高价格档位兜底）。
                                 </Text>
                                 <Alert
                                   type="info"
@@ -1897,7 +1909,7 @@ const BillingRules: React.FC = () => {
                                       <strong>配置建议：</strong>
                                       建议配置两个阶梯。
                                       阶梯 1：总像素上限 236（万像素，对应 &lt;= 236 万像素，单张 0.30 元）；
-                                      阶梯 2：总像素上限 999999（万像素，对应 &gt; 236 万像素，单张 0.60 元）。
+                                      阶梯 2：总像素上限 999999（万像素，对应 &gt; 236 万像素，单张 0.60 元）。输入图免费张数新建默认 2。
                                     </span>
                                   }
                                   style={{ marginBottom: '12px' }}
@@ -1905,9 +1917,25 @@ const BillingRules: React.FC = () => {
                               </div>
                             }
                           >
-                            <Form.Item name="prompt_rate" label="输入图额外单价" rules={[{ required: true, message: '请输入输入图额外单价' }]} style={{ marginBottom: '16px' }}>
-                              <InputNumber placeholder="每多一张输入图的价格 (首张免费)" style={{ width: '100%' }} precision={6} addonAfter="元/张 (第2张起收费)" />
-                            </Form.Item>
+                            <Row gutter={16} style={{ marginBottom: 16 }}>
+                              <Col span={12}>
+                                <Form.Item name="prompt_rate" label="输入图额外单价" rules={[{ required: true, message: '请输入输入图额外单价' }]} style={{ marginBottom: 0 }}>
+                                  <InputNumber placeholder="超出免费张数后每张价格" style={{ width: '100%' }} precision={6} min={0} addonAfter="元/张" />
+                                </Form.Item>
+                              </Col>
+                              <Col span={12}>
+                                <Form.Item
+                                  name="free_image_count"
+                                  label="输入图免费张数"
+                                  tooltip="不超过该数量的输入参考图不计费；新建默认 2。未配置的旧规则结算仍按首张免费。"
+                                  initialValue={2}
+                                  rules={[{ required: true, message: '请输入免费张数' }]}
+                                  style={{ marginBottom: 0 }}
+                                >
+                                  <InputNumber style={{ width: '100%' }} precision={0} min={0} step={1} addonAfter="张" />
+                                </Form.Item>
+                              </Col>
+                            </Row>
 
                             <Form.Item label="输出图总像素阶梯单价" required style={{ marginBottom: 0 }}>
                               <Form.List name="pricing_tiers" initialValue={[]}>
@@ -2033,7 +2061,7 @@ const BillingRules: React.FC = () => {
                     <Radio.Group optionType="button" buttonStyle="solid">
                       <Radio value="standard">按固定时长收费 (单价/秒)</Radio>
                       <Radio value="video_resolution">按视频分辨率阶梯表</Radio>
-                      <Radio value="minimax_h3">MiniMax H3 (分辨率秒单价+输入素材)</Radio>
+                      <Radio value="minimax_h3">视频秒价+输入图</Radio>
                       <Radio value="video_quality">按视频画质及帧率阶梯表</Radio>
                       <Radio value="kling_video">可灵视频 (倍率计费)</Radio>
                       <Radio value="vidu_video">Vidu 视频</Radio>
@@ -2152,7 +2180,7 @@ const BillingRules: React.FC = () => {
                         return (
                           <RuleContainer
                             isLight={_isLight}
-                            title="MiniMax H3 计费配置"
+                            title="视频秒价+输入图计费配置"
                             description={
                               <div>
                                 <Text type="secondary" style={{ fontSize: '13px', display: 'block', marginBottom: '8px' }}>
@@ -2461,7 +2489,7 @@ const BillingRules: React.FC = () => {
                           </Form.Item>
                         </div>
                       }
-                      description="开启后可按时间段（支持 01:00-06:00 等非重叠时段，也支持跨天时段）设置模型费率倍率。默认倍率 1.00，例如：闲时降价设为 0.50，高峰翻倍设为 2.00。将自适应系统设定的时区计算。"
+                      description="开启后可按时间段（支持 01:00-06:00 等非重叠时段，也支持跨天时段）设置模型费率倍率。默认倍率 1.00，例如：闲时降价设为 0.50，高峰翻倍设为 2.00。按站点默认时区判定；倍率在请求开始时锁定，异步任务结算仍按开始时刻倍率，不会因跨峰谷变价。"
                     >
                       {enabled && (
                         <Form.List name={['extended_config', 'time_multipliers']} initialValue={[]}>

@@ -7,7 +7,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { Progress, Spin, message } from 'antd';
-import { GitCommit, User, Calendar, Tag as TagIcon, ChevronDown, ChevronUp, MonitorPlay, Activity } from 'lucide-react';
+import { GitCommit, User, Calendar, Tag as TagIcon, ChevronDown, ChevronUp, MonitorPlay } from 'lucide-react';
 import request from '../../utils/request';
 import { useThemeStore } from '../../store/theme';
 
@@ -103,26 +103,11 @@ const Card: React.FC<{ children: React.ReactNode; className?: string }> = ({ chi
   </div>
 );
 
-const CardHeader: React.FC<{ children: React.ReactNode; className?: string }> = ({ children, className = '' }) => (
-  <div className={`flex flex-col gap-0.5 px-3.5 py-3 sm:px-4 border-b border-border ${className}`}>
-    {children}
-  </div>
-);
-
 const RuntimePanel: React.FC<{ runtime: RuntimeInfo; isLight: boolean }> = ({ runtime, isLight }) => {
   const online = runtime.status === 'online';
 
   return (
     <Card>
-      <CardHeader>
-        <div className="flex items-center gap-1.5">
-          <Activity className="w-3.5 h-3.5 text-muted-foreground" />
-          <h3 className="text-sm font-semibold text-foreground m-0 leading-none">系统运行数据</h3>
-        </div>
-        <p className="text-[11px] text-muted-foreground m-0">
-          当前进程所在主机的实时资源占用与运行环境
-        </p>
-      </CardHeader>
 
       {/* 手机端：紧凑卡片 */}
       <div className="md:hidden p-3">

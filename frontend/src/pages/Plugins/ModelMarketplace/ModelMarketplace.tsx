@@ -17,7 +17,7 @@ import {
   shouldShowWebNotifications,
   maybeShowBrowserPush,
 } from '../../../utils/notificationPrefs';
-import { Sidebar as SidebarIcon } from 'lucide-react';
+import { Sidebar as SidebarIcon, Terminal } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ConfigProvider, theme, Input, Checkbox, Avatar, Dropdown, Spin, Empty, Tooltip, Popover, Button, Layout, Grid, Space, Result, Descriptions, Tag, Breadcrumb, Badge, List, message, Pagination } from 'antd';
@@ -41,6 +41,7 @@ import useAuthStore from '../../../store/auth';
 import UserAvatarMenu from '../../../components/UserAvatarMenu';
 import { SunOutlined, MoonOutlined, FireOutlined } from '@ant-design/icons';
 import { formatApiDateTime, parseApiTimeAsUtc } from '../../../utils/timedisplay';
+import { resolveFreeImageCount } from '../../../utils/billingFreeImages';
 import TrendingPage from './TrendingPage';
 
 interface Announcement {
@@ -84,6 +85,7 @@ interface FilterItem {
   name: string;
   name_en?: string;
   logo?: string;
+  provider_type?: string;
 }
 
 import { Image as ImageIcon, Video, AudioLines, MessageSquare, Cuboid, ListOrdered, Code, LayoutGrid, Sparkles } from 'lucide-react';
@@ -318,6 +320,8 @@ const ModelMarketplace: React.FC = () => {
   const [unreadCount, setUnreadCount] = useState(0);
 
   const [loading, setLoading] = useState(true);
+  /** 首屏数据未就绪前不渲染侧栏壳，避免 Suspense 全屏菊花后再闪一次右侧菊花 */
+  const [initialReady, setInitialReady] = useState(false);
   const [forbidden, setForbidden] = useState(false);
   const [models, setModels] = useState<MarketplaceModel[]>([]);
   const [groupedModels, setGroupedModels] = useState<MarketplaceModel[]>([]);
@@ -350,36 +354,50 @@ const ModelMarketplace: React.FC = () => {
   };
 
   // Structured URL Navigation Handlers for Sidebar Menu & Tabs
+  const handleNavHome = () => {
+    _setSelectedModel(null);
+    const newParams = new URLSearchParams();
+    if (trendingConfig?.enabled !== false) {
+      newParams.set('tab', 'trending');
+    } else {
+      newParams.set('tab', 'models');
+    }
+    setSearchParams(newParams);
+  };
+
   const handleNavTrending = () => {
-    setActiveView('trending');
-    setSelectedType(null);
     _setSelectedModel(null);
     const newParams = new URLSearchParams(searchParams);
     newParams.set('tab', 'trending');
     newParams.delete('type');
     newParams.delete('category');
+    newParams.delete('provider');
+    newParams.delete('providers');
+    newParams.delete('q');
     setSearchParams(newParams);
   };
 
   const handleNavAllModels = () => {
-    setActiveView('models');
-    setSelectedType(null);
     _setSelectedModel(null);
     const newParams = new URLSearchParams(searchParams);
     newParams.set('tab', 'models');
     newParams.delete('type');
     newParams.delete('category');
+    newParams.delete('provider');
+    newParams.delete('providers');
+    newParams.delete('q');
     setSearchParams(newParams);
   };
 
   const handleNavType = (t: FilterItem) => {
-    setActiveView('models');
-    setSelectedType(t.id);
     _setSelectedModel(null);
     const newParams = new URLSearchParams(searchParams);
     newParams.set('tab', 'models');
     newParams.set('type', t.name || t.id.toString());
     newParams.delete('category');
+    newParams.delete('provider');
+    newParams.delete('providers');
+    newParams.delete('q');
     setSearchParams(newParams);
   };
 
@@ -388,32 +406,66 @@ const ModelMarketplace: React.FC = () => {
     const tabParam = searchParams.get('tab') || searchParams.get('view');
     const typeParam = searchParams.get('type') || searchParams.get('category') || searchParams.get('type_id');
     const qParam = searchParams.get('q') || searchParams.get('keyword');
+    const providerParam = searchParams.get('provider') || searchParams.get('providers') || searchParams.get('provider_id');
 
+    // 1. activeView
     if (tabParam === 'trending') {
       if (activeView !== 'trending') setActiveView('trending');
-      if (selectedType !== null) setSelectedType(null);
-    } else if (tabParam === 'models' || typeParam) {
+    } else if (tabParam === 'models' || typeParam || providerParam || qParam) {
       if (activeView !== 'models') setActiveView('models');
-      if (typeParam && types.length > 0) {
-        const foundType = types.find(t => 
-          t.id.toString() === typeParam || 
-          t.name.toLowerCase() === typeParam.toLowerCase()
-        );
-        if (foundType) {
-          if (selectedType !== foundType.id) setSelectedType(foundType.id);
-        } else if (!isNaN(Number(typeParam))) {
-          const numId = Number(typeParam);
-          if (selectedType !== numId) setSelectedType(numId);
-        }
-      } else if (!typeParam && selectedType !== null) {
-        setSelectedType(null);
-      }
+    } else {
+      const defaultView = trendingConfig?.enabled !== false ? 'trending' : 'models';
+      if (activeView !== defaultView) setActiveView(defaultView);
     }
 
-    if (qParam !== null && qParam !== searchKeyword) {
-      setSearchKeyword(qParam);
+    // 2. selectedType
+    if (typeParam && types.length > 0) {
+      const foundType = types.find(t => 
+        t.id.toString() === typeParam || 
+        t.name.toLowerCase() === typeParam.toLowerCase()
+      );
+      if (foundType) {
+        if (selectedType !== foundType.id) setSelectedType(foundType.id);
+      } else if (!isNaN(Number(typeParam))) {
+        const numId = Number(typeParam);
+        if (selectedType !== numId) setSelectedType(numId);
+      }
+    } else {
+      if (selectedType !== null) setSelectedType(null);
     }
-  }, [searchParams, types]);
+
+    // 3. selectedProviders
+    if (providerParam && providers.length > 0) {
+      const pTokens = providerParam.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+      const matchedIds: number[] = [];
+      pTokens.forEach(tok => {
+        const pFound = providers.find(p =>
+          p.id.toString() === tok ||
+          p.name.toLowerCase() === tok ||
+          p.provider_type?.toLowerCase() === tok
+        );
+        if (pFound) {
+          matchedIds.push(pFound.id);
+        } else if (!isNaN(Number(tok))) {
+          matchedIds.push(Number(tok));
+        }
+      });
+      const sortedCurrent = [...selectedProviders].sort().join(',');
+      const sortedMatched = [...matchedIds].sort().join(',');
+      if (sortedCurrent !== sortedMatched) {
+        setSelectedProviders(matchedIds);
+      }
+    } else {
+      if (selectedProviders.length > 0) setSelectedProviders([]);
+    }
+
+    // 4. searchKeyword
+    if (qParam !== null) {
+      if (searchKeyword !== qParam) setSearchKeyword(qParam);
+    } else {
+      if (searchKeyword !== '') setSearchKeyword('');
+    }
+  }, [searchParams, types, providers, trendingConfig]);
 
   useEffect(() => {
     const modelIdInUrl = searchParams.get('model');
@@ -464,8 +516,12 @@ const ModelMarketplace: React.FC = () => {
     }
   }, [searchParams, groupedModels, models]);
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('grid');
+  const screens = useBreakpoint();
   const [collapsed, setCollapsed] = useState(() => {
     try {
+      if (typeof window !== 'undefined' && window.innerWidth <= 576) {
+        return true;
+      }
       const saved = localStorage.getItem('model_marketplace_sidebar_collapsed');
       return saved !== null ? JSON.parse(saved) : false;
     } catch (e) {
@@ -473,11 +529,16 @@ const ModelMarketplace: React.FC = () => {
     }
   });
 
+  useEffect(() => {
+    if (screens.xs) {
+      setCollapsed(true);
+    }
+  }, [screens.xs]);
+
   const handleCollapsedChange = (val: boolean) => {
     setCollapsed(val);
     localStorage.setItem('model_marketplace_sidebar_collapsed', JSON.stringify(val));
   };
-  const screens = useBreakpoint();
 
   // 从 settings store 派生站点信息，不再独立调 /settings 接口
   const siteName = settings?.site?.name || 'TokensByte';
@@ -585,6 +646,7 @@ const ModelMarketplace: React.FC = () => {
       }
     } finally {
       setLoading(false);
+      setInitialReady(true);
     }
   };
 
@@ -741,10 +803,32 @@ const ModelMarketplace: React.FC = () => {
   }, [groupedModels, selectedType]);
 
   const handleProviderToggle = (id: number) => {
-    setSelectedProviders(prev =>
-      prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id]
-    );
+    let next: number[];
+    if (selectedProviders.includes(id)) {
+      next = selectedProviders.filter(p => p !== id);
+    } else {
+      next = [id];
+    }
+    setSelectedProviders(next);
     setSelectedModel(null);
+
+    const newParams = new URLSearchParams(searchParams);
+    if (next.length > 0) {
+      newParams.set('provider', next.join(','));
+    } else {
+      newParams.delete('provider');
+    }
+
+    if (searchKeyword.trim()) {
+      const kw = searchKeyword.trim().toLowerCase();
+      const isProviderName = providers.some(p => p.name.toLowerCase() === kw || p.provider_type?.toLowerCase() === kw);
+      if (isProviderName) {
+        setSearchKeyword('');
+        newParams.delete('q');
+      }
+    }
+
+    setSearchParams(newParams);
   };
 
   const activeFilters = (selectedType !== null ? 1 : 0) + (selectedProviders.length > 0 ? 1 : 0);
@@ -754,6 +838,13 @@ const ModelMarketplace: React.FC = () => {
     setSelectedType(null);
     setSelectedProviders([]);
     setSearchKeyword('');
+    const newParams = new URLSearchParams(searchParams);
+    newParams.set('tab', 'models');
+    newParams.delete('type');
+    newParams.delete('provider');
+    newParams.delete('providers');
+    newParams.delete('q');
+    setSearchParams(newParams);
   };
 
   const isLight = themeMode === 'light';
@@ -829,11 +920,11 @@ const ModelMarketplace: React.FC = () => {
     const validItems = items.filter(item => item.price !== undefined && item.price !== null && Number(item.price) > 0);
     if (!validItems || validItems.length === 0) return null;
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, width: '100%', maxWidth: 560 }}>
-        {title && <div style={{ fontSize: 11, fontWeight: 600, color: c.text2, marginBottom: 2 }}>{title}</div>}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', columnGap: 16, rowGap: 2 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, width: '100%', maxWidth: 560 }}>
+        {title && <div style={{ fontSize: 11, fontWeight: 600, color: c.text2, marginBottom: 1 }}>{title}</div>}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', columnGap: 12, rowGap: 1 }}>
           {validItems.map((item, idx) => (
-            <div key={idx} style={{ display: 'flex', alignItems: 'center', fontSize: 11, padding: '2px 0', gap: 6 }}>
+            <div key={idx} style={{ display: 'flex', alignItems: 'center', fontSize: 11, padding: '1px 0', gap: 4 }}>
               <span style={{ color: c.text3, whiteSpace: 'nowrap' }} title={item.label}>{item.label}:</span>
               <span style={{ color: c.text1, fontFamily: "'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', monospace", fontWeight: 600, flexShrink: 0 }}>
                 {item.unit === tp('unit_multiplier') ? `${Number(item.price).toFixed(2)}` : formatPrice(Number(item.price) * subRate, variant)}<span style={{ fontSize: 10, fontWeight: 400, marginLeft: 2, color: c.text3 }}>{item.unit}</span>
@@ -842,7 +933,7 @@ const ModelMarketplace: React.FC = () => {
           ))}
         </div>
         {discount !== undefined && discount !== 1 && (
-          <div style={{ fontSize: 11, color: c.text3, marginTop: 2 }}>{discountLabel}{discount}</div>
+          <div style={{ fontSize: 11, color: c.text3, marginTop: 1 }}>{discountLabel}{discount}</div>
         )}
       </div>
     );
@@ -1107,18 +1198,16 @@ const ModelMarketplace: React.FC = () => {
       // 其它阶梯情况，如 image_resolution, image_size_pixel, video_resolution, video_quality 等
       const items: any[] = [];
       const unit = isDuration ? tp('unit_per_second') : (isRequests ? tp('unit_per_image') : tp('unit_per_request'));
-      if (br === 'volc_seedream_pro') {
+      let freeImageLine: string | null = null;
+      if (br === 'volc_seedream_pro' || br === 'minimax_h3') {
         const pRate = billing.prompt_rate !== undefined && billing.prompt_rate !== null ? Number(billing.prompt_rate) : 0;
-        items.push({ label: tp('extra_input_image_from_second'), price: pRate, unit: tp('unit_per_image') });
-      }
-      if (br === 'minimax_h3') {
-        const pRate = billing.prompt_rate !== undefined && billing.prompt_rate !== null ? Number(billing.prompt_rate) : 0;
-        const freeCount = ext.free_image_count ?? 5;
-        items.push({
-          label: `${tp('extra_input_image_from_second')} (≥${freeCount + 1})`,
-          price: pRate,
-          unit: tp('unit_per_image'),
-        });
+        const freeCount = resolveFreeImageCount(ext.free_image_count, br);
+        if (pRate > 0) {
+          freeImageLine = tp('free_images_then_extra', {
+            n: freeCount,
+            price: formatPrice(pRate * subRate, variant),
+          });
+        }
       }
       tiers.filter((tier: any) => tier.enabled !== false).forEach((tier: any) => {
         let label = tp('specification');
@@ -1139,9 +1228,12 @@ const ModelMarketplace: React.FC = () => {
           items.push({ label, price: tier.rate, unit });
         }
       });
-      if (items.length > 0) {
+      if (freeImageLine || items.length > 0) {
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {freeImageLine && (
+              <div style={{ fontSize: 11, color: c.text1, whiteSpace: 'normal', lineHeight: 1.5 }}>{freeImageLine}</div>
+            )}
             {renderPriceGridTable('', items, variant, undefined, undefined, subRate)}
             {imgRefStr && <div style={{ fontSize: 11, color: c.text3, marginTop: 2 }}>{imgRefStr}</div>}
           </div>
@@ -1307,7 +1399,7 @@ const ModelMarketplace: React.FC = () => {
     const upstreamChannels = (Array.isArray(variant.ha_subchannels) ? variant.ha_subchannels : []).filter((sub: any) => sub.is_ha || Number(sub.rate) !== 1);
 
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
         {upstreamChannels.length > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', marginBottom: 2 }}>
             <span style={{
@@ -1338,13 +1430,13 @@ const ModelMarketplace: React.FC = () => {
         )}
         {showMultipliers && (
           <div style={{
-            marginTop: 8,
-            padding: '10px 12px',
+            marginTop: 6,
+            padding: '6px 10px',
             background: isLight ? 'rgba(250,173,20,0.05)' : 'rgba(250,173,20,0.08)',
-            borderRadius: 8,
+            borderRadius: 6,
             border: `1px dashed ${isLight ? 'rgba(250,173,20,0.3)' : 'rgba(250,173,20,0.4)'}`
           }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
               <span style={{
                 fontSize: 10, fontWeight: 600, padding: '0 6px', borderRadius: 4,
                 background: '#faad14', color: '#fff', display: 'inline-block', lineHeight: '16px'
@@ -1353,7 +1445,7 @@ const ModelMarketplace: React.FC = () => {
               </span>
               <span style={{ fontSize: 11, color: c.text2, fontWeight: 500 }}>{tp('time_multiplier_rule_enabled')}</span>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
               {ext.time_multipliers.map((tm: any, idx: number) => (
                 <div key={idx} style={{ fontSize: 12, display: 'flex', justifyContent: 'space-between', color: c.text2 }}>
                   <span>{tp('time_period')} {idx + 1}: <span style={{ fontFamily: 'monospace', fontWeight: 500 }}>{tm.start} ~ {tm.end}</span></span>
@@ -1361,18 +1453,18 @@ const ModelMarketplace: React.FC = () => {
                 </div>
               ))}
             </div>
-            <div style={{ fontSize: 11, color: c.text3, marginTop: 8, fontStyle: 'italic' }}>
+            <div style={{ fontSize: 11, color: c.text3, marginTop: 4, fontStyle: 'italic' }}>
               * {tp('time_multiplier_timezone_note')}
             </div>
           </div>
         )}
         {upstreamChannels.length > 0 && (
           <div style={{
-            marginTop: showMultipliers ? 16 : 24,
+            marginTop: showMultipliers ? 8 : 10,
             display: 'flex',
             flexDirection: 'column'
           }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               {upstreamChannels.map((sub: any, idx: number) => {
                 const subRate = Number(sub.rate) || 1;
                 return (
@@ -1380,12 +1472,12 @@ const ModelMarketplace: React.FC = () => {
                     fontSize: 13, 
                     display: 'flex', 
                     flexDirection: 'column',
-                    gap: 12,
-                    paddingBottom: idx === upstreamChannels.length - 1 ? 0 : 16,
-                    paddingTop: idx === 0 ? 0 : 16,
+                    gap: 4,
+                    paddingBottom: idx === upstreamChannels.length - 1 ? 0 : 8,
+                    paddingTop: idx === 0 ? 0 : 8,
                     borderBottom: idx === upstreamChannels.length - 1 ? 'none' : `1px dashed ${isLight ? '#e4e4e7' : '#27272a'}`
                   }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <span style={{ color: isLight ? '#09090b' : '#fafafa', fontWeight: 600 }}>{localizedClassificationName(sub.provider_type?.trim() || undefined, undefined, tp('default_group', '默认分组'))}</span>
                         <span style={{ 
                           fontSize: 11, 
@@ -1398,7 +1490,7 @@ const ModelMarketplace: React.FC = () => {
                           {subRate.toFixed(2)}x
                         </span>
                     </div>
-                    <div style={{ background: isLight ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.02)', padding: '10px 12px', borderRadius: 6 }}>
+                    <div style={{ background: isLight ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.02)', padding: '6px 10px', borderRadius: 6 }}>
                       {renderUniversalPriceDetailsInner(variant, subRate)}
                     </div>
                   </div>
@@ -1510,6 +1602,23 @@ const ModelMarketplace: React.FC = () => {
     </div>
   );
 
+  // 与 App Suspense fallback 同为全屏居中菊花，首屏只呈现一次加载，避免「全屏 → 侧栏壳+右侧菊花」跳变
+  if (!initialReady) {
+    return (
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          height: '100vh',
+          background: isLight ? '#ffffff' : '#000000',
+        }}
+      >
+        <Spin size="large" />
+      </div>
+    );
+  }
+
   return (
     <>
       <style>{`
@@ -1563,11 +1672,7 @@ const ModelMarketplace: React.FC = () => {
           collapsed={collapsed}
           theme={themeMode}
           width={240}
-          breakpoint="lg"
           collapsedWidth={screens.xs ? 0 : 68}
-          onBreakpoint={(broken) => {
-            if (broken) setCollapsed(true);
-          }}
           style={{
             boxShadow: 'none',
             borderRight: isLight ? '1px solid #e4e4e7' : '1px solid #1f1f23',
@@ -1583,29 +1688,84 @@ const ModelMarketplace: React.FC = () => {
           className="custom-sider"
         >
           <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-            {/* Logo Area */}
-            <div style={{
-              height: screens.xs ? 48 : 56,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              padding: '0 8px',
-              borderBottom: isLight ? '1px solid #e4e4e7' : '1px solid #1f1f23',
-              cursor: 'pointer',
-              transition: 'all 0.2s'
-            }} onClick={() => navigate('/dashboard')}>
-              {siteLogo ? (
-                (collapsed && !screens.xs) ? (
-                  <img src={siteLogo} alt="logo" style={{ width: 32, height: 32, objectFit: 'contain' }} />
+            {/* Logo Area：展开态固定宽度裁切 + 与图标轨交叉淡入，避免文字挤压 */}
+            <div
+              style={{
+                height: screens.xs ? 48 : 56,
+                position: 'relative',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '0 8px',
+                borderBottom: isLight ? '1px solid #e4e4e7' : '1px solid #1f1f23',
+                cursor: 'pointer',
+                overflow: 'hidden',
+                flexShrink: 0,
+              }}
+              onClick={() => navigate('/dashboard')}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  justifyContent: 'center',
+                  width: 224,
+                  minWidth: 224,
+                  maxWidth: 224,
+                  opacity: collapsed ? 0 : 1,
+                  transition: collapsed
+                    ? 'opacity 0.1s ease'
+                    : 'opacity 0.18s ease 0.12s',
+                  pointerEvents: collapsed ? 'none' : 'auto',
+                }}
+              >
+                {siteLogo ? (
+                  <img src={siteLogo} alt="logo" style={{ width: 20, height: 20, objectFit: 'contain', flexShrink: 0 }} />
                 ) : (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', justifyContent: 'center' }}>
-                    <img src={siteLogo} alt="logo" style={{ width: 28, height: 28, objectFit: 'contain', flexShrink: 0 }} />
-                    <div style={{ color: isLight ? '#1f2937' : '#fff', margin: 0, fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18, fontWeight: 700, lineHeight: 1.2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-all' }}>
-                      {siteName}
-                    </div>
+                  <div className="flex items-center justify-center w-5 h-5 rounded bg-primary text-primary-foreground flex-shrink-0">
+                    <Terminal className="w-3 h-3" />
                   </div>
-                )
-              ) : (
-                <div style={{ color: isLight ? '#1f2937' : '#fff', margin: 0, fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18, fontWeight: 700, lineHeight: 1.2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-all', textAlign: 'center' }}>
-                  {(collapsed && !screens.xs) ? 'TB' : siteName}
+                )}
+                <div
+                  style={{
+                    color: isLight ? '#1f2937' : '#fff',
+                    margin: 0,
+                    fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18,
+                    fontWeight: 700,
+                    lineHeight: 1.2,
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    minWidth: 0,
+                  }}
+                  title={siteName}
+                >
+                  {siteName}
+                </div>
+              </div>
+              {!screens.xs && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    opacity: collapsed ? 1 : 0,
+                    transition: collapsed
+                      ? 'opacity 0.18s ease 0.12s'
+                      : 'opacity 0.1s ease',
+                    pointerEvents: collapsed ? 'auto' : 'none',
+                  }}
+                >
+                  {siteLogo ? (
+                    <img src={siteLogo} alt="logo" style={{ width: 24, height: 24, objectFit: 'contain' }} />
+                  ) : (
+                    <div className="flex items-center justify-center w-6 h-6 rounded-md bg-primary text-primary-foreground">
+                      <Terminal className="w-3.5 h-3.5" />
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1614,7 +1774,7 @@ const ModelMarketplace: React.FC = () => {
             <div className="mp-sidebar-content" style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '8px 0', transition: 'all 0.2s' }}>
               {trendingConfig?.enabled && (
                 <>
-                  <Tooltip title={collapsed && !screens.xs ? "热门推荐" : ""} placement="right">
+                  <Tooltip title={collapsed && !screens.xs ? tp('trending_recommendations', isEnglish ? 'Trending' : '热门推荐') : ""} placement="right">
                     <div
                       className={`mp-sidebar-item ${activeView === 'trending' ? 'active' : ''}`}
                       onClick={handleNavTrending}
@@ -1622,7 +1782,7 @@ const ModelMarketplace: React.FC = () => {
                       <FireOutlined style={{ fontSize: 18 }} />
                       {!(collapsed && !screens.xs) && (
                         <>
-                          热门推荐
+                          {tp('trending_recommendations', isEnglish ? 'Trending' : '热门推荐')}
                         </>
                       )}
                     </div>
@@ -1696,7 +1856,7 @@ const ModelMarketplace: React.FC = () => {
                 : '1px solid rgba(31, 31, 35, 0.55)',
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center' }}>
+            <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, flexShrink: 1, overflow: 'hidden' }}>
               <Button
                 type="text"
                 icon={<SidebarIcon size={16} />}
@@ -1708,18 +1868,49 @@ const ModelMarketplace: React.FC = () => {
                   alignItems: 'center',
                   justifyContent: 'center',
                   color: themeMode === 'light' ? '#71717a' : '#a1a1aa',
-                  borderRadius: 6
+                  borderRadius: 6,
+                  flexShrink: 0
                 }}
               />
               {screens.xs && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 8 }} onClick={() => navigate('/dashboard')}>
-                  {siteLogo && <img src={siteLogo} alt="logo" style={{ width: 24, height: 24, objectFit: 'contain' }} />}
-                  <span style={{ color: c.text1, fontSize: '16px', fontWeight: 600 }}>{siteName}</span>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    marginLeft: 6,
+                    minWidth: 0,
+                    overflow: 'hidden',
+                    cursor: 'pointer'
+                  }}
+                  onClick={() => navigate('/dashboard')}
+                >
+                  {siteLogo ? (
+                    <img src={siteLogo} alt="logo" style={{ width: 18, height: 18, objectFit: 'contain', flexShrink: 0 }} />
+                  ) : (
+                    <div className="flex items-center justify-center w-4.5 h-4.5 rounded bg-primary text-primary-foreground flex-shrink-0">
+                      <Terminal className="w-3 h-3" />
+                    </div>
+                  )}
+                  <span
+                    style={{
+                      color: c.text1,
+                      fontSize: 14,
+                      fontWeight: 600,
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      lineHeight: 1.2
+                    }}
+                    title={siteName}
+                  >
+                    {siteName}
+                  </span>
                 </div>
               )}
             </div>
 
-            <Space size={screens.xs ? 4 : 8} align="center">
+            <Space size={screens.xs ? 2 : 8} align="center" style={{ flexShrink: 0 }}>
               <style>{`
                 .header-badge.ant-badge {
                   display: flex !important;
@@ -1728,91 +1919,95 @@ const ModelMarketplace: React.FC = () => {
                   height: 40px;
                 }
               `}</style>
-              {!screens.xs && (
-                <Tooltip title={_t('menu.model_marketplace', '模型广场')} placement="bottom">
-                  <Button
-                    type="text"
-                    href="/home/models"
-                    icon={
-                      <svg
-                        width="20"
-                        height="20"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                        style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}
-                      >
-                        <path d="M12 2L19.5 6.2L12 10.5L4.5 6.2Z" fill={themeMode === 'light' ? '#e0e0e0' : '#2e2e2e'} />
-                        <path d="M3.5 7.8L11 12V21L3.5 16.8Z" fill={themeMode === 'light' ? '#b0b0b0' : '#555555'} />
-                        <path d="M13 12L20.5 7.8V16.8L13 21Z" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
-                      </svg>
+              <Tooltip title={_t('menu.model_marketplace', '模型广场')} placement="bottom">
+                <Button
+                  type="text"
+                  href="/home/models"
+                  icon={
+                    <svg
+                      width="20"
+                      height="20"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      xmlns="http://www.w3.org/2000/svg"
+                      style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}
+                    >
+                      <path d="M12 2L19.5 6.2L12 10.5L4.5 6.2Z" fill={themeMode === 'light' ? '#e0e0e0' : '#2e2e2e'} />
+                      <path d="M3.5 7.8L11 12V21L3.5 16.8Z" fill={themeMode === 'light' ? '#b0b0b0' : '#555555'} />
+                      <path d="M13 12L20.5 7.8V16.8L13 21Z" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
+                    </svg>
+                  }
+                  style={{
+                    color: themeMode === 'light' ? '#1f2937' : '#fff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6,
+                    fontSize: 14,
+                    fontWeight: 500,
+                    height: screens.xs ? 34 : 40,
+                    width: screens.xs ? 34 : undefined,
+                    padding: screens.xs ? 0 : '0 12px',
+                  }}
+                  onClick={(e) => {
+                    if (!e.metaKey && !e.ctrlKey) {
+                      e.preventDefault();
+                      handleNavHome();
                     }
-                    style={{
-                      color: themeMode === 'light' ? '#1f2937' : '#fff',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      fontSize: 14,
-                      fontWeight: 500,
-                      height: 40,
-                      padding: '0 12px',
-                    }}
-                    onClick={(e) => {
-                      if (!e.metaKey && !e.ctrlKey) {
-                        e.preventDefault();
-                        handleNavAllModels();
-                      }
-                    }}
-                  >
+                  }}
+                >
+                  {!screens.xs && (
                     <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{_t('menu.model_marketplace', '模型广场')}</span>
-                  </Button>
-                </Tooltip>
-              )}
+                  )}
+                </Button>
+              </Tooltip>
 
-              {!screens.xs && (
-                <Tooltip title={_t('menu.relay_api', 'API教程')} placement="bottom">
-                  <Button
-                    type="text"
-                    href="/docs"
-                    icon={
-                      <svg
-                        width="20"
-                        height="20"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                        style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}
-                      >
-                        <rect x="8" y="2.5" width="2.6" height="5.8" rx="1.2" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
-                        <rect x="13.4" y="2.5" width="2.6" height="5.8" rx="1.2" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
-                        <path d="M4.5 7.5H19.5V10H4.5V7.5Z" fill={themeMode === 'light' ? '#e0e0e0' : '#2e2e2e'} />
-                        <path d="M5 10H12V21C7.8 21 5 18.6 5 15.2V10Z" fill={themeMode === 'light' ? '#b0b0b0' : '#555555'} />
-                        <path d="M12 10H19V15.2C19 18.6 16.2 21 12 21V10Z" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
-                        <path d="M8.5 12.2V16.8" stroke={themeMode === 'light' ? '#757575' : '#2e2e2e'} strokeWidth="1.4" strokeLinecap="round" />
-                        <path d="M15.5 12.2V16.8" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="1.4" strokeLinecap="round" />
-                      </svg>
+              <Tooltip title={_t('menu.relay_api', 'API教程')} placement="bottom">
+                <Button
+                  type="text"
+                  href="/docs"
+                  icon={
+                    <svg
+                      width="20"
+                      height="20"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      xmlns="http://www.w3.org/2000/svg"
+                      style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}
+                    >
+                      <rect x="8" y="2.5" width="2.6" height="5.8" rx="1.2" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
+                      <rect x="13.4" y="2.5" width="2.6" height="5.8" rx="1.2" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
+                      <path d="M4.5 7.5H19.5V10H4.5V7.5Z" fill={themeMode === 'light' ? '#e0e0e0' : '#2e2e2e'} />
+                      <path d="M5 10H12V21C7.8 21 5 18.6 5 15.2V10Z" fill={themeMode === 'light' ? '#b0b0b0' : '#555555'} />
+                      <path d="M12 10H19V15.2C19 18.6 16.2 21 12 21V10Z" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
+                      <path d="M8.5 12.2V16.8" stroke={themeMode === 'light' ? '#757575' : '#2e2e2e'} strokeWidth="1.4" strokeLinecap="round" />
+                      <path d="M15.5 12.2V16.8" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="1.4" strokeLinecap="round" />
+                    </svg>
+                  }
+                  style={{
+                    color: themeMode === 'light' ? '#1f2937' : '#fff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6,
+                    fontSize: 14,
+                    fontWeight: 500,
+                    height: screens.xs ? 34 : 40,
+                    width: screens.xs ? 34 : undefined,
+                    padding: screens.xs ? 0 : '0 12px',
+                  }}
+                  onClick={(e) => {
+                    if (!e.metaKey && !e.ctrlKey) {
+                      e.preventDefault();
+                      navigate('/docs');
                     }
-                    style={{
-                      color: themeMode === 'light' ? '#1f2937' : '#fff',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      fontSize: 14,
-                      fontWeight: 500,
-                      height: 40,
-                      padding: '0 12px',
-                    }}
-                    onClick={(e) => {
-                      if (!e.metaKey && !e.ctrlKey) {
-                        e.preventDefault();
-                        navigate('/docs');
-                      }
-                    }}
-                  >
+                  }}
+                >
+                  {!screens.xs && (
                     <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{_t('menu.relay_api', 'API教程')}</span>
-                  </Button>
-                </Tooltip>
-              )}
+                  )}
+                </Button>
+              </Tooltip>
 
               {enableThemeToggle && (
                 <Tooltip
@@ -1839,7 +2034,7 @@ const ModelMarketplace: React.FC = () => {
                           </svg>
                         )
                     }
-                    style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 40, height: 40 }}
+                    style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: screens.xs ? 34 : 40, height: screens.xs ? 34 : 40 }}
                   />
                 </Tooltip>
               )}
@@ -1856,7 +2051,7 @@ const ModelMarketplace: React.FC = () => {
                         <ellipse cx="12" cy="12" rx="3.5" ry="8.5" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="2" />
                       </svg>
                     }
-                    style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 40, height: 40 }}
+                    style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: screens.xs ? 34 : 40, height: screens.xs ? 34 : 40 }}
                   />
                 </Dropdown>
               )}
@@ -1895,7 +2090,7 @@ const ModelMarketplace: React.FC = () => {
                           <path d="M10 19.5a2 2 0 004 0" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="2.5" strokeLinecap="round" />
                         </svg>
                       }
-                      style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 40, height: 40 }}
+                      style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: screens.xs ? 34 : 40, height: screens.xs ? 34 : 40 }}
                       onClick={() => {
                         setUnreadCount(0);
                       }}
@@ -1942,7 +2137,7 @@ const ModelMarketplace: React.FC = () => {
                 <style>{`
                   @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
                 `}</style>
-                <div style={{ marginBottom: 24, display: 'flex', alignItems: 'center', gap: 16 }}>
+                <div style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 12 }}>
                   <Button
                     type="text"
                     icon={<ArrowLeftOutlined />}
@@ -1959,21 +2154,21 @@ const ModelMarketplace: React.FC = () => {
                   />
                 </div>
 
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'flex-start' }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'flex-start' }}>
                   {/* 左侧详情 */}
-                  <div style={{ flex: '1 1 500px', background: c.cardBg, border: `1px solid ${c.cardBorder}`, borderRadius: 5, padding: screens.xs ? '16px' : '24px', boxShadow: isLight ? '0 4px 20px rgba(0,0,0,0.02)' : '0 4px 24px rgba(0,0,0,0.3)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 20 }}>
-                      <div style={{ width: 64, height: 64, borderRadius: 5, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, overflow: 'hidden', background: isLight ? '#f4f5f7' : '#18181b', border: `1px solid ${c.cardBorder}` }}>
+                  <div style={{ flex: '1 1 500px', background: c.cardBg, border: `1px solid ${c.cardBorder}`, borderRadius: 5, padding: screens.xs ? '14px' : '18px', boxShadow: isLight ? '0 4px 20px rgba(0,0,0,0.02)' : '0 4px 24px rgba(0,0,0,0.3)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 14 }}>
+                      <div style={{ width: 56, height: 56, borderRadius: 5, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, overflow: 'hidden', background: isLight ? '#f4f5f7' : '#18181b', border: `1px solid ${c.cardBorder}` }}>
                         <img 
                           src={lobeIconSrc(selectedModel.logo, selectedModel.provider_logo)} 
                           alt="" 
-                          style={{ width: 48, height: 48, objectFit: 'contain', filter: getLogoFilter(selectedModel.logo || selectedModel.provider_logo || 'default-model', isLight) }} 
+                          style={{ width: 42, height: 42, objectFit: 'contain', filter: getLogoFilter(selectedModel.logo || selectedModel.provider_logo || 'default-model', isLight) }} 
                           onError={handleLobeIconError} 
                         />
                       </div>
                       <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                          <h1 style={{ margin: 0, fontSize: screens.xs ? 20 : 26, fontWeight: 700, color: c.text1 }}>{selectedModel.original_id || selectedModel.name}</h1>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                          <h1 style={{ margin: 0, fontSize: screens.xs ? 18 : 22, fontWeight: 700, color: c.text1 }}>{selectedModel.original_id || selectedModel.name}</h1>
                           {isModelUnavailable(selectedModel) && (
                               <span style={{
                                 fontSize: 12, fontWeight: 500, lineHeight: '22px',
@@ -2017,7 +2212,7 @@ const ModelMarketplace: React.FC = () => {
                           })()}
                         </div>
                         {/* 子标题：仅列出官方服务商，不再显示model_id */}
-                        <div style={{ fontSize: 15, color: c.text3, marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <div style={{ fontSize: 14, color: c.text3, marginTop: 4, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                           {(() => {
                             const variants = selectedModel.variants || [selectedModel];
                             const uniqueProviders = Array.from(new Set(variants.map(v => v.provider_name).filter(Boolean)));
@@ -2038,22 +2233,22 @@ const ModelMarketplace: React.FC = () => {
                       </div>
                     </div>
 
-                    <div style={{ marginBottom: 24 }}>
-                      <h3 style={{ fontSize: 15, fontWeight: 600, color: c.text1, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ marginBottom: 14 }}>
+                      <h3 style={{ fontSize: 14, fontWeight: 600, color: c.text1, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
                         <InfoCircleOutlined style={{ color: c.text2 }} /> {tp('model_desc', '模型简介')}
                       </h3>
-                      <div style={{ fontSize: 14, color: c.text2, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
+                      <div style={{ fontSize: 13, color: c.text2, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
                         {(() => {
                           const modelDesc = localizedModelDescription(selectedModel)
                             || (selectedModel.variants || []).map(localizedModelDescription).find(Boolean);
                           return modelDesc || tp('no_desc');
                         })()}
                       </div>
-                      <div style={{ marginTop: 24 }}>
-                        <h3 style={{ fontSize: 15, fontWeight: 600, color: c.text1, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, marginTop: 0 }}>
+                      <div style={{ marginTop: 12 }}>
+                        <h3 style={{ fontSize: 14, fontWeight: 600, color: c.text1, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6, marginTop: 0 }}>
                           <GlobalOutlined style={{ color: c.text2 }} /> {tp('about_model', '关于模型')}
                         </h3>
-                        <div style={{ fontSize: 14, color: c.text3, lineHeight: 1.6 }}>
+                        <div style={{ fontSize: 13, color: c.text3, lineHeight: 1.5 }}>
                           {tp('model_online_desc1', '该模型目前已在全平台上线。您可以直接在 API 调用或')}{_t('menu.dashboard')}{tp('model_online_desc2', '中使用。如果您有大规模调用需求，请联系客服获取专属优惠。')}
                         </div>
                       </div>
@@ -2064,10 +2259,10 @@ const ModelMarketplace: React.FC = () => {
                       bordered
                       size="small"
                       styles={{
-                        label: { background: isLight ? '#f9fafb' : 'rgba(255,255,255,0.01)', color: c.text3, width: 100, fontSize: 13 },
-                        content: { background: 'transparent', color: c.text1, fontSize: 13 }
+                        label: { background: isLight ? '#f9fafb' : 'rgba(255,255,255,0.01)', color: c.text3, width: 100, fontSize: 12, padding: '6px 12px' },
+                        content: { background: 'transparent', color: c.text1, fontSize: 12, padding: '6px 12px' }
                       }}
-                      style={{ border: `1px solid ${c.cardBorder}`, borderRadius: 5, overflow: 'hidden', marginBottom: 24 }}
+                      style={{ border: `1px solid ${c.cardBorder}`, borderRadius: 5, overflow: 'hidden', marginBottom: 14 }}
                     >
                       <Descriptions.Item label={tp('category', '能力分类')}>
                         <Tag bordered={false} style={{ margin: 0, borderRadius: 5, padding: '2px 8px', background: isLight ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.08)', color: c.text2, border: `1px solid ${c.cardBorder}` }}>{selectedModel.type_name}</Tag>
@@ -2092,8 +2287,8 @@ const ModelMarketplace: React.FC = () => {
                 </div>
 
                 {/* 各定价方案 (高级专业圆角表格风格) */}
-                <div style={{ marginTop: 24 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
                     <h3 style={{ fontSize: 16, fontWeight: 600, color: c.text1, margin: 0, display: 'flex', alignItems: 'center', gap: 8, letterSpacing: '-0.3px' }}>
                       {tp('pricing', 'Pricing')}
                     </h3>
@@ -2126,9 +2321,9 @@ const ModelMarketplace: React.FC = () => {
                       <table className="responsive-table" style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: 14, minWidth: 600 }}>
                         <thead>
                           <tr style={{ background: isLight ? '#fafafa' : 'rgba(255,255,255,0.01)', borderBottom: `1px solid ${c.cardBorder}` }}>
-                            <th style={{ padding: '16px 24px', fontWeight: 600, color: c.text3, whiteSpace: 'nowrap', fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{tp('provider_col', 'Provider')}</th>
-                            <th style={{ padding: '16px 24px', fontWeight: 600, color: c.text3, whiteSpace: 'nowrap', fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{tp('billing_type_col', 'Billing Type')}</th>
-                            <th style={{ padding: '16px 24px', fontWeight: 600, color: c.text3, whiteSpace: 'nowrap', fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{tp('price_details_col', '价格明细')}</th>
+                            <th style={{ padding: '10px 16px', fontWeight: 600, color: c.text3, whiteSpace: 'nowrap', fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{tp('provider_col', 'Provider')}</th>
+                            <th style={{ padding: '10px 16px', fontWeight: 600, color: c.text3, whiteSpace: 'nowrap', fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{tp('billing_type_col', 'Billing Type')}</th>
+                            <th style={{ padding: '10px 16px', fontWeight: 600, color: c.text3, whiteSpace: 'nowrap', fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{tp('price_details_col', '价格明细')}</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -2147,7 +2342,7 @@ const ModelMarketplace: React.FC = () => {
                                 borderBottom: vIdx === (selectedModel.variants || [selectedModel]).length - 1 ? 'none' : `1px solid ${c.cardBorder}`,
                                 transition: 'all 0.2s ease-in-out'
                               }} onMouseEnter={e => e.currentTarget.style.background = c.hoverBg} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                                <td data-label={tp('provider_col', 'Provider')} style={{ padding: '12px 24px', verticalAlign: 'middle', minWidth: 240, maxWidth: 400 }}>
+                                <td data-label={tp('provider_col', 'Provider')} style={{ padding: '8px 16px', verticalAlign: 'middle', minWidth: 240, maxWidth: 400 }}>
                                   <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                                     <div style={{
                                       fontFamily: "'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', monospace",
@@ -2175,14 +2370,14 @@ const ModelMarketplace: React.FC = () => {
                                     })()}
                                   </div>
                                 </td>
-                                <td data-label={tp('billing_type_col', 'Billing Type')} style={{ padding: '12px 24px', verticalAlign: 'middle', whiteSpace: 'nowrap' }}>
+                                <td data-label={tp('billing_type_col', 'Billing Type')} style={{ padding: '8px 16px', verticalAlign: 'middle', whiteSpace: 'nowrap' }}>
                                   {billing ? (
                                     <Tag bordered={false} style={{ margin: 0, borderRadius: 5, padding: '4px 10px', background: isLight ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.08)', color: c.text2, border: `1px solid ${c.cardBorder}`, fontWeight: 500, fontSize: 12 }}>
                                       {getBillingLabel(billing, tp)}
                                     </Tag>
                                   ) : <span style={{ color: c.text3, fontSize: 13 }}>Unconfigured</span>}
                                 </td>
-                                <td data-label={tp('price_details_col', '价格明细')} style={{ padding: '12px 24px', verticalAlign: 'middle', color: c.text1, whiteSpace: 'nowrap' }}>
+                                <td data-label={tp('price_details_col', '价格明细')} style={{ padding: '8px 16px', verticalAlign: 'middle', color: c.text1, whiteSpace: 'nowrap' }}>
                                   {renderUniversalPriceDetails(variant)}
                                 </td>
                               </tr>
@@ -2195,12 +2390,38 @@ const ModelMarketplace: React.FC = () => {
                 </div>
               </div>
             ) : activeView === 'trending' ? (
-              <div style={{ animation: 'fadeIn 0.3s ease-in-out', flex: 1, minWidth: 0, height: '100%' }}>
+              <div style={{ flex: 1, minWidth: 0, height: '100%' }}>
                 <TrendingPage
                   config={trendingConfig}
-                  models={models}
+                  models={groupedModels.length > 0 ? groupedModels : models}
                   providers={providers}
                   onSelectModel={setSelectedModel}
+                  onSelectProvider={(lab) => {
+                    handleNavAllModels();
+                    const labId = lab.id;
+                    const matched = providers.find(p =>
+                      (labId !== undefined && p.id === labId) ||
+                      p.name?.toLowerCase() === (lab.name || lab.key || '').toLowerCase() ||
+                      p.provider_type?.toLowerCase() === (lab.key || lab.name || '').toLowerCase()
+                    );
+                    const newParams = new URLSearchParams(searchParams);
+                    newParams.set('tab', 'models');
+                    if (matched) {
+                      setSelectedProviders([matched.id]);
+                      setSearchKeyword('');
+                      newParams.set('provider', matched.id.toString());
+                      newParams.delete('q');
+                    } else {
+                      setSelectedProviders([]);
+                      const q = lab.name || lab.key || '';
+                      if (q) {
+                        setSearchKeyword(q);
+                        newParams.set('q', q);
+                        newParams.delete('provider');
+                      }
+                    }
+                    setSearchParams(newParams);
+                  }}
                   isLight={isLight}
                   c={c}
                   lobeIconSrc={lobeIconSrc}
@@ -2209,13 +2430,31 @@ const ModelMarketplace: React.FC = () => {
                   formatPrice={formatPrice}
                   onViewAllModels={(query) => {
                     handleNavAllModels();
+                    const newParams = new URLSearchParams(searchParams);
+                    newParams.set('tab', 'models');
                     if (query) {
-                      setSearchKeyword(query);
-                      const newParams = new URLSearchParams(searchParams);
-                      newParams.set('tab', 'models');
-                      newParams.set('q', query);
-                      setSearchParams(newParams);
+                      const matched = providers.find(p =>
+                        p.name?.toLowerCase() === query.toLowerCase() ||
+                        p.provider_type?.toLowerCase() === query.toLowerCase()
+                      );
+                      if (matched) {
+                        setSelectedProviders([matched.id]);
+                        setSearchKeyword('');
+                        newParams.set('provider', matched.id.toString());
+                        newParams.delete('q');
+                      } else {
+                        setSelectedProviders([]);
+                        setSearchKeyword(query);
+                        newParams.set('q', query);
+                        newParams.delete('provider');
+                      }
+                    } else {
+                      setSelectedProviders([]);
+                      setSearchKeyword('');
+                      newParams.delete('provider');
+                      newParams.delete('q');
                     }
+                    setSearchParams(newParams);
                   }}
                 />
               </div>

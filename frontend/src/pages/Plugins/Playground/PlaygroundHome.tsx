@@ -27,7 +27,7 @@ import {
   MenuFoldOutlined, MenuUnfoldOutlined, UnorderedListOutlined, SortAscendingOutlined
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
-import { Sidebar as SidebarIcon } from 'lucide-react';
+import { Sidebar as SidebarIcon, Terminal } from 'lucide-react';
 import request from '../../../utils/request';
 import { persistUserLanguagePreference } from '../../../utils/language';
 import { useThemeStore } from '../../../store/theme';
@@ -1088,33 +1088,27 @@ const PlaygroundHome: React.FC = () => {
             borderBottom: themeMode === 'light' ? '1px solid #e4e4e7' : '1px solid #1f1f23',
             flexShrink: 0
           }}>
-            {siteLogo ? (
-              sidebarCollapsed ? (
-                <img src={siteLogo} alt="logo" style={{ width: 32, height: 32, objectFit: 'contain', cursor: 'pointer' }} onClick={() => navigate('/dashboard')} />
+            {sidebarCollapsed ? (
+              siteLogo ? (
+                <img src={siteLogo} alt="logo" style={{ width: 24, height: 24, objectFit: 'contain', cursor: 'pointer' }} onClick={() => navigate('/dashboard')} />
               ) : (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', justifyContent: 'center', cursor: 'pointer' }} onClick={() => navigate('/dashboard')}>
-                  <img src={siteLogo} alt="logo" style={{ width: 28, height: 28, objectFit: 'contain', flexShrink: 0 }} />
-                  <div style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', margin: 0, fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18, fontWeight: 700, lineHeight: 1.2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-all' }}>
-                    {siteName}
-                  </div>
+                <div className="flex items-center justify-center w-6 h-6 rounded-md bg-primary text-primary-foreground cursor-pointer" onClick={() => navigate('/dashboard')}>
+                  <Terminal className="w-3.5 h-3.5" />
                 </div>
               )
             ) : (
-              sidebarCollapsed ? (
-                <div style={{
-                  width: 32, height: 32, borderRadius: 6,
-                  background: themeMode === 'light' ? '#1f2937' : '#fff',
-                  color: themeMode === 'light' ? '#fff' : '#000',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontWeight: 700, fontSize: 16, cursor: 'pointer'
-                }} onClick={() => navigate('/dashboard')}>
-                  {siteName.charAt(0).toUpperCase()}
-                </div>
-              ) : (
-                <div style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', margin: 0, fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18, fontWeight: 700, lineHeight: 1.2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-all', cursor: 'pointer', textAlign: 'center' }} onClick={() => navigate('/dashboard')}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', justifyContent: 'center', cursor: 'pointer' }} onClick={() => navigate('/dashboard')}>
+                {siteLogo ? (
+                  <img src={siteLogo} alt="logo" style={{ width: 20, height: 20, objectFit: 'contain', flexShrink: 0 }} />
+                ) : (
+                  <div className="flex items-center justify-center w-5 h-5 rounded bg-primary text-primary-foreground flex-shrink-0">
+                    <Terminal className="w-3 h-3" />
+                  </div>
+                )}
+                <div style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', margin: 0, fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18, fontWeight: 700, lineHeight: 1.2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-all' }}>
                   {siteName}
                 </div>
-              )
+              </div>
             )}
           </div>
 
@@ -1306,9 +1300,9 @@ const PlaygroundHome: React.FC = () => {
             <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
 
               {/* 右侧工具对齐主站控制台 */}
-              <Space size={isMobile ? 4 : 8} align="center">
+              <Space size={isMobile ? 2 : 8} align="center" style={{ flexShrink: 0 }}>
                 {/* 1. 模型广场 */}
-                {!isMobile && isPluginVisibleForUser('model_marketplace') && (
+                {isPluginVisibleForUser('model_marketplace') && (
                   <Tooltip title={t('menu.model_marketplace', '模型广场')} placement="bottom">
                     <Button
                       type="text"
@@ -1331,11 +1325,13 @@ const PlaygroundHome: React.FC = () => {
                         color: themeMode === 'light' ? '#1f2937' : '#fff',
                         display: 'flex',
                         alignItems: 'center',
+                        justifyContent: 'center',
                         gap: 6,
                         fontSize: 14,
                         fontWeight: 500,
-                        height: 40,
-                        padding: '0 12px',
+                        height: isMobile ? 34 : 40,
+                        width: isMobile ? 34 : undefined,
+                        padding: isMobile ? 0 : '0 12px',
                       }}
                       onClick={(e) => {
                         if (!e.metaKey && !e.ctrlKey) {
@@ -1344,13 +1340,15 @@ const PlaygroundHome: React.FC = () => {
                         }
                       }}
                     >
-                      <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{t('menu.model_marketplace', '模型广场')}</span>
+                      {!isMobile && (
+                        <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{t('menu.model_marketplace', '模型广场')}</span>
+                      )}
                     </Button>
                   </Tooltip>
                 )}
 
                 {/* 2. API教程 */}
-                {!isMobile && isPluginVisibleForUser('docs_api') && (
+                {isPluginVisibleForUser('docs_api') && (
                   <Tooltip title={t('menu.relay_api', 'API教程')} placement="bottom">
                     <Button
                       type="text"
@@ -1377,11 +1375,13 @@ const PlaygroundHome: React.FC = () => {
                         color: themeMode === 'light' ? '#1f2937' : '#fff',
                         display: 'flex',
                         alignItems: 'center',
+                        justifyContent: 'center',
                         gap: 6,
                         fontSize: 14,
                         fontWeight: 500,
-                        height: 40,
-                        padding: '0 12px',
+                        height: isMobile ? 34 : 40,
+                        width: isMobile ? 34 : undefined,
+                        padding: isMobile ? 0 : '0 12px',
                       }}
                       onClick={(e) => {
                         if (!e.metaKey && !e.ctrlKey) {
@@ -1390,7 +1390,9 @@ const PlaygroundHome: React.FC = () => {
                         }
                       }}
                     >
-                      <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{t('menu.relay_api', 'API教程')}</span>
+                      {!isMobile && (
+                        <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{t('menu.relay_api', 'API教程')}</span>
+                      )}
                     </Button>
                   </Tooltip>
                 )}
@@ -1416,7 +1418,7 @@ const PlaygroundHome: React.FC = () => {
                             </svg>
                           )
                       }
-                      style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 40, height: 40 }}
+                      style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: isMobile ? 34 : 40, height: isMobile ? 34 : 40 }}
                     />
                   </Tooltip>
                 )}
@@ -1434,7 +1436,7 @@ const PlaygroundHome: React.FC = () => {
                           <ellipse cx="12" cy="12" rx="3.5" ry="8.5" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="2" />
                         </svg>
                       }
-                      style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 40, height: 40 }}
+                      style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: isMobile ? 34 : 40, height: isMobile ? 34 : 40 }}
                     />
                   </Dropdown>
                 )}
@@ -1469,7 +1471,7 @@ const PlaygroundHome: React.FC = () => {
                             <path d="M10 19.5a2 2 0 004 0" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="2.5" strokeLinecap="round" />
                           </svg>
                         }
-                        style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 40, height: 40 }}
+                        style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: isMobile ? 34 : 40, height: isMobile ? 34 : 40 }}
                         onClick={() => {
                           setUnreadCount(0);
                         }}

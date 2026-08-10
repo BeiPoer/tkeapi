@@ -213,6 +213,8 @@ const ForgotPassword: React.FC = () => {
     <AuthLayout
       title={t('auth.reset_password_title')}
       subtitle={t('auth.reset_password_subtitle')}
+      titleHref={settings?.site?.login_title_url || ''}
+      logo={settings?.site?.logo}
       loading={!settings}
       methodsLabel={t('auth.recovery_method')}
       methods={recoveryTabs.length > 1 ? layoutMethods : undefined}

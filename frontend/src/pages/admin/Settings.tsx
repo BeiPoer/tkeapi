@@ -305,7 +305,13 @@ const Settings: React.FC = () => {
         login_quote: site?.login_quote || '',
         show_timezone: site?.show_timezone !== false,
         login: login || {},
-        registration: registration || {},
+        registration: {
+          ...(registration || {}),
+          require_bind_mobile: registration?.require_bind_mobile === true,
+          require_bind_email: registration?.require_bind_email === true,
+          bind_enforcement: registration?.bind_enforcement || 'all',
+          enable_user_kyc: registration?.enable_user_kyc === true,
+        },
         smtp,
         database: { ...defaultDatabase, ...backendDatabase },
         storage: storage || {},
@@ -331,11 +337,14 @@ const Settings: React.FC = () => {
           name: values.name || '', logo: values.logo || '', title: values.title || '',
           keywords: values.keywords || '', description: values.description || '',
           favicon: values.favicon || '', login_title: values.login_title || '',
+          login_title_url: (values.login_title_url || '').trim(),
           login_subtitle: values.login_subtitle || '',
           login_style: values.login_style || 'split',
           login_quote: values.login_quote || '',
           enable_multilingual: values.enable_multilingual !== false,
-          supported_languages: values.supported_languages || ['zh', 'en'],
+          supported_languages: values.enable_multilingual === false
+            ? [values.default_language || 'zh']
+            : (values.supported_languages || ['zh', 'en']),
           default_language: values.default_language || 'zh',
           enable_theme_toggle: values.enable_theme_toggle !== false,
           default_theme: values.default_theme || 'dark',
@@ -356,6 +365,12 @@ const Settings: React.FC = () => {
         payload.registration = {
           ...settings?.registration,
           ...values.registration,
+          require_bind_mobile: values.registration?.require_bind_mobile === true,
+          require_bind_email: values.registration?.require_bind_email === true,
+          bind_enforcement: ['all', 'any', 'prompt_only'].includes(values.registration?.bind_enforcement)
+            ? values.registration.bind_enforcement
+            : 'all',
+          enable_user_kyc: values.registration?.enable_user_kyc === true,
         };
         payload.agreement = {
           ...settings?.agreement,
@@ -487,79 +502,96 @@ const Settings: React.FC = () => {
       </Form.Item>
       <Form.Item label={t('settings.site_keywords')} name="keywords"><Input.TextArea rows={2} placeholder="LLM, API, Gateway" /></Form.Item>
       <Form.Item label={t('settings.site_description')} name="description"><Input.TextArea rows={4} placeholder="Description..." /></Form.Item>
-      <Form.Item label="站点多语言" name="enable_multilingual" valuePropName="checked" extra={<Text type="secondary">开启后，页面右上角将显示语言切换按钮，用户可在已启用的语言间切换</Text>}>
+      <Form.Item label="站点多语言" name="enable_multilingual" valuePropName="checked" extra={<Text type="secondary">开启后，页面右上角将显示语言切换按钮，用户可在已启用的语言间切换；关闭后全站固定使用下方默认语言，且不展示语言切换入口</Text>}>
         <Switch />
       </Form.Item>
       <Form.Item name="supported_languages" noStyle />
-      {enableMultilingual && (() => {
+      {(() => {
         // 获取当前系统实际载入的语言包列表 (例如: ['zh', 'en', 'ja', 'ko'])
         const implementedLangs = i18n.options.resources ? Object.keys(i18n.options.resources) : ['zh', 'en', 'ja', 'ko'];
+        const defaultLangOptions = ALL_LANGUAGES
+          .filter(l => implementedLangs.includes(l.code) && (enableMultilingual ? supportedLanguages.includes(l.code) : true))
+          .map(l => ({ label: `${l.flag} ${l.name} (${l.nativeName})`, value: l.code }));
 
         return (
           <div style={{ background: 'var(--ant-color-bg-layout)', border: '1px solid var(--ant-color-border)', borderRadius: 10, padding: '16px 20px', marginBottom: 16, marginTop: -8 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-              <div>
-                <Text strong style={{ fontSize: 14 }}>🌐 站点语言管理</Text>
-                <div><Text type="secondary" style={{ fontSize: 12 }}>配置站点支持的语言，以及用户首次访问时使用的默认语言</Text></div>
-              </div>
-              <Button size="small" type="link" onClick={() => {
-                const all = ALL_LANGUAGES.map(l => l.code).filter(code => implementedLangs.includes(code));
-                form.setFieldsValue({ supported_languages: all });
-              }}>全部启用</Button>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
-              {ALL_LANGUAGES.map(lang => {
-                const isImplemented = implementedLangs.includes(lang.code);
-                // 如果未实现，强制当作未启用
-                const isEnabled = isImplemented && supportedLanguages.includes(lang.code);
-                const isDefault = defaultLanguage === lang.code;
-                return (
-                  <div key={lang.code} style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                    padding: '10px 14px', borderRadius: 8,
-                    background: isEnabled ? 'var(--ant-color-bg-container)' : 'transparent',
-                    border: isEnabled ? '1px solid var(--ant-color-primary-border)' : '1px solid var(--ant-color-border)',
-                    opacity: isImplemented ? (isEnabled ? 1 : 0.6) : 0.3,
-                    transition: 'all 0.2s ease',
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <span style={{ fontSize: 20 }}>{lang.flag}</span>
-                      <div>
-                        <Text strong style={{ fontSize: 13 }}>{lang.name}</Text>
-                        <div>
-                          <Text type="secondary" style={{ fontSize: 11 }}>
-                            {lang.nativeName}
-                            {!isImplemented && ' (未提供翻译)'}
-                          </Text>
+            {enableMultilingual ? (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                  <div>
+                    <Text strong style={{ fontSize: 14 }}>🌐 站点语言管理</Text>
+                    <div><Text type="secondary" style={{ fontSize: 12 }}>配置站点支持的语言，以及用户首次访问时使用的默认语言</Text></div>
+                  </div>
+                  <Button size="small" type="link" onClick={() => {
+                    const all = ALL_LANGUAGES.map(l => l.code).filter(code => implementedLangs.includes(code));
+                    form.setFieldsValue({ supported_languages: all });
+                  }}>全部启用</Button>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
+                  {ALL_LANGUAGES.map(lang => {
+                    const isImplemented = implementedLangs.includes(lang.code);
+                    // 如果未实现，强制当作未启用
+                    const isEnabled = isImplemented && supportedLanguages.includes(lang.code);
+                    const isDefault = defaultLanguage === lang.code;
+                    return (
+                      <div key={lang.code} style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        padding: '10px 14px', borderRadius: 8,
+                        background: isEnabled ? 'var(--ant-color-bg-container)' : 'transparent',
+                        border: isEnabled ? '1px solid var(--ant-color-primary-border)' : '1px solid var(--ant-color-border)',
+                        opacity: isImplemented ? (isEnabled ? 1 : 0.6) : 0.3,
+                        transition: 'all 0.2s ease',
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                          <span style={{ fontSize: 20 }}>{lang.flag}</span>
+                          <div>
+                            <Text strong style={{ fontSize: 13 }}>{lang.name}</Text>
+                            <div>
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                {lang.nativeName}
+                                {!isImplemented && ' (未提供翻译)'}
+                              </Text>
+                            </div>
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          {isDefault && <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '18px', padding: '0 6px' }}>默认</Tag>}
+                          <Switch size="small" checked={isEnabled} disabled={!isImplemented && !isEnabled} onChange={(checked) => {
+                            let newLangs = [...supportedLanguages];
+                            if (checked) { newLangs.push(lang.code); } else {
+                              newLangs = newLangs.filter((l: string) => l !== lang.code);
+                              if (newLangs.length === 0) newLangs = ['zh'];
+                              if (defaultLanguage === lang.code) {
+                                form.setFieldsValue({ default_language: newLangs[0] });
+                              }
+                            }
+                            form.setFieldsValue({ supported_languages: newLangs });
+                          }} />
                         </div>
                       </div>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      {isDefault && <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '18px', padding: '0 6px' }}>默认</Tag>}
-                      <Switch size="small" checked={isEnabled} disabled={!isImplemented && !isEnabled} onChange={(checked) => {
-                        let newLangs = [...supportedLanguages];
-                        if (checked) { newLangs.push(lang.code); } else {
-                          newLangs = newLangs.filter((l: string) => l !== lang.code);
-                          if (newLangs.length === 0) newLangs = ['zh'];
-                          if (defaultLanguage === lang.code) {
-                            form.setFieldsValue({ default_language: newLangs[0] });
-                          }
-                        }
-                        form.setFieldsValue({ supported_languages: newLangs });
-                      }} />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px dashed var(--ant-color-border)' }}>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              <div style={{ marginBottom: 16 }}>
+                <Text strong style={{ fontSize: 14 }}>🌐 站点语言</Text>
+                <div><Text type="secondary" style={{ fontSize: 12 }}>多语言已关闭，全站固定使用下方默认语言，右上角不显示语言切换</Text></div>
+              </div>
+            )}
+            <div style={{ marginTop: enableMultilingual ? 16 : 0, paddingTop: enableMultilingual ? 16 : 0, borderTop: enableMultilingual ? '1px dashed var(--ant-color-border)' : undefined }}>
               <Form.Item label="站点默认语言" name="default_language" style={{ marginBottom: 0 }}
-                extra={<Text type="secondary">新用户首次访问或未手动切换语言时使用此语言</Text>}>
-                <Select style={{ width: 240 }} options={
-                  ALL_LANGUAGES
-                    .filter(l => supportedLanguages.includes(l.code) && implementedLangs.includes(l.code))
-                    .map(l => ({ label: `${l.flag} ${l.name} (${l.nativeName})`, value: l.code }))
-                } />
+                extra={<Text type="secondary">{enableMultilingual ? '新用户首次访问或未手动切换语言时使用此语言' : '关闭多语言时，全站将固定使用此语言'}</Text>}>
+                <Select
+                  style={{ width: 240 }}
+                  options={defaultLangOptions}
+                  onChange={(code: string) => {
+                    // 关闭多语言时，同步把支持语言收敛为默认语言
+                    if (!enableMultilingual) {
+                      form.setFieldsValue({ supported_languages: [code] });
+                    }
+                  }}
+                />
               </Form.Item>
             </div>
           </div>
@@ -705,6 +737,13 @@ const Settings: React.FC = () => {
       <Form.Item label="登录页标题" name="login_title" extra={<Text type="secondary">留空则使用站点名称</Text>}>
         <Input placeholder="例如：TokensByte" />
       </Form.Item>
+      <Form.Item
+        label="登录页标题链接"
+        name="login_title_url"
+        extra={<Text type="secondary">配置后，登录页标题、Logo及Logo文字可点击跳转；支持完整网址（https://…）或站内路径（/docs）。留空则不可点击</Text>}
+      >
+        <Input placeholder="例如：https://example.com 或 /" />
+      </Form.Item>
       <Form.Item label="登录页副标题" name="login_subtitle" extra={<Text type="secondary">留空则使用默认文字</Text>}>
         <Input placeholder="例如：Next-gen LLM API Gateway" />
       </Form.Item>
@@ -761,6 +800,76 @@ const Settings: React.FC = () => {
         <Switch />
       </Form.Item>
       <Form.Item label={t('settings.enable_password_recovery')} name={['registration', 'enable_password_recovery']} valuePropName="checked"><Switch /></Form.Item>
+
+      <Typography.Title level={5} style={{ marginTop: 24, marginBottom: 16 }}>用户实名认证（KYC）</Typography.Title>
+      <Form.Item
+        label="开启用户实名"
+        name={['registration', 'enable_user_kyc']}
+        valuePropName="checked"
+        extra={<Text type="secondary">开启后，用户可在个人中心提交账号实名认证；管理后台用户编辑中可随时查看与录入实名信息。</Text>}
+      >
+        <Switch />
+      </Form.Item>
+
+      <Typography.Title level={5} style={{ marginTop: 24, marginBottom: 16 }}>账号绑定策略</Typography.Title>
+      <Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
+        开启下方任一开关后即启用绑定提示：未满足条件的用户登录用户端会弹窗提醒（可关闭，当天不再弹）。执行方式决定是否同时拦截创建 API 令牌。手机号 / 邮箱不可重复绑定；管理员账号不受此限制。
+      </Text>
+      <Form.Item
+        label="必须绑定手机"
+        name={['registration', 'require_bind_mobile']}
+        valuePropName="checked"
+        extra={<Text type="secondary">纳入绑定策略后，需短信通道可用才能完成绑定。<GoLink to={`/${adminPath}/message-notification`} text={t('settings.goto_settings')} /></Text>}
+      >
+        <Switch />
+      </Form.Item>
+      <Form.Item
+        label="必须绑定邮箱"
+        name={['registration', 'require_bind_email']}
+        valuePropName="checked"
+        extra={<Text type="secondary">纳入绑定策略后，需邮件通道可用才能完成绑定。<GoLink to={`/${adminPath}/message-notification`} text={t('settings.goto_settings')} /></Text>}
+      >
+        <Switch />
+      </Form.Item>
+      <Form.Item noStyle dependencies={[['registration', 'require_bind_mobile'], ['registration', 'require_bind_email']]}>
+        {({ getFieldValue, setFieldsValue }) => {
+          const needMobile = getFieldValue(['registration', 'require_bind_mobile']);
+          const needEmail = getFieldValue(['registration', 'require_bind_email']);
+          if (!needMobile && !needEmail) return null;
+          const both = !!(needMobile && needEmail);
+          const mode = getFieldValue(['registration', 'bind_enforcement']) || 'all';
+          // 单通道时「满足其一」无意义，自动回落到 all
+          if (!both && mode === 'any') {
+            setTimeout(() => setFieldsValue({ registration: { ...getFieldValue('registration'), bind_enforcement: 'all' } }), 0);
+          }
+          return (
+            <Form.Item
+              label="执行方式"
+              name={['registration', 'bind_enforcement']}
+              initialValue="all"
+              extra={
+                <Text type="secondary">
+                  {both
+                    ? '「全部都要 / 满足其一」会在创建 API 令牌时硬拦截；「仅弹窗提示」只在登录后提醒，可关闭且当天不再弹，不拦截创建令牌。'
+                    : '「创建令牌前必须绑定」会硬拦截创建令牌；「仅弹窗提示」只提醒，可关闭且当天不再弹。'}
+                </Text>
+              }
+            >
+              <Radio.Group>
+                {both ? (
+                  <>
+                    <Radio.Button value="all">全部都要</Radio.Button>
+                    <Radio.Button value="any">满足其一</Radio.Button>
+                  </>
+                ) : (
+                  <Radio.Button value="all">创建令牌前必须绑定</Radio.Button>
+                )}
+                <Radio.Button value="prompt_only">仅弹窗提示</Radio.Button>
+              </Radio.Group>
+            </Form.Item>
+          );
+        }}
+      </Form.Item>
 
       <Typography.Title level={5} style={{ marginTop: 24, marginBottom: 16 }}>安全策略</Typography.Title>
 

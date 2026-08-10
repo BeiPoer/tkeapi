@@ -65,11 +65,11 @@ body[data-theme='dark'] .docs-api-system .docs-category-btn.active:hover {
   color: #18181b;
 }
 
-/* 顶栏毛玻璃：保证不被其它规则盖成实色底 */
+/* 顶栏毛玻璃：与模型广场对齐 */
 .docs-api-system .docs-top-nav-glass,
 .cyber-hacker-docs .docs-top-nav-glass {
-  -webkit-backdrop-filter: blur(18px) saturate(180%) !important;
-  backdrop-filter: blur(18px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(16px) saturate(180%) !important;
+  backdrop-filter: blur(16px) saturate(180%) !important;
 }
 
 /* 3. Markdown 文章视觉排版 (Fumadocs 极简科技风) */

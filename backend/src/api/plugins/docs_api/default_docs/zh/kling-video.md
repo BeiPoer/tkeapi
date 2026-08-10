@@ -1,8 +1,9 @@
 # 可灵 Kling 视频生成接入指南
 
-快手可灵 AI（Kling）具备行业顶尖的复杂物理模拟和运动连贯性。本平台提供了基于 OpenAI 兼容协议的视频路由分发，并在后台自动进行参数翻译与任务管理。
+快手可灵 AI（Kling）具备行业顶尖的复杂物理模拟和运动连贯性。本平台以 OpenAI 兼容协议提供视频生成能力，按下方示例接入即可。
 
-网关已将该通道的 `kling-v3-omni` 及其他模型包装为标准的 `/v1/video/generations` 路由。
+* **提交**：`POST /v1/video/generations`
+* **查询**：`GET /v1/video/generations/{task_id}` 或 `/v1/tasks/{task_id}`
 
 ---
 
@@ -28,7 +29,7 @@ curl -X POST https://{{domain}}/v1/video/generations \
 ```
 
 ### B. 经典图生视频 (首尾帧控制)
-通过传入 2 张图片 URL，网关会自动映射到可灵的 `image`（首帧）与 `image_tail`（尾帧），生成两张图之间的平滑动态变化。
+传入 2 张图片 URL：第一张为首帧、第二张为尾帧，生成两者之间的平滑过渡。
 ```bash
 curl -X POST https://{{domain}}/v1/video/generations \
   -H "Authorization: Bearer sk-your_token_here" \
@@ -45,7 +46,7 @@ curl -X POST https://{{domain}}/v1/video/generations \
 ```
 
 ### C. 多图融合参考 (Kling-v3-omni 独有)
-对于支持多图/视频联合输入的 `kling-v3-omni`，网关会自动将 `images` 列表打包为官方要求的 `image_list`（带 `first_frame` / `end_frame` 类型标记）实现高级生成。
+`kling-v3-omni` 支持多图参考。可用对象形式为每张图指定 `role`（如 `first_frame`、`reference_image`）。
 ```bash
 curl -X POST https://{{domain}}/v1/video/generations \
   -H "Authorization: Bearer sk-your_token_here" \
@@ -68,7 +69,7 @@ curl -X POST https://{{domain}}/v1/video/generations \
 ```
 
 ### D. 图像参考 + 视频参考多模态混合生成 (Kling-v3-omni 独有)
-可灵 v3-omni 模型支持同时传入图片与视频作为生成参考。网关底层会自动将 `videos` 参数转化为官方的 `video_list` 并配置相应的 `refer_type`（参考类型）。使用显式 `role`（或等价的 `type`）可以更精确地指定图片用途。
+可同时传入图片与视频作为参考。使用 `role`（或等价的 `type`）可更精确指定图片用途。
 ```bash
 curl -X POST https://{{domain}}/v1/video/generations \
   -H "Authorization: Bearer sk-your_token_here" \
@@ -109,13 +110,13 @@ curl -X GET https://{{domain}}/v1/video/generations/video_task_xyz789 \
 | `model` | `string` | **是** | - | 视频生成模型名，传入 `kling-v3-omni`。 |
 | `prompt` | `string` | **是** | - | 画面动作描述，字数上限 2000 字符。 |
 | `negative_prompt` | `string` | 否 | - | 负向提示词，用于规避不需要的画面元素或质量缺陷。 |
-| `images` / `image_urls` | `array` | 否 | - | 图片参考链接/对象数组。智能模式下：1张为首帧，2张为首尾帧。支持使用对象形式指定 `role` 或其等价字段 `type`。首帧可用 `"first_frame"`, `"first"`；尾帧可用 `"last_frame"`, `"end_frame"`, `"last"`, `"tail"`；参考图可用 `"reference_image"`。 |
-| `videos` | `array` | 否 | - | **（v3-omni 独有）** 视频参考链接/对象数组。网关在后台自动映射为可灵官方 `video_list` (支持配置 `refer_type` 如 `"base"`) 参数。 |
-| `resolution` | `string` | 否 | `"720p"` | 视频分辨率。传入 `"1080p"` 会自动配置为可灵官方的高级 `pro` 模式；传入 `"720p"` / `"480p"` 自动映射为标准 `std` 模式。 |
-| `ratio` | `string` | 否 | `"16:9"` | 视频比例。可选 `"16:9"`, `"9:16"`, `"1:1"`（网关自动映射为官方 `aspect_ratio`）。 |
-| `duration` | `integer` | 否 | `5` | 生成时长。通常可选 `5` 秒。 |
-| `generate_audio` | `boolean` | 否 | `false` | 是否同时生成配套背景音效（网关将自动转换为可灵的 `sound` 参数值为 `"on"` 或 `"off"`）。 |
-| `camera_control` | `object` | 否 | - | 镜头控制参数。包含 `pan` (水平)、`tilt` (垂直)、`zoom` (变焦)、`roll` (旋转) 等偏移，格式参考可灵官方定义。 |
+| `images` / `image_urls` | `array` | 否 | - | 图片参考链接/对象数组。默认：1 张为首帧，2 张为首尾帧。对象可指定 `role` 或 `type`：首帧 `"first_frame"` / `"first"`；尾帧 `"last_frame"` / `"end_frame"` / `"last"` / `"tail"`；参考图 `"reference_image"`。 |
+| `videos` | `array` | 否 | - | **（v3-omni 独有）** 视频参考链接/对象数组。 |
+| `resolution` | `string` | 否 | `"720p"` | 视频分辨率，如 `"720p"`、`"1080p"`、`"4k"`。 |
+| `ratio` | `string` | 否 | `"16:9"` | 视频比例。可选 `"16:9"`、`"9:16"`、`"1:1"`。 |
+| `duration` | `integer` | 否 | `5` | 生成时长（秒）。 |
+| `generate_audio` | `boolean` | 否 | `false` | 是否同时生成配套音效。 |
+| `camera_control` | `object` | 否 | - | 镜头控制。可含 `pan`、`tilt`、`zoom`、`roll` 等。 |
 
 ---
 

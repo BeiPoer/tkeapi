@@ -194,7 +194,7 @@ pub async fn convert_content_urls(
     .unwrap_or(false);
 
     if !plugin_enabled {
-        tracing::debug!(
+        tracing::info!(
             "[AssetConvert] 素材资产管理插件({}) 未启用，跳过素材转换",
             plugin_ns
         );
@@ -206,7 +206,7 @@ pub async fn convert_content_urls(
     let mut volc_config = match crate::api::plugins::get_volc_config(state, plugin_ns).await {
         Some(vc) => vc,
         None => {
-            tracing::debug!(
+            tracing::info!(
                 "[AssetConvert] 素材资产管理插件({}) 未配置审核凭证，跳过素材转换",
                 plugin_ns
             );
@@ -959,7 +959,7 @@ async fn create_asset(
                     return Err(format!("素材处理失败({}): {}", asset_id, reason));
                 }
                 status => {
-                    tracing::debug!(
+                    tracing::info!(
                         "[AssetConvert] 素材处理中: {} 状态={} (第{}/{}次)",
                         asset_id,
                         status,
@@ -1106,17 +1106,12 @@ pub async fn convert_content_urls_via_upstream(
     .ok()
     .flatten();
 
-    let Some(mut row) = row else {
-        // 插件记录不存在 → 等同未启用
-        tracing::debug!("[UpstreamAsset] 插件未启用，跳过素材转换");
+    // 插件记录不存在或未启用 → 同样跳过
+    let Some(mut row) = row.filter(|r| r.plugin_enabled == 1) else {
+        tracing::info!("[UpstreamAsset] 插件未启用，跳过素材转换");
         logs.push("上游素材转换跳过: 插件未启用".to_string());
         return (logs, errors);
     };
-    if row.plugin_enabled != 1 {
-        tracing::debug!("[UpstreamAsset] 插件未启用，跳过素材转换");
-        logs.push("上游素材转换跳过: 插件未启用".to_string());
-        return (logs, errors);
-    }
     if row.binding_found.is_none() {
         errors.push(format!(
             "上游素材转换失败: 绑定#{} 不存在或上游渠道配置已删除",

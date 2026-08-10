@@ -24,6 +24,7 @@ interface MobileCardListProps<T> {
     showSizeChanger?: boolean;
     pageSizeOptions?: string[];
     showTotal?: (total: number) => string;
+    showQuickJumper?: boolean;
   };
   compact?: boolean;
   gap?: number;
@@ -94,6 +95,7 @@ function MobileCardList<T extends Record<string, any>>({
             showSizeChanger={pagination && pagination.showSizeChanger}
             pageSizeOptions={pagination && pagination.pageSizeOptions}
             showTotal={pagination && pagination.showTotal}
+            showQuickJumper={pagination && pagination.showQuickJumper}
           />
         </div>
       )}

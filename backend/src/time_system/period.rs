@@ -101,3 +101,45 @@ fn resolve_local(tz: Tz, naive: chrono::NaiveDateTime) -> DateTime<Tz> {
         chrono::LocalResult::None => Utc.from_utc_datetime(&naive).with_timezone(&tz),
     }
 }
+
+/// 按自定义日切点计算额度日键（站点 timedisplay）。
+/// 有效刷新时刻 = 某日历日 `hour:minute` + `cooldown_minutes`；
+/// 日键取「最近一次已到达的切点」所对应的那个日历日（冷却跨午夜时会正确回退多天）。
+pub fn quota_day_key_with_cutover(
+    timedisplay: &str,
+    hour: i32,
+    minute: i32,
+    cooldown_minutes: i32,
+) -> String {
+    quota_day_key_with_cutover_at(Utc::now(), timedisplay, hour, minute, cooldown_minutes)
+}
+
+fn quota_day_key_with_cutover_at(
+    now_utc: DateTime<Utc>,
+    timedisplay: &str,
+    hour: i32,
+    minute: i32,
+    cooldown_minutes: i32,
+) -> String {
+    let tz = parse_timedisplay(timedisplay);
+    let local = now_utc.with_timezone(&tz);
+    let h = hour.clamp(0, 23) as u32;
+    let m = minute.clamp(0, 59) as u32;
+    let cool = i64::from(cooldown_minutes.max(0));
+
+    // 冷却可能把切点推到次日；大冷却需回退更多天
+    let max_back = 2 + cool / (24 * 60);
+    let today = local.date_naive();
+
+    for back in 0..=max_back {
+        let day = today - Duration::days(back);
+        let base = resolve_local(tz, day.and_time(NaiveTime::from_hms_opt(h, m, 0).unwrap()));
+        let cutoff = base + Duration::minutes(cool);
+        if local >= cutoff {
+            return day.format("%Y-%m-%d").to_string();
+        }
+    }
+    (today - Duration::days(max_back))
+        .format("%Y-%m-%d")
+        .to_string()
+}

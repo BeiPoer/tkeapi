@@ -6,17 +6,22 @@
  */
 
 import React, { useEffect, useState, useCallback } from 'react';
-import { Card, Typography, Avatar, Space, List, Button, Modal, Form, Input, message, Popconfirm, Select, Grid } from 'antd';
-import { UserOutlined, CameraOutlined, LockOutlined, MailOutlined, MobileOutlined, WechatOutlined, GoogleOutlined, SafetyOutlined } from '@ant-design/icons';
+import { Card, Typography, Avatar, Space, List, Button, Modal, Form, Input, message, Popconfirm, Select, Grid, Tag, Spin } from 'antd';
+import { UserOutlined, CameraOutlined, LockOutlined, MailOutlined, MobileOutlined, WechatOutlined, GoogleOutlined, SafetyOutlined, IdcardOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import { Settings } from 'lucide-react';
 import request from '../../utils/request';
-import type { User } from '../../types';
+import type { User, UserKyc, UserKycStatus } from '../../types';
 import useAuthStore from '../../store/auth';
 import useSettingsStore from '../../store/settings';
 import { useThemeStore } from '../../store/theme';
 import WechatQR from '../../components/WechatQR';
+import UserKycFormFields, {
+  kycToFormValues,
+  formValuesToKycPayload,
+  KYC_STATUS_META,
+} from '../../components/UserKycFormFields';
 
 const { Title, Text } = Typography;
 
@@ -77,6 +82,7 @@ const Profile: React.FC = () => {
   const [isModalVisible, setIsModalVisible] = useState(false);
   const [modalType, setModalType] = useState<string>('nickname');
   const [form] = Form.useForm();
+  const [kycForm] = Form.useForm();
   const { setUser } = useAuthStore();
   const { settings } = useSettingsStore();
   const { themeMode } = useThemeStore();
@@ -99,6 +105,12 @@ const Profile: React.FC = () => {
   const [wechatQRKey, setWechatQRKey] = useState(() => Date.now());
   // 服务端 HMAC 签发的绑定/验证 state
   const [wechatBindState, setWechatBindState] = useState('');
+  // 实名认证 KYC
+  const [userKyc, setUserKyc] = useState<UserKyc | null>(null);
+  const [kycLoading, setKycLoading] = useState(false);
+  const [kycModalOpen, setKycModalOpen] = useState(false);
+  const [kycSaving, setKycSaving] = useState(false);
+  const kycEnabled = settings?.registration?.enable_user_kyc === true;
 
   const startCountdown = (key: string) => {
     setCountdowns(prev => ({ ...prev, [key]: 60 }));
@@ -117,6 +129,48 @@ const Profile: React.FC = () => {
   }, [setUser]);
 
   useEffect(() => { fetchProfile(); }, [fetchProfile]);
+
+  const fetchKyc = useCallback(async () => {
+    if (!kycEnabled) {
+      setUserKyc(null);
+      return;
+    }
+    setKycLoading(true);
+    try {
+      const resp = await (request.get('/user/kyc') as unknown as Promise<UserKyc>);
+      setUserKyc(resp);
+    } catch (e) {
+      console.error(e);
+      setUserKyc(null);
+    } finally {
+      setKycLoading(false);
+    }
+  }, [kycEnabled]);
+
+  useEffect(() => { fetchKyc(); }, [fetchKyc]);
+
+  const openKycModal = () => {
+    kycForm.resetFields();
+    kycForm.setFieldsValue(kycToFormValues(userKyc));
+    setKycModalOpen(true);
+  };
+
+  const handleSubmitKyc = async () => {
+    try {
+      const values = await kycForm.validateFields();
+      setKycSaving(true);
+      const payload = formValuesToKycPayload(values, false);
+      const res = await (request.put('/user/kyc', payload) as unknown as Promise<UserKyc>);
+      setUserKyc(res);
+      message.success(isEn ? 'KYC submitted' : '实名认证已提交，请等待审核');
+      setKycModalOpen(false);
+    } catch (e: any) {
+      if (e?.errorFields) return;
+      console.error(e);
+    } finally {
+      setKycSaving(false);
+    }
+  };
 
   // 打开微信绑定弹窗或切换步骤时，向后端获取 HMAC state
   useEffect(() => {
@@ -529,6 +583,65 @@ const Profile: React.FC = () => {
         />
       </Card>
 
+      {/* 账号实名认证 KYC */}
+      {kycEnabled && (
+        <Card style={{ marginBottom: 24, borderRadius: 8, background: cardBg, border: cardBorder }}>
+          <List
+            itemLayout="horizontal"
+            dataSource={[{
+              key: 'kyc',
+              label: isEn ? 'Identity Verification (KYC)' : '账号实名认证',
+              value: kycLoading
+                ? '...'
+                : (KYC_STATUS_META[(userKyc?.status as UserKycStatus) || 'none']?.label || (isEn ? 'Not verified' : '未认证')),
+            }]}
+            renderItem={(item) => {
+              const status = (userKyc?.status as UserKycStatus) || 'none';
+              const meta = KYC_STATUS_META[status];
+              const approved = status === 'approved';
+              const actionLabel = approved
+                ? (isEn ? 'View' : '查看')
+                : status === 'pending' || status === 'rejected'
+                  ? (isEn ? 'Update' : '修改提交')
+                  : (isEn ? 'Verify' : '去认证');
+              return (
+                <List.Item
+                  className="hover:bg-zinc-100/30 dark:hover:bg-zinc-800/30 transition-all duration-200"
+                  style={{ borderBottom: listBorder, padding: '16px 24px' }}
+                  extra={
+                    <button
+                      onClick={openKycModal}
+                      className="p-1 rounded-md border border-zinc-200 dark:border-zinc-800 text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-900 transition-colors cursor-pointer"
+                      title={actionLabel}
+                    >
+                      <Settings className="h-3.5 w-3.5" />
+                    </button>
+                  }
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: 160 }}>
+                    <IdcardOutlined style={{ color: subText }} />
+                    <Text style={{ color: subText }}>{item.label}</Text>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    {kycLoading ? <Spin size="small" /> : (
+                      <Space>
+                        <Tag color={meta.color}>{meta.label}</Tag>
+                        {userKyc?.kyc_type === 'enterprise' && userKyc?.company_name && (
+                          <Text style={{ color: mainText }}>{userKyc.company_name}</Text>
+                        )}
+                        {userKyc?.kyc_type === 'personal' && userKyc?.real_name && (
+                          <Text style={{ color: mainText }}>{userKyc.real_name}</Text>
+                        )}
+                      </Space>
+                    )}
+                  </div>
+                </List.Item>
+              );
+            }}
+          />
+        </Card>
+      )}
+
       {/* Security */}
       <Card style={{ borderRadius: 8, background: cardBg, border: cardBorder }}>
         <List itemLayout="horizontal" dataSource={securityItems}
@@ -585,6 +698,30 @@ const Profile: React.FC = () => {
         ) : (
           renderModalContent()
         )}
+      </Modal>
+
+      <Modal
+        title={isEn ? 'Identity Verification (KYC)' : '账号实名认证'}
+        open={kycModalOpen}
+        onCancel={() => setKycModalOpen(false)}
+        onOk={userKyc?.status === 'approved' ? () => setKycModalOpen(false) : handleSubmitKyc}
+        okText={userKyc?.status === 'approved' ? t('common.close', '关闭') : (isEn ? 'Submit' : '提交认证')}
+        cancelText={t('common.cancel')}
+        confirmLoading={kycSaving}
+        width={640}
+        destroyOnClose
+        footer={userKyc?.status === 'approved' ? (
+          <Button onClick={() => setKycModalOpen(false)}>{t('common.close', '关闭')}</Button>
+        ) : undefined}
+      >
+        <Form form={kycForm} layout="vertical">
+          <UserKycFormFields
+            form={kycForm}
+            mode="user"
+            readOnly={userKyc?.status === 'approved'}
+            currentStatus={(userKyc?.status as UserKycStatus) || 'none'}
+          />
+        </Form>
       </Modal>
     </div>
   );

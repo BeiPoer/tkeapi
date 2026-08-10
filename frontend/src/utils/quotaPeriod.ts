@@ -127,6 +127,32 @@ export function getLocalPeriodKeys(tz: string) {
   return { nowDay, nowWeek, nowMonth };
 }
 
+/**
+ * 按自定义刷新时刻 + 冷却计算额度日键（与后端 `quota_day_key_with_cutover` 一致）。
+ * 日键取「最近一次已到达的切点」对应的日历日；冷却跨午夜时会回退多天。
+ */
+function getQuotaDayKeyWithCutover(
+  tz: string,
+  hour = 0,
+  minute = 0,
+  cooldownMinutes = 0,
+): string {
+  const now = dayjs().tz(tz);
+  const h = Math.min(23, Math.max(0, Math.floor(hour)));
+  const m = Math.min(59, Math.max(0, Math.floor(minute)));
+  const cool = Math.max(0, Math.floor(cooldownMinutes));
+  const maxBack = 2 + Math.floor(cool / (24 * 60));
+
+  for (let back = 0; back <= maxBack; back += 1) {
+    const day = now.startOf('day').subtract(back, 'day');
+    const cutoff = day.hour(h).minute(m).second(0).millisecond(0).add(cool, 'minute');
+    if (!now.isBefore(cutoff)) {
+      return day.format('YYYY-MM-DD');
+    }
+  }
+  return now.startOf('day').subtract(maxBack, 'day').format('YYYY-MM-DD');
+}
+
 export function getEffectiveChannelPeriodUsed(
   record: {
     last_reset_day?: string | null;
@@ -135,10 +161,20 @@ export function getEffectiveChannelPeriodUsed(
     daily_quota_used?: number | null;
     weekly_quota_used?: number | null;
     monthly_quota_used?: number | null;
+    daily_reset_hour?: number | null;
+    daily_reset_minute?: number | null;
+    daily_reset_cooldown_minutes?: number | null;
   },
   tz?: string,
 ) {
-  const { nowDay, nowWeek, nowMonth } = getLocalPeriodKeys(tz || siteTimezone());
+  const zone = tz || siteTimezone();
+  const { nowWeek, nowMonth } = getLocalPeriodKeys(zone);
+  const nowDay = getQuotaDayKeyWithCutover(
+    zone,
+    record.daily_reset_hour ?? 0,
+    record.daily_reset_minute ?? 0,
+    record.daily_reset_cooldown_minutes ?? 0,
+  );
   return {
     dailyUsed: record.last_reset_day === nowDay ? (record.daily_quota_used || 0) : 0,
     weeklyUsed: record.last_reset_week === nowWeek ? (record.weekly_quota_used || 0) : 0,

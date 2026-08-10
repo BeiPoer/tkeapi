@@ -27,7 +27,7 @@ curl -X POST https://{{domain}}/v1/images/generations \
 | `prompt` | `string` | Yes | - | Prompt describing the image (superb Chinese support). |
 | `size` | `string` | No | `1024x1024` | Image dimensions: `1024x1024`, `720x1280`, `1280x720`, etc. |
 | `response_format` | `string` | No | `url` | Response format: `url` or `b64_json`. |
-| `web_search` | `boolean` | No | `false` | Enable web search. Use this OpenAI-style boolean; — the gateway converts it for Volcengine. |
+| `web_search` | `boolean` | No | `false` | Enable web search. |
 
 ### 4. Response Example (200 OK)
 ```json

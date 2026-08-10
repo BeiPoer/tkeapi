@@ -349,6 +349,27 @@ pub async fn create_order(
             return Err(AppError::BadRequest("通联支付暂未开启".to_string()));
         }
 
+        // 通联子渠道可单独关闭；先 merge 以兼容旧版拆分配置
+        let raw_channels_ui: Option<crate::models::PaymentChannelsUiSettings> =
+            sqlx::query_scalar::<_, String>(
+                &state
+                    .db
+                    .format_query("SELECT value FROM settings WHERE key = 'payment_channels_ui'"),
+            )
+            .fetch_optional(&state.db.pool)
+            .await?
+            .and_then(|v| serde_json::from_str(&v).ok());
+        let channels_ui = crate::models::merge_payment_channels_ui(
+            raw_channels_ui,
+            &crate::models::PaymentGatewayEnableFlags {
+                allinpay: true,
+                ..Default::default()
+            },
+        );
+        if !crate::models::is_payment_channel_ui_enabled(&channels_ui, &payload.payment_method) {
+            return Err(AppError::BadRequest("该通联支付渠道暂未开启".to_string()));
+        }
+
         let allinpay_client = AllinpayClient::new(allinpay_config);
         let notify_url = format!("{}/api/v1/finance/pay/notify/allinpay", base_notify_url);
 

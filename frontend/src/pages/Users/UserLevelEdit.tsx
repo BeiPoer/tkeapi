@@ -200,7 +200,7 @@ const UserLevelEdit: React.FC = () => {
                   <ul className="space-y-3 text-xs m-0 pl-0 list-none">
                     <li className="flex flex-col gap-1 relative pl-3 before:content-[''] before:absolute before:left-0 before:top-2 before:w-1 before:h-1 before:bg-primary/50 before:rounded-full">
                       <span className="font-medium text-foreground flex items-center gap-1.5"><span className="text-[14px]">🎚️</span> 用户等级折扣优先</span>
-                      <span className="text-muted-foreground/80 leading-snug">仅比较 <code className="bg-background border border-border/50 px-1 py-0.5 rounded text-[11px] font-mono text-foreground">用户模型折扣</code> 与 <code className="bg-background border border-border/50 px-1 py-0.5 rounded text-[11px] font-mono text-foreground">用户等级折扣</code>，自动选取<strong className="text-foreground">最低值</strong>。</span>
+                      <span className="text-muted-foreground/80 leading-snug">仅比较 <code className="bg-background border border-border/50 px-1 py-0.5 rounded text-[11px] font-mono text-foreground">用户模型折扣</code> 与 <code className="bg-background border border-border/50 px-1 py-0.5 rounded text-[11px] font-mono text-foreground">用户等级折扣</code>，自动选取<strong className="text-foreground">最低值</strong>。选取用户等级折扣，模型站点折扣不生效，只有单独为用户设置的模型折扣才生效。</span>
                     </li>
                     <li className="flex flex-col gap-1 relative pl-3 before:content-[''] before:absolute before:left-0 before:top-2 before:w-1 before:h-1 before:bg-primary/50 before:rounded-full">
                       <span className="font-medium text-foreground flex items-center gap-1.5"><span className="text-[14px]">🌐</span> 全站折扣优先</span>

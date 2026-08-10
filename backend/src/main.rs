@@ -44,7 +44,10 @@ pub struct AppState {
     pub ha_cooldown_network: std::sync::atomic::AtomicI64,
     pub ha_cooldown_auth: std::sync::atomic::AtomicI64,
     pub ha_cooldown_404: std::sync::atomic::AtomicI64,
-    pub ha_meltdown_whitelist: std::sync::Arc<std::sync::RwLock<Vec<String>>>,
+    /// HA 整次请求墙钟预算（秒）；0=自动 min(540, 上游超时-60)
+    pub ha_total_timeout_secs: std::sync::atomic::AtomicI64,
+    pub ha_meltdown_whitelist: std::sync::RwLock<Vec<String>>,
+    pub ha_meltdown_blacklist: std::sync::RwLock<Vec<String>>,
     /// 级联阶段二进行中互斥（log_id → ()），防并发轮询重复裁剪/超分
     pub cascade_s2_inflight: dashmap::DashMap<i64, ()>,
     /// 日限额内存拦截器（DashMap + DB hydration）
@@ -124,7 +127,9 @@ async fn main() -> anyhow::Result<()> {
         ha_cooldown_network: std::sync::atomic::AtomicI64::new(300),
         ha_cooldown_auth: std::sync::atomic::AtomicI64::new(1800),
         ha_cooldown_404: std::sync::atomic::AtomicI64::new(3),
-        ha_meltdown_whitelist: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
+        ha_total_timeout_secs: std::sync::atomic::AtomicI64::new(0),
+        ha_meltdown_whitelist: std::sync::RwLock::new(Vec::new()),
+        ha_meltdown_blacklist: std::sync::RwLock::new(Vec::new()),
         cascade_s2_inflight: dashmap::DashMap::new(),
         quota_memory: relay::quota_memory::MemoryQuotaGuard::new(),
         billing_ingress,
@@ -149,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
         })
     });
 
-    // 3. 启动后台异步任务轮询器（每 2 分钟自动检查未结算的视频/图片生成任务）
+    // 3. 启动后台异步任务轮询器（按 POLL_TICK_INTERVAL_SECS 检查未结算的视频/图片生成任务）
     bg_handles.push(relay::task::start(state.clone(), shutdown_rx.clone()));
 
     // 4. 实时指标冷用户清理（每 5 分钟，空闲 >1h 剔除）
@@ -565,13 +570,23 @@ impl AppState {
         };
 
         for (key, val) in configs {
-            if key == "ha_meltdown_whitelist" {
-                // 白名单存储为 JSON 数组字符串，解析后预转小写写入 RwLock
-                if let Ok(list) = serde_json::from_str::<Vec<String>>(&val) {
-                    let lowered: Vec<String> = list.into_iter().map(|s| s.to_lowercase()).collect();
-                    if let Ok(mut wl) = self.ha_meltdown_whitelist.write() {
-                        *wl = lowered;
-                    }
+            if key == "ha_meltdown_whitelist" || key == "ha_meltdown_blacklist" {
+                // 名单：JSON 数组 → trim + 小写；解析失败视为空（避免脏数据残留）
+                let lowered = serde_json::from_str::<Vec<String>>(&val)
+                    .map(|list| {
+                        list.into_iter()
+                            .map(|s| s.trim().to_lowercase())
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let slot = if key == "ha_meltdown_whitelist" {
+                    &self.ha_meltdown_whitelist
+                } else {
+                    &self.ha_meltdown_blacklist
+                };
+                if let Ok(mut guard) = slot.write() {
+                    *guard = lowered;
                 }
                 continue;
             }
@@ -592,6 +607,9 @@ impl AppState {
                     "ha_cooldown_404" => self
                         .ha_cooldown_404
                         .store(parsed_val, std::sync::atomic::Ordering::Relaxed),
+                    "ha_total_timeout_secs" => self
+                        .ha_total_timeout_secs
+                        .store(parsed_val.max(0), std::sync::atomic::Ordering::Relaxed),
                     _ => {}
                 }
             }

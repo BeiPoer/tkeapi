@@ -9,20 +9,74 @@ use axum::{
     extract::{Path, State},
     Json,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::api::plugins::{is_plugin_compiled, is_plugin_enabled};
 use crate::error::AppResult;
 use crate::models::{CreateRuleRequest, ForwardRule, UpdateRuleRequest};
 use crate::AppState;
 
+/// 系统默认转发规则 → 依赖的站点插件（未编译或未启用则不展示）。
+const PLUGIN_GATED_SYSTEM_RULES: &[(&str, &str)] = &[
+    ("火山方舟 级联视频生成", "volcengine_enhance"),
+    ("火山方舟 视频素材转换", "asset_manager"),
+    ("火山方舟 视频素材转换(国际版)", "asset_manager_intl"),
+    ("火山方舟 视频素材免审核转换(国际版)", "asset_manager_intl"),
+];
+
+const PLUGIN_GATED_PLUGIN_NAMES: &[&str] =
+    &["volcengine_enhance", "asset_manager", "asset_manager_intl"];
+
+/// 解析规则依赖的插件名；无依赖返回 `None`。
+pub(crate) fn required_plugin_for_forward_rule(
+    name: &str,
+    config_json: &str,
+) -> Option<&'static str> {
+    for (rule_name, plugin) in PLUGIN_GATED_SYSTEM_RULES {
+        if name == *rule_name {
+            return Some(*plugin);
+        }
+    }
+    if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(config_json) {
+        if cfg.get("asset_convert_ns").and_then(|v| v.as_str()) == Some("asset_manager_intl") {
+            return Some("asset_manager_intl");
+        }
+    }
+    None
+}
+
+/// `plugin_available(name)`：插件已编译且已启用时返回 true。
+pub(crate) fn should_hide_plugin_gated_rule(
+    name: &str,
+    config_json: &str,
+    plugin_available: &HashMap<&str, bool>,
+) -> bool {
+    match required_plugin_for_forward_rule(name, config_json) {
+        Some(plugin) => !plugin_available.get(plugin).copied().unwrap_or(false),
+        None => false,
+    }
+}
+
+async fn load_plugin_availability(state: &AppState) -> HashMap<&'static str, bool> {
+    let mut map = HashMap::new();
+    for &name in PLUGIN_GATED_PLUGIN_NAMES {
+        let ok = is_plugin_compiled(name) && is_plugin_enabled(state, name).await;
+        map.insert(name, ok);
+    }
+    map
+}
+
 pub async fn list_rules(State(state): State<Arc<AppState>>) -> AppResult<Json<Vec<ForwardRule>>> {
-    let rules = sqlx::query_as(
+    let mut rules: Vec<ForwardRule> = sqlx::query_as(
         &state
             .db
             .format_query("SELECT * FROM forward_rules ORDER BY sort_order DESC, id DESC"),
     )
     .fetch_all(&state.db.pool)
     .await?;
+    let availability = load_plugin_availability(&state).await;
+    rules.retain(|r| !should_hide_plugin_gated_rule(&r.name, &r.config_json, &availability));
     Ok(Json(rules))
 }
 
@@ -271,4 +325,102 @@ pub async fn delete_rule(
     .await?;
 
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{required_plugin_for_forward_rule, should_hide_plugin_gated_rule};
+    use std::collections::HashMap;
+
+    fn availability<'a>(pairs: &'a [(&'a str, bool)]) -> HashMap<&'a str, bool> {
+        pairs.iter().copied().collect()
+    }
+
+    #[test]
+    fn map_system_rules_to_plugins() {
+        assert_eq!(
+            required_plugin_for_forward_rule("火山方舟 级联视频生成", "{}"),
+            Some("volcengine_enhance")
+        );
+        assert_eq!(
+            required_plugin_for_forward_rule("火山方舟 视频素材转换", r#"{"asset_convert":true}"#),
+            Some("asset_manager")
+        );
+        assert_eq!(
+            required_plugin_for_forward_rule(
+                "火山方舟 视频素材转换(国际版)",
+                r#"{"asset_convert_ns":"asset_manager_intl"}"#
+            ),
+            Some("asset_manager_intl")
+        );
+        assert_eq!(
+            required_plugin_for_forward_rule(
+                "火山方舟 视频素材免审核转换(国际版)",
+                r#"{"asset_convert_ns":"asset_manager_intl","moderation":true}"#
+            ),
+            Some("asset_manager_intl")
+        );
+        assert_eq!(
+            required_plugin_for_forward_rule("火山方舟 视频生成", "{}"),
+            None
+        );
+    }
+
+    #[test]
+    fn hide_when_plugin_disabled_or_missing() {
+        let off = availability(&[
+            ("volcengine_enhance", false),
+            ("asset_manager", false),
+            ("asset_manager_intl", false),
+        ]);
+        assert!(should_hide_plugin_gated_rule(
+            "火山方舟 级联视频生成",
+            r#"{"is_cascade":true}"#,
+            &off
+        ));
+        assert!(should_hide_plugin_gated_rule(
+            "火山方舟 视频素材转换",
+            r#"{"asset_convert":true}"#,
+            &off
+        ));
+        assert!(should_hide_plugin_gated_rule(
+            "火山方舟 视频素材转换(国际版)",
+            r#"{"asset_convert_ns":"asset_manager_intl"}"#,
+            &off
+        ));
+        assert!(should_hide_plugin_gated_rule(
+            "自定义国际素材转换",
+            r#"{"asset_convert_ns":"asset_manager_intl"}"#,
+            &off
+        ));
+    }
+
+    #[test]
+    fn show_when_plugin_available() {
+        let on = availability(&[
+            ("volcengine_enhance", true),
+            ("asset_manager", true),
+            ("asset_manager_intl", true),
+        ]);
+        assert!(!should_hide_plugin_gated_rule(
+            "火山方舟 级联视频生成",
+            "{}",
+            &on
+        ));
+        assert!(!should_hide_plugin_gated_rule(
+            "火山方舟 视频素材转换",
+            r#"{"asset_convert":true}"#,
+            &on
+        ));
+        assert!(!should_hide_plugin_gated_rule(
+            "火山方舟 视频素材转换(国际版)",
+            r#"{"asset_convert_ns":"asset_manager_intl"}"#,
+            &on
+        ));
+        assert!(!should_hide_plugin_gated_rule(
+            "火山方舟 视频生成",
+            "{}",
+            &on
+        ));
+    }
 }

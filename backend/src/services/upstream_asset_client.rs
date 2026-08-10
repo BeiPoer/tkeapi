@@ -107,14 +107,15 @@ pub async fn call_action_logged(
 ) -> Result<Value> {
     let url = append_action_query(ctx.endpoint_base, action);
     let req_payload = body.to_string();
-    let res = ctx
-        .http
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", ctx.api_key))
-        .header("Content-Type", "application/json")
-        .json(body)
-        .send()
-        .await?;
+    let res = crate::services::http_client::with_upstream_timeout(
+        ctx.http
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", ctx.api_key))
+            .header("Content-Type", "application/json")
+            .json(body),
+    )
+    .send()
+    .await?;
     let status_code = res.status().as_u16() as i32;
     let text = res.text().await.unwrap_or_default();
     spawn_api_log(

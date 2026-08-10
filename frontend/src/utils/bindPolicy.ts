@@ -1,0 +1,119 @@
+/*
+ * tokensbyte opensource
+ * (c) 2026 tokensbyte.ai
+ * @copyright      Copyright netbcloud/wstianxia
+ * @license        MIT (https://www.tokensbyte.ai/)
+ */
+
+import type { RegistrationSettings, User } from '../types';
+
+type BindEnforcement = 'all' | 'any' | 'prompt_only';
+
+export function hasValidMobile(mobile?: string | null): boolean {
+  return !!(mobile && mobile.trim());
+}
+
+export function hasValidEmail(email?: string | null): boolean {
+  const e = (email || '').trim();
+  return !!e && !e.endsWith('@tokensbyte.local');
+}
+
+export function isBindPolicyActive(reg?: RegistrationSettings | null): boolean {
+  return !!(reg?.require_bind_mobile || reg?.require_bind_email);
+}
+
+/** 用户绑定是否已满足策略（用于弹窗与前端预检） */
+export function isBindSatisfied(
+  reg?: RegistrationSettings | null,
+  user?: Pick<User, 'email' | 'mobile'> | null,
+): boolean {
+  if (!isBindPolicyActive(reg)) return true;
+  const needMobile = !!reg?.require_bind_mobile;
+  const needEmail = !!reg?.require_bind_email;
+  const hasMobile = hasValidMobile(user?.mobile);
+  const hasEmail = hasValidEmail(user?.email);
+  if (needMobile && needEmail) {
+    return reg?.bind_enforcement === 'any' ? hasMobile || hasEmail : hasMobile && hasEmail;
+  }
+  if (needMobile) return hasMobile;
+  if (needEmail) return hasEmail;
+  return true;
+}
+
+/** 创建令牌是否应被硬拦截 */
+export function shouldBlockTokenCreate(
+  reg?: RegistrationSettings | null,
+  user?: Pick<User, 'email' | 'mobile' | 'role'> | null,
+): boolean {
+  if (user?.role === 'admin') return false;
+  if (!isBindPolicyActive(reg)) return false;
+  if (reg?.bind_enforcement === 'prompt_only') return false;
+  return !isBindSatisfied(reg, user);
+}
+
+export function tokenBindBlockMessage(reg?: RegistrationSettings | null): string {
+  const needMobile = !!reg?.require_bind_mobile;
+  const needEmail = !!reg?.require_bind_email;
+  if (needMobile && needEmail) {
+    return reg?.bind_enforcement === 'any'
+      ? '创建 API 令牌前请先绑定手机号或邮箱'
+      : '创建 API 令牌前请先绑定手机号和邮箱';
+  }
+  if (needMobile) return '创建 API 令牌前请先绑定手机号';
+  if (needEmail) return '创建 API 令牌前请先绑定邮箱';
+  return '创建 API 令牌前请先完成账号绑定';
+}
+
+export function bindPromptDescription(reg?: RegistrationSettings | null): string {
+  const needMobile = !!reg?.require_bind_mobile;
+  const needEmail = !!reg?.require_bind_email;
+  const soft = reg?.bind_enforcement === 'prompt_only';
+  let need = '';
+  if (needMobile && needEmail) {
+    need = reg?.bind_enforcement === 'any' ? '手机号或邮箱' : '手机号和邮箱';
+  } else if (needMobile) {
+    need = '手机号';
+  } else if (needEmail) {
+    need = '邮箱';
+  }
+  if (soft) {
+    return `为保障账号安全，建议绑定${need}。可稍后处理，关闭后当天不再提示。`;
+  }
+  return `为保障账号安全，请绑定${need}。可稍后处理，关闭后当天不再提示；创建 API 令牌前需完成绑定。`;
+}
+
+/** 站点时区下的自然日 YYYY-MM-DD */
+function calendarDateInTz(timeZone?: string): string {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+function dismissStorageKey(userId: string, date: string): string {
+  return `tokensbyte_bind_prompt_dismiss_${userId}_${date}`;
+}
+
+export function isBindPromptDismissedToday(userId: string, timeZone?: string): boolean {
+  const date = calendarDateInTz(timeZone);
+  try {
+    return localStorage.getItem(dismissStorageKey(userId, date)) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function dismissBindPromptToday(userId: string, timeZone?: string): void {
+  const date = calendarDateInTz(timeZone);
+  try {
+    localStorage.setItem(dismissStorageKey(userId, date), '1');
+  } catch {
+    // ignore
+  }
+}

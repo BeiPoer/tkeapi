@@ -37,6 +37,8 @@ export interface PlaygroundModel {
   scheme_id: string;
   scheme_name: string;
   scheme_type: string;
+  /** 方案固定字段：最大参考图数量 */
+  max_reference_images?: number;
   endpoint?: string;
   poll_endpoint?: string;
   params: SchemeParam[];

@@ -1,11 +1,13 @@
-# syntax=docker/dockerfile:1
+
+
 # USE_PREBUILT=0 容器内编译；=1 用根目录 Linux ELF。JOBS/CACHE 由 compose/脚本注入。
 
+ARG DOCKER_IMAGE_PREFIX=""
 ARG USE_PREBUILT=0
 ARG ENABLE_CARGO_CACHE=1
 ARG CARGO_BUILD_JOBS=1
 
-FROM rust:slim-bookworm AS build-deps
+FROM ${DOCKER_IMAGE_PREFIX}rust:slim-bookworm AS build-deps
 ARG CARGO_BUILD_JOBS=1
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     CARGO_INCREMENTAL=0 \
@@ -47,7 +49,7 @@ FROM build-plain AS src-0
 FROM build-cached AS src-1
 FROM src-${ENABLE_CARGO_CACHE} AS build-from-source
 
-FROM debian:bookworm-slim AS build-from-prebuilt
+FROM ${DOCKER_IMAGE_PREFIX}debian:bookworm-slim AS build-from-prebuilt
 # 架构校验由导出脚本完成；此处只 COPY，避免 apt 拖慢 Mac 预编译打包
 COPY tokensbyte-server-bin /tokensbyte-server
 RUN chmod +x /tokensbyte-server
@@ -57,7 +59,7 @@ FROM build-from-prebuilt AS binary-1
 ARG USE_PREBUILT=0
 FROM binary-${USE_PREBUILT} AS binary
 
-FROM debian:bookworm-slim
+FROM ${DOCKER_IMAGE_PREFIX}debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3 libsqlite3-0 ca-certificates postgresql-client wget \
     && rm -rf /var/lib/apt/lists/*

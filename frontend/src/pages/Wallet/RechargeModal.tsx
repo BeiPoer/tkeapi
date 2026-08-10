@@ -6,15 +6,24 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Modal, Button, Typography, Space, Row, Col, QRCode, message, Spin, Result, InputNumber } from 'antd';
+import { Modal, Button, Typography, Space, Row, Col, QRCode, message, Spin, Result, InputNumber, Grid } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { WalletOutlined, AlipayCircleOutlined, WechatOutlined, SafetyCertificateOutlined, LockOutlined, CreditCardOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import request from '../../utils/request';
 import { useThemeStore } from '../../store/theme';
 import useSettingsStore from '../../store/settings';
 import useAuthStore from '../../store/auth';
+import {
+  getAllinpayMethods,
+  getChannelMeta,
+  resolveChannelName,
+  resolveChannelSubtitle,
+  type PaymentChannelUiItem,
+  type PaymentMethodId,
+} from '../../constants/paymentChannels';
 
 const { Title, Text } = Typography;
+const { useBreakpoint } = Grid;
 
 interface RechargeModalProps {
   visible: boolean;
@@ -115,15 +124,11 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
       setSelectedAmount(defaultSel);
     }
   }, [amounts, isCustom]);
-  const [paymentMethod, setPaymentMethod] = useState<'wechat' | 'alipay' | 'stripe' | 'bonuspay' | 'hyperbc' | 'allinpay_wechat' | 'allinpay_alipay'>('alipay');
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethodId>('alipay');
+  const [selectedChannel, setSelectedChannel] = useState<string>('alipay');
   const [loading, setLoading] = useState(false);
-  
-  const [wechatEnabled, setWechatEnabled] = useState(false);
-  const [alipayEnabled, setAlipayEnabled] = useState(false);
-  const [stripeEnabled, setStripeEnabled] = useState(false);
-  const [bonuspayEnabled, setBonuspayEnabled] = useState(false);
-  const [hyperbcEnabled, setHyperbcEnabled] = useState(false);
-  const [allinpayEnabled, setAllinpayEnabled] = useState(false);
+
+  const [paymentChannels, setPaymentChannels] = useState<PaymentChannelUiItem[]>([]);
   const [fetchingSettings, setFetchingSettings] = useState(true);
 
   // BonusPay TOPUP 参数
@@ -224,37 +229,72 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
     return `${m}:${s}`;
   };
 
+  const applyChannelSelection = (channel: PaymentChannelUiItem) => {
+    setSelectedChannel(channel.id);
+    if (channel.id === 'allinpay') {
+      const methods = getAllinpayMethods(channel);
+      if (methods.length >= 1) {
+        setPaymentMethod(methods[0]);
+      }
+      return;
+    }
+    setPaymentMethod(channel.id as PaymentMethodId);
+  };
+
   const fetchPaymentSettings = async () => {
     setFetchingSettings(true);
     try {
       const res = await (request.get('/settings') as any);
-      // 公开接口返回 payment 对象，仅包含各渠道的 enabled 布尔值（不含密钥）
+      const channels = Array.isArray(res?.payment_channels) ? res.payment_channels : [];
+      // 兼容旧公开接口：仅有 payment.*_enabled 时回退
       const payment = res?.payment;
-      const wc = !!payment?.wechat_enabled;
-      const al = !!payment?.alipay_enabled;
-      const st = !!payment?.stripe_enabled;
-      const bp = !!payment?.bonuspay_enabled;
-      const hbc = !!payment?.hyperbc_enabled;
-      const ap = !!payment?.allinpay_enabled;
-      
-      setWechatEnabled(wc);
-      setAlipayEnabled(al);
-      setStripeEnabled(st);
-      setBonuspayEnabled(bp);
-      setHyperbcEnabled(hbc);
-      setAllinpayEnabled(ap);
-      if (al) {
-        setPaymentMethod('alipay');
-      } else if (wc) {
-        setPaymentMethod('wechat');
-      } else if (ap) {
-        setPaymentMethod('allinpay_alipay');
-      } else if (st) {
-        setPaymentMethod('stripe');
-      } else if (bp) {
-        setPaymentMethod('bonuspay');
-      } else if (hbc) {
-        setPaymentMethod('hyperbc');
+      const fallback: PaymentChannelUiItem[] = [
+        { id: 'alipay', enabled: !!payment?.alipay_enabled, sort_order: 70 },
+        { id: 'wechat', enabled: !!payment?.wechat_enabled, sort_order: 60 },
+        {
+          id: 'allinpay',
+          enabled: !!payment?.allinpay_enabled,
+          sort_order: 50,
+          allinpay_methods: payment?.allinpay_enabled
+            ? ['allinpay_wechat', 'allinpay_alipay']
+            : [],
+        },
+        { id: 'stripe', enabled: !!payment?.stripe_enabled, sort_order: 30 },
+        { id: 'bonuspay', enabled: !!payment?.bonuspay_enabled, sort_order: 20 },
+        { id: 'hyperbc', enabled: !!payment?.hyperbc_enabled, sort_order: 10 },
+      ];
+      const list = (channels.length ? channels : fallback)
+        .filter((c: any) => c && c.id)
+        // 旧公开数据若仍拆成两个通联渠道，合并展示
+        .reduce((acc: PaymentChannelUiItem[], c: any) => {
+          if (c.id === 'allinpay_wechat' || c.id === 'allinpay_alipay') {
+            let ap = acc.find((x) => x.id === 'allinpay');
+            if (!ap) {
+              ap = {
+                id: 'allinpay',
+                enabled: false,
+                sort_order: c.sort_order || 50,
+                allinpay_methods: [],
+              };
+              acc.push(ap);
+            }
+            if (c.enabled) {
+              ap.enabled = true;
+              const methods = ap.allinpay_methods || [];
+              if (!methods.includes(c.id)) methods.push(c.id);
+              ap.allinpay_methods = methods;
+              ap.sort_order = Math.max(ap.sort_order || 0, c.sort_order || 0);
+            }
+            return acc;
+          }
+          acc.push(c);
+          return acc;
+        }, [])
+        .sort((a: any, b: any) => (b.sort_order || 0) - (a.sort_order || 0) || String(a.id).localeCompare(String(b.id)));
+      setPaymentChannels(list);
+      const firstEnabled = list.find((c: any) => c.enabled);
+      if (firstEnabled) {
+        applyChannelSelection(firstEnabled);
       }
     } catch (e) {
       console.error(e);
@@ -282,6 +322,15 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
 
   const handleCreateOrder = async () => {
     const minRechargeLimit = settings?.currency?.min_recharge_amount !== undefined ? parseFloat(String(settings.currency.min_recharge_amount)) : 5.0;
+
+    if (selectedChannel === 'allinpay') {
+      const ap = paymentChannels.find((c) => c.id === 'allinpay');
+      const methods = ap ? getAllinpayMethods(ap) : [];
+      if (!methods.includes(paymentMethod)) {
+        setErrorMessage(methods.length > 1 ? '请选择通联支付方式（微信或支付宝）' : '通联支付暂不可用');
+        return;
+      }
+    }
 
     if (paymentMethod !== 'bonuspay') {
       if (minRechargeLimit > 0 && finalAmount < minRechargeLimit) {
@@ -383,34 +432,45 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
 
   const { themeMode } = useThemeStore();
   const isLight = themeMode === 'light';
+  const screens = useBreakpoint();
+  const isMobile = !screens.md;
 
   const modalStyles = {
-    content: { background: isLight ? '#fff' : '#141414', border: isLight ? '1px solid #e8e8e8' : '1px solid #303030', borderRadius: 16, padding: 0 },
-    body: { padding: '28px 32px' },
+    content: {
+      background: isLight ? '#ffffff' : '#09090b',
+      border: isLight ? '1px solid #e4e4e7' : '1px solid #27272a',
+      borderRadius: isMobile ? 16 : 20,
+      padding: 0,
+      boxShadow: isLight
+        ? '0 20px 45px -10px rgba(0, 0, 0, 0.12)'
+        : '0 25px 50px -12px rgba(0, 0, 0, 0.75)',
+      overflow: 'hidden',
+      maxWidth: isMobile ? 'calc(100vw - 24px)' : undefined,
+    },
+    body: { padding: isMobile ? '12px 14px 16px' : '14px 28px 24px' },
     header: { display: 'none' as const },
-    mask: { backgroundColor: 'rgba(0, 0, 0, 0.65)' },
+    mask: { backgroundColor: 'rgba(0, 0, 0, 0.65)', backdropFilter: 'blur(4px)' },
   };
-  const borderIdle = isLight ? '#d9d9d9' : '#303030';
-  const bgIdle = isLight ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.04)';
-  const labelColor = isLight ? 'rgba(0,0,0,0.85)' : 'rgba(255,255,255,0.85)';
-  const descColor = isLight ? 'rgba(0,0,0,0.65)' : 'rgba(255,255,255,0.65)';
-  const subColor = isLight ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.45)';
-  const summaryBg = isLight ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.03)';
-  const summaryBorder = isLight ? '#e8e8e8' : '#252525';
-  const titleColor = isLight ? '#1f2937' : '#fff';
+
+  const borderIdle = isLight ? '#e4e4e7' : '#27272a';
+  const bgIdle = isLight ? '#fcfcfd' : '#141417';
+  const labelColor = isLight ? '#09090b' : '#f4f4f5';
+  const descColor = isLight ? '#52525b' : '#a1a1aa';
+  const subColor = isLight ? '#71717a' : '#a1a1aa';
+  const summaryBg = isLight ? '#f4f4f5' : '#18181b';
+  const summaryBorder = isLight ? '#e4e4e7' : '#27272a';
+  const titleColor = isLight ? '#09090b' : '#ffffff';
   const accent = isLight ? '#18181b' : '#fafafa';
-  const accentSoft = isLight ? 'rgba(24, 24, 27, 0.08)' : 'rgba(250, 250, 250, 0.12)';
-  const accentOn = isLight ? '#fafafa' : '#18181b';
 
   if (fetchingSettings) {
     return (
       <Modal open={visible} footer={null} closable={false} centered styles={modalStyles}>
-        <div style={{ textAlign: 'center', padding: '40px 0' }}><Spin /></div>
+        <div style={{ textAlign: 'center', padding: '50px 0' }}><Spin size="large" /></div>
       </Modal>
     );
   }
 
-  if (!wechatEnabled && !alipayEnabled && !stripeEnabled && !bonuspayEnabled && !hyperbcEnabled && !allinpayEnabled) {
+  if (!paymentChannels.some((c) => c.enabled)) {
     return (
       <Modal open={visible} footer={null} onCancel={onCancel} centered styles={modalStyles}>
         <Result
@@ -422,36 +482,166 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
     );
   }
 
+  const defaultIcon = (id: string) => {
+    const color = getChannelMeta(id)?.accent || '#666';
+    if (id === 'alipay' || id === 'allinpay_alipay') return <AlipayCircleOutlined style={{ fontSize: 22, color }} />;
+    if (id === 'wechat' || id === 'allinpay_wechat') return <WechatOutlined style={{ fontSize: 22, color }} />;
+    if (id === 'allinpay') return <ThunderboltOutlined style={{ fontSize: 22, color }} />;
+    if (id === 'stripe') return <CreditCardOutlined style={{ fontSize: 22, color }} />;
+    if (id === 'bonuspay') return <ThunderboltOutlined style={{ fontSize: 22, color }} />;
+    if (id === 'hyperbc') return <span style={{ fontSize: 20, fontWeight: 'bold', color, display: 'inline-block', lineHeight: 1 }}>₿</span>;
+    return <WalletOutlined style={{ fontSize: 22, color }} />;
+  };
+
+  // 多支付渠道：按后台排序与展示配置渲染（通联聚合为一项）
+  const paymentOptions = paymentChannels
+    .filter((c) => c.enabled)
+    .map((c) => {
+      const item = c as PaymentChannelUiItem;
+      const meta = getChannelMeta(c.id);
+      const accent = meta?.accent || '#1677ff';
+      const logoUrl = (c.logo_url || '').trim();
+      return {
+        key: c.id,
+        channel: item,
+        enabled: true,
+        name: resolveChannelName(item),
+        badge: resolveChannelSubtitle(item),
+        badgeBg: isLight ? `${accent}1a` : `${accent}33`,
+        badgeColor: accent,
+        icon: logoUrl
+          ? <img src={logoUrl} alt="" style={{ width: 22, height: 22, objectFit: 'contain', borderRadius: 4 }} />
+          : defaultIcon(c.id),
+        activeBorderColor: accent,
+        activeBg: isLight ? `${accent}0f` : `${accent}26`,
+      };
+    });
+
+  const selectedAllinpay = paymentChannels.find((c) => c.id === 'allinpay' && c.enabled);
+  const allinpayMethods = selectedChannel === 'allinpay' && selectedAllinpay
+    ? getAllinpayMethods(selectedAllinpay)
+    : [];
+  const showAllinpaySubPicker = allinpayMethods.length > 1;
+
+  const getPayButtonBackground = (method: string) => {
+    switch (method) {
+      case 'alipay':
+      case 'allinpay_alipay':
+        return 'linear-gradient(135deg, #1677ff, #0958d9)';
+      case 'wechat':
+      case 'allinpay_wechat':
+        return 'linear-gradient(135deg, #07c160, #059669)';
+      case 'stripe':
+        return 'linear-gradient(135deg, #635bff, #4b45c6)';
+      case 'bonuspay':
+        return 'linear-gradient(135deg, #ff6a00, #ee0979)';
+      case 'hyperbc':
+        return 'linear-gradient(135deg, #8b5cf6, #6d28d9)';
+      default:
+        return isLight ? '#18181b' : '#fafafa';
+    }
+  };
+
+  const getPayButtonShadow = (method: string) => {
+    switch (method) {
+      case 'alipay':
+      case 'allinpay_alipay':
+        return '0 4px 16px rgba(22, 119, 255, 0.35)';
+      case 'wechat':
+      case 'allinpay_wechat':
+        return '0 4px 16px rgba(7, 193, 96, 0.35)';
+      case 'stripe':
+        return '0 4px 16px rgba(99, 91, 255, 0.35)';
+      case 'bonuspay':
+        return '0 4px 16px rgba(255, 106, 0, 0.35)';
+      case 'hyperbc':
+        return '0 4px 16px rgba(139, 92, 246, 0.35)';
+      default:
+        return isLight ? '0 4px 16px rgba(24, 24, 27, 0.2)' : '0 4px 16px rgba(0, 0, 0, 0.4)';
+    }
+  };
+
   return (
     <Modal
       open={visible}
       destroyOnClose
-      width={480}
+      width={isMobile ? '100%' : 840}
       title={null}
       footer={null}
       onCancel={onCancel}
       styles={modalStyles}
       centered
     >
-      {/* Header */}
-      <div style={{ textAlign: 'center', marginBottom: 28 }}>
-        <div style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          width: 56,
-          height: 56,
-          borderRadius: 16,
-          background: accent,
-          marginBottom: 16,
-          boxShadow: isLight ? '0 8px 24px rgba(24, 24, 27, 0.2)' : '0 8px 24px rgba(0, 0, 0, 0.45)',
-        }}>
-          <WalletOutlined style={{ fontSize: 28, color: accentOn }} />
+      <style>{`
+        .recharge-pay-btn.ant-btn,
+        .recharge-pay-btn.ant-btn:hover,
+        .recharge-pay-btn.ant-btn:focus,
+        .recharge-pay-btn.ant-btn > span,
+        .recharge-pay-btn .anticon {
+          color: #ffffff !important;
+        }
+      `}</style>
+      {/* 顶栏 Header */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        borderBottom: `1px solid ${borderIdle}`,
+        paddingBottom: isMobile ? 10 : 16,
+        marginBottom: isMobile ? 12 : 28,
+        paddingRight: isMobile ? 28 : 36,
+        gap: 8,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 8 : 12, minWidth: 0, flex: 1 }}>
+          <div style={{
+            width: isMobile ? 36 : 44,
+            height: isMobile ? 36 : 44,
+            borderRadius: isMobile ? 10 : 12,
+            background: isLight ? '#18181b' : '#fafafa',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: isLight ? '#ffffff' : '#18181b',
+            boxShadow: isLight ? '0 4px 12px rgba(24, 24, 27, 0.15)' : '0 4px 12px rgba(0, 0, 0, 0.4)',
+            flexShrink: 0,
+          }}>
+            <WalletOutlined style={{ fontSize: isMobile ? 18 : 22 }} />
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <Title level={4} style={{ margin: 0, color: titleColor, fontSize: isMobile ? 15 : 18, fontWeight: 700, lineHeight: 1.2 }}>
+              {t('recharge.title', '钱包余额充值')}
+            </Title>
+            {!isMobile && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                <LockOutlined style={{ fontSize: 11, color: '#10b981' }} />
+                <Text style={{ fontSize: 12, color: subColor }}>{t('recharge.secure_channel', '256-bit 安全加密支付通道')}</Text>
+              </div>
+            )}
+          </div>
         </div>
-        <Title level={4} style={{ margin: 0, color: titleColor }}>{t('recharge.title', '钱包余额充值')}</Title>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, marginTop: 6 }}>
-          <LockOutlined style={{ fontSize: 11, color: '#52c41a' }} />
-          <Text type="secondary" style={{ fontSize: 12 }}>{t('recharge.secure_channel', '安全加密支付通道')}</Text>
+
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
+          background: summaryBg,
+          padding: isMobile ? '4px 8px' : '6px 14px',
+          borderRadius: 10,
+          border: `1px solid ${summaryBorder}`,
+          flexShrink: 0,
+          maxWidth: isMobile ? '42%' : undefined,
+        }}>
+          <Text style={{ fontSize: isMobile ? 10 : 12, color: subColor, whiteSpace: 'nowrap' }}>UID</Text>
+          <Text strong style={{
+            fontSize: isMobile ? 11 : 13,
+            color: labelColor,
+            fontFamily: 'monospace',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}>
+            {user?.uid || user?.id || 'User'}
+          </Text>
         </div>
       </div>
 
@@ -461,27 +651,29 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
           title={t('recharge.success_title', '支付成功！')}
           subTitle={t('recharge.success_subtitle', '您的钱包余额已经更新')}
           extra={[
-            <Button type="primary" key="done" onClick={onSuccess} style={{ borderRadius: 8 }}>{t('recharge.done', '完成')}</Button>
+            <Button type="primary" key="done" onClick={onSuccess} style={{ borderRadius: 10, height: 42, paddingLeft: 24, paddingRight: 24 }}>
+              {t('recharge.done', '完成')}
+            </Button>
           ]}
         />
       ) : payStatus === 'paying' && (paymentMethod === 'wechat' || paymentMethod === 'allinpay_wechat' || paymentMethod === 'allinpay_alipay') ? (
-        <div style={{ textAlign: 'center' }}>
-          <Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
+        <div style={{ textAlign: 'center', padding: '10px 0' }}>
+          <Text type="secondary" style={{ display: 'block', marginBottom: 16, fontSize: 14 }}>
             {paymentMethod === 'allinpay_alipay' 
               ? t('recharge.alipay_scan', '请使用支付宝扫一扫支付') 
               : t('recharge.wechat_scan', '请使用微信扫一扫支付')}
           </Text>
-          <div style={{ padding: 16, background: '#fff', borderRadius: 12, display: 'inline-block', boxShadow: '0 4px 20px rgba(0,0,0,0.3)' }}>
+          <div style={{ padding: 16, background: '#fff', borderRadius: 16, display: 'inline-block', boxShadow: '0 8px 30px rgba(0,0,0,0.15)' }}>
             <QRCode value={qrCodeUrl} size={200} color="#000000" />
           </div>
-          <div style={{ marginTop: 24 }}>
-            <Title level={3} style={{ color: '#ff4d4f', margin: 0 }}>{currencySymbol} {finalAmount.toFixed(2)}</Title>
+          <div style={{ marginTop: 20 }}>
+            <Title level={3} style={{ color: '#ef4444', margin: 0, fontWeight: 800 }}>{currencySymbol} {finalAmount.toFixed(2)}</Title>
             <Text type="secondary" style={{ fontSize: 13 }}>{t('recharge.order_no', '订单号: ')}{outTradeNo}</Text>
           </div>
-          <Button style={{ marginTop: 24, borderRadius: 8 }} onClick={resetState}>{t('recharge.return_modify', '返回修改')}</Button>
+          <Button style={{ marginTop: 20, borderRadius: 10, height: 40 }} onClick={resetState}>{t('recharge.return_modify', '返回修改')}</Button>
         </div>
       ) : payStatus === 'paying' && paymentMethod === 'stripe' ? (
-        <div style={{ textAlign: 'center' }}>
+        <div style={{ textAlign: 'center', padding: '10px 0' }}>
           <div style={{
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
             width: 64, height: 64, borderRadius: 16,
@@ -490,25 +682,25 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
           }}>
             <CreditCardOutlined style={{ fontSize: 32, color: '#fff' }} />
           </div>
-          <Title level={4} style={{ color: '#fff', margin: '0 0 8px 0' }}>{t('recharge.stripe_waiting', '等待 Stripe 支付完成')}</Title>
+          <Title level={4} style={{ color: titleColor, margin: '0 0 8px 0' }}>{t('recharge.stripe_waiting', '等待 Stripe 支付完成')}</Title>
           <Text type="secondary" style={{ display: 'block', marginBottom: 20 }}>
             {t('recharge.stripe_desc', '请在新打开的页面完成支付，支付成功后此页面将自动更新')}
           </Text>
           <Spin size="large" />
-          <div style={{ marginTop: 24 }}>
-            <Title level={3} style={{ color: '#ff4d4f', margin: 0 }}>{currencySymbol} {finalAmount.toFixed(2)}</Title>
+          <div style={{ marginTop: 20 }}>
+            <Title level={3} style={{ color: '#ef4444', margin: 0, fontWeight: 800 }}>{currencySymbol} {finalAmount.toFixed(2)}</Title>
             <Text type="secondary" style={{ fontSize: 13 }}>订单号: {outTradeNo}</Text>
           </div>
-          <Button style={{ marginTop: 24, borderRadius: 8 }} onClick={resetState}>返回修改</Button>
+          <Button style={{ marginTop: 20, borderRadius: 10, height: 40 }} onClick={resetState}>返回修改</Button>
         </div>
       ) : payStatus === 'paying' && paymentMethod === 'hyperbc' ? (
         hyperbcStep === 'select' ? (
-          <div style={{ textAlign: 'left' }}>
-            <Title level={4} style={{ color: titleColor, textAlign: 'center', marginBottom: 24, fontWeight: 600 }}>
-              账户充值
+          <div style={{ textAlign: 'left', maxWidth: 520, margin: '0 auto' }}>
+            <Title level={4} style={{ color: titleColor, textAlign: 'center', marginBottom: 16, fontWeight: 600 }}>
+              HyperBC 账户充值
             </Title>
-            <Text type="secondary" style={{ display: 'block', textAlign: 'center', marginBottom: 24, fontSize: 13 }}>
-              请先选择支付币种，再选择对应网络。
+            <Text type="secondary" style={{ display: 'block', textAlign: 'center', marginBottom: 20, fontSize: 13 }}>
+              请选择支付币种与网络
             </Text>
 
             {/* 1. 币种 */}
@@ -517,7 +709,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
               <div style={{ display: 'flex', gap: 10 }}>
                 {hyperbcCurrencies.map((coin) => {
                   const isSel = hyperbcCoin === coin;
-                  const accent = coin === 'USDC' ? '#2775CA' : '#26A17B';
+                  const accentColor = coin === 'USDC' ? '#2775CA' : '#26A17B';
                   return (
                     <div
                       key={coin}
@@ -537,7 +729,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                       }}
                     >
                       <span style={{
-                        width: 22, height: 22, borderRadius: '50%', background: accent,
+                        width: 22, height: 22, borderRadius: '50%', background: accentColor,
                         color: '#fff', fontSize: 11, fontWeight: 700,
                         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                       }}>
@@ -550,7 +742,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
               </div>
             </div>
 
-            {/* 2. 网络（随币种联动） */}
+            {/* 2. 网络 */}
             <div style={{ marginBottom: 20 }}>
               <Text style={{ color: descColor, fontSize: 13, display: 'block', marginBottom: 8 }}>选择网络</Text>
               <div style={{
@@ -587,12 +779,12 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
             </div>
 
             {/* 金额显示 */}
-            <div style={{ marginBottom: 24 }}>
-              <Text style={{ color: descColor, fontSize: 13, display: 'block', marginBottom: 8 }}>金额</Text>
+            <div style={{ marginBottom: 20 }}>
+              <Text style={{ color: descColor, fontSize: 13, display: 'block', marginBottom: 8 }}>应付金额</Text>
               <div style={{
                 background: bgIdle,
                 border: `1px solid ${borderIdle}`,
-                borderRadius: 10,
+                borderRadius: 12,
                 padding: '14px 16px',
                 display: 'flex',
                 alignItems: 'center',
@@ -608,37 +800,32 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
               </div>
             </div>
 
-            {/* 前往支付按钮 */}
             <Button
               type="primary"
               block
               disabled={!selectedAddress || !hyperbcCoin || !hyperbcNetwork}
               onClick={() => setHyperbcStep('pay')}
               style={{
-                height: 50,
-                borderRadius: 10,
+                height: 48,
+                borderRadius: 12,
                 background: 'linear-gradient(135deg, #8b5cf6, #6d28d9)',
                 border: 'none',
                 fontWeight: 600,
                 fontSize: 16,
                 boxShadow: '0 4px 16px rgba(139, 92, 246, 0.35)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 8
               }}
             >
-              前往支付 <span style={{ fontSize: 16 }}>➔</span>
+              前往支付 ➔
             </Button>
 
-            <div style={{ marginTop: 16, textAlign: 'center' }}>
+            <div style={{ marginTop: 12, textAlign: 'center' }}>
               <Button type="text" size="small" onClick={resetState} style={{ color: subColor }}>
                 返回修改充值金额
               </Button>
             </div>
           </div>
         ) : (
-          <div style={{ textAlign: 'center' }}>
+          <div style={{ textAlign: 'center', maxWidth: 560, margin: '0 auto' }}>
             {selectedAddress && (() => {
               const details = getCoinDetails(selectedAddress.coin);
               const amtStr = selectedAddress.amount || '0.00';
@@ -652,51 +839,28 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                     待支付总额
                   </Text>
                   <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'center', marginBottom: 4 }}>
-                    <span style={{ fontSize: 36, fontWeight: 800, color: labelColor }}>{integerPart}</span>
-                    <span style={{ fontSize: 24, fontWeight: 700, color: '#ff4d4f' }}>{decimalPart}</span>
-                    <span style={{ fontSize: 18, fontWeight: 600, color: subColor, marginLeft: 6 }}>{details.symbol}</span>
+                    <span style={{ fontSize: 32, fontWeight: 800, color: labelColor }}>{integerPart}</span>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: '#ef4444' }}>{decimalPart}</span>
+                    <span style={{ fontSize: 16, fontWeight: 600, color: subColor, marginLeft: 6 }}>{details.symbol}</span>
                   </div>
-                  <div style={{ color: '#ff4d4f', fontSize: 12, fontWeight: 500, marginBottom: 20 }}>
+                  <div style={{ color: '#ef4444', fontSize: 12, fontWeight: 500, marginBottom: 16 }}>
                     ⚠️ 请通过此网络支付精确金额：<span style={{ textDecoration: 'underline' }}>{details.network}</span>
                   </div>
 
-                  {/* 二维码 */}
                   <div style={{
-                    padding: 16,
+                    padding: 14,
                     background: '#fff',
-                    borderRadius: 12,
+                    borderRadius: 14,
                     display: 'inline-block',
-                    boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
-                    marginBottom: 20
+                    boxShadow: '0 4px 20px rgba(0,0,0,0.12)',
+                    marginBottom: 16
                   }}>
-                    <QRCode value={selectedAddress.address} size={180} color="#000000" bordered={false} />
+                    <QRCode value={selectedAddress.address} size={160} color="#000000" bordered={false} />
                   </div>
 
-                  {/* 订单信息卡片 */}
-                  <div style={{
-                    background: isLight ? '#f4f4f5' : '#1e1e1f',
-                    border: `1px solid ${summaryBorder}`,
-                    borderRadius: 12,
-                    padding: '12px 16px',
-                    textAlign: 'left',
-                    marginBottom: 16,
-                    fontSize: 13
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                      <Text type="secondary">商户订单号</Text>
-                      <Text copyable={{ text: outTradeNo }} style={{ color: labelColor, fontFamily: 'monospace' }}>
-                        {outTradeNo.length > 20 ? `${outTradeNo.substring(0, 10)}...${outTradeNo.substring(outTradeNo.length - 8)}` : outTradeNo}
-                      </Text>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <Text type="secondary">用户标识</Text>
-                      <Text style={{ color: labelColor, fontFamily: 'monospace' }}>{user?.uid || user?.id || 'unknown'}</Text>
-                    </div>
-                  </div>
-
-                  {/* 收款地址 */}
-                  <div style={{ textAlign: 'left', marginBottom: 20 }}>
-                    <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+                  {/* 收款地址卡片 */}
+                  <div style={{ textAlign: 'left', marginBottom: 16 }}>
+                    <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
                       收款地址 ({details.network})
                     </Text>
                     <Typography.Paragraph
@@ -704,7 +868,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                       style={{
                         color: labelColor,
                         fontSize: 13,
-                        background: isLight ? '#f4f4f5' : '#1e1e1f',
+                        background: summaryBg,
                         padding: '10px 12px',
                         borderRadius: 10,
                         display: 'flex',
@@ -720,27 +884,22 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                     </Typography.Paragraph>
                   </div>
 
-                  {/* 提币提示警告框 */}
                   <div style={{
-                    background: isLight ? 'rgba(250, 173, 20, 0.08)' : 'rgba(250, 173, 20, 0.1)',
+                    background: isLight ? 'rgba(250, 173, 20, 0.08)' : 'rgba(250, 173, 20, 0.12)',
                     border: '1px solid rgba(250, 173, 20, 0.3)',
                     borderRadius: 10,
-                    padding: '12px 14px',
+                    padding: '10px 12px',
                     textAlign: 'left',
-                    marginBottom: 20,
+                    marginBottom: 16,
                     color: isLight ? '#d48806' : '#faad14',
                     fontSize: 12,
-                    lineHeight: 1.6
+                    lineHeight: 1.5
                   }}>
-                    <div style={{ fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                      ⚠️ 交易所提币付款提示:
-                    </div>
-                    如果您从 币安 (Binance)、OKX (欧易) 等交易所提币付款，交易所会扣除提现手续费（通常为 0.01~1 USDT）。请在提币时手动将手续费加到提币数量中，确保钱包“实际到账”与上方金额完全一致，否则将导致自动到账失败。
+                    ⚠️ 交易所提币提示：如使用 币安、OKX 等交易所提币，请手动加上提现手续费，确保到账金额完全一致。
                   </div>
 
-                  {/* 倒计时与进度条 */}
-                  <div style={{ marginBottom: 20 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
                       <Text type="secondary" style={{ fontSize: 12 }}>等待支付中</Text>
                       <Text style={{ fontSize: 12, fontFamily: 'monospace', fontWeight: 'bold', color: labelColor }}>
                         {formatTimeLeft(timeLeft)}
@@ -749,26 +908,25 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                     <div style={{
                       width: '100%',
                       height: 5,
-                      background: isLight ? '#e4e4e7' : '#27272a',
+                      background: borderIdle,
                       borderRadius: 3,
                       overflow: 'hidden'
                     }}>
                       <div style={{
                         width: `${(timeLeft / 900) * 100}%`,
                         height: '100%',
-                        background: '#60a5fa',
+                        background: '#3b82f6',
                         transition: 'width 1s linear'
                       }} />
                     </div>
                   </div>
 
-                  {/* 返回修改网络/币种 */}
                   <div style={{ display: 'flex', justifyContent: 'center', gap: 12 }}>
-                    <Button style={{ borderRadius: 8 }} onClick={() => setHyperbcStep('select')}>
-                      返回修改币种网络
+                    <Button style={{ borderRadius: 10 }} onClick={() => setHyperbcStep('select')}>
+                      修改币种网络
                     </Button>
-                    <Button style={{ borderRadius: 8 }} onClick={resetState}>
-                      返回修改充值金额
+                    <Button style={{ borderRadius: 10 }} onClick={resetState}>
+                      修改充值金额
                     </Button>
                   </div>
                 </div>
@@ -777,7 +935,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
           </div>
         )
       ) : payStatus === 'paying' && paymentMethod === 'bonuspay' ? (
-        <div style={{ textAlign: 'center' }}>
+        <div style={{ textAlign: 'center', padding: '10px 0' }}>
           <div style={{
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
             width: 64, height: 64, borderRadius: 16,
@@ -788,349 +946,418 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
           </div>
           <Title level={4} style={{ color: titleColor, margin: '0 0 8px 0' }}>{t('recharge.bonuspay_opened', '充值页面已打开')}</Title>
           <Text type="secondary" style={{ display: 'block', marginBottom: 8, lineHeight: 1.8 }}>
-            {t('recharge.bonuspay_desc', '请在新打开的 BonusPay 收银台页面完成转账。\\n链上确认后余额将自动更新，您可以关闭此弹窗。').split('\\n')[0]}
-            <br />{t('recharge.bonuspay_desc', '请在新打开的 BonusPay 收银台页面完成转账。\\n链上确认后余额将自动更新，您可以关闭此弹窗。').split('\\n')[1]}
+            请在新打开的 BonusPay 收银台页面完成转账。<br />链上确认后余额将自动更新，您可以关闭此弹窗。
           </Text>
-          <div style={{
-            marginTop: 16, padding: '12px 16px', borderRadius: 8,
-            background: 'rgba(255, 106, 0, 0.08)', border: '1px solid rgba(255, 106, 0, 0.2)',
-          }}>
-            <Text style={{ fontSize: 12, color: '#ff6a00' }}>
-              {t('recharge.bonuspay_tip', '💡 充值金额以实际链上到账金额为准，通常需要几分钟确认')}
-            </Text>
-          </div>
           <Space style={{ marginTop: 24 }}>
-            <Button style={{ borderRadius: 8 }} onClick={resetState}>{t('recharge.recharge_again', '再次充值')}</Button>
-            <Button type="primary" style={{ borderRadius: 8, background: 'linear-gradient(135deg, #ff6a00, #ee0979)', border: 'none' }} onClick={onCancel}>{t('recharge.close', '关闭')}</Button>
+            <Button style={{ borderRadius: 10 }} onClick={resetState}>{t('recharge.recharge_again', '再次充值')}</Button>
+            <Button type="primary" style={{ borderRadius: 10, background: 'linear-gradient(135deg, #ff6a00, #ee0979)', border: 'none' }} onClick={onCancel}>{t('recharge.close', '关闭')}</Button>
           </Space>
         </div>
       ) : (
-        <div>
-          {paymentMethod !== 'bonuspay' ? (
-            <>
-              {/* Amount Selection - only for fiat payment methods */}
-              <Text strong style={{ display: 'block', marginBottom: 12, color: labelColor }}>{t('recharge.select_amount', { defaultValue: `选择金额 (${currencyUnit})`, unit: currencyUnit })}</Text>
-              <Row gutter={[10, 10]}>
-                {amounts.map((amt: number) => (
-                  <Col span={8} key={amt}>
-                    <div
-                      onClick={() => handlePresetClick(amt)}
-                      style={{
-                        border: `2px solid ${!isCustom && selectedAmount === amt ? accent : borderIdle}`,
-                        borderRadius: 10,
-                        padding: '14px 0',
-                        textAlign: 'center',
-                        cursor: 'pointer',
-                        background: !isCustom && selectedAmount === amt
-                          ? accentSoft
-                          : bgIdle,
-                        transition: 'all 0.25s ease',
-                      }}
-                    >
-                      <Text strong style={{
-                        color: !isCustom && selectedAmount === amt ? accent : labelColor,
-                        fontSize: 20,
-                      }}>
-                        {amt}
-                      </Text>
-                    </div>
-                  </Col>
-                ))}
-              </Row>
-
-              {/* Custom Amount Input */}
-              <div
-                onClick={handleCustomFocus}
-                style={{
-                  marginTop: 12,
-                  border: `2px solid ${isCustom ? accent : borderIdle}`,
-                  borderRadius: 10,
-                  padding: '8px 16px',
-                  background: isCustom ? accentSoft : bgIdle,
-                  transition: 'all 0.25s ease',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                }}
-              >
-                <Text style={{ color: descColor, whiteSpace: 'nowrap' }}>{t('recharge.custom', '自定义')}</Text>
-                <InputNumber
-                  min={0.01}
-                  max={50000}
-                  precision={2}
-                  placeholder={t('recharge.input_amount', '输入金额')}
-                  value={customAmount}
-                  onChange={(val) => { setCustomAmount(val); setIsCustom(true); setSelectedAmount(null); setErrorMessage(null); }}
-                  onFocus={handleCustomFocus}
-                  controls={false}
-                  variant="borderless"
-                  style={{ flex: 1, background: 'transparent' }}
-                />
-                <Text style={{ color: subColor }}>{currencyUnit}</Text>
-              </div>
-            </>
-          ) : (
-            /* BonusPay TOPUP Info + 参数选择 */
-            <div style={{
-              padding: '20px',
-              borderRadius: 12,
-              background: bgIdle,
-              border: `1px solid ${borderIdle}`,
-            }}>
-              <div style={{ textAlign: 'center', marginBottom: 16 }}>
-                <div style={{
-                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                  width: 48, height: 48, borderRadius: 12,
-                  background: 'linear-gradient(135deg, #ff6a00, #ee0979)',
-                  marginBottom: 12,
-                }}>
-                  <ThunderboltOutlined style={{ fontSize: 24, color: '#fff' }} />
-                </div>
-                <Title level={5} style={{ color: labelColor, margin: '0 0 4px 0' }}>{t('recharge.crypto_recharge', '加密货币充值')}</Title>
-                <Text type="secondary" style={{ fontSize: 12 }}>{t('recharge.crypto_desc', '充值金额以实际链上到账金额为准')}</Text>
-              </div>
-
-              {/* 币种选择 */}
-              <Text strong style={{ display: 'block', marginBottom: 8, color: labelColor, fontSize: 13 }}>{t('recharge.recharge_currency', '充值币种')}</Text>
-              <Row gutter={10} style={{ marginBottom: 16 }}>
-                {(['USDT', 'USDC'] as const).map(code => (
-                  <Col span={12} key={code}>
-                    <div
-                      onClick={() => setAssetCode(code)}
-                      style={{
-                        textAlign: 'center', padding: '10px 0', borderRadius: 8, cursor: 'pointer',
-                        border: `2px solid ${assetCode === code ? '#ff6a00' : borderIdle}`,
-                        background: assetCode === code ? 'rgba(255, 106, 0, 0.1)' : 'transparent',
-                        transition: 'all 0.2s ease',
-                      }}
-                    >
-                      <Text strong style={{ color: assetCode === code ? '#ff6a00' : labelColor, fontSize: 15 }}>{code}</Text>
-                    </div>
-                  </Col>
-                ))}
-              </Row>
-
-              {/* 网络选择 */}
-              <Text strong style={{ display: 'block', marginBottom: 8, color: labelColor, fontSize: 13 }}>{t('recharge.recharge_network', '充值网络')}</Text>
-              <Row gutter={10}>
-                {(['TRON', 'ETH', 'POLYGON'] as const).map(net => (
-                  <Col span={8} key={net}>
-                    <div
-                      onClick={() => setDepositNetwork(net)}
-                      style={{
-                        textAlign: 'center', padding: '10px 0', borderRadius: 8, cursor: 'pointer',
-                        border: `2px solid ${depositNetwork === net ? '#ff6a00' : borderIdle}`,
-                        background: depositNetwork === net ? 'rgba(255, 106, 0, 0.1)' : 'transparent',
-                        transition: 'all 0.2s ease',
-                      }}
-                    >
-                      <Text strong style={{ color: depositNetwork === net ? '#ff6a00' : labelColor, fontSize: 13 }}>{net}</Text>
-                    </div>
-                  </Col>
-                ))}
-              </Row>
-            </div>
-          )}
-
-          {/* Payment Method */}
-          <Text strong style={{ display: 'block', marginTop: 24, marginBottom: 12, color: labelColor }}>{t('recharge.payment_method', '支付方式')}</Text>
-          <Row gutter={[12, 12]} wrap>
-            {alipayEnabled && (
-              <Col span={12}>
-                <div
-                  onClick={() => setPaymentMethod('alipay')}
-                  style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                    height: 52, borderRadius: 10, cursor: 'pointer',
-                    border: `2px solid ${paymentMethod === 'alipay' ? accent : borderIdle}`,
-                    background: paymentMethod === 'alipay' ? accentSoft : bgIdle,
-                    transition: 'all 0.25s ease',
-                  }}
-                >
-                  <AlipayCircleOutlined style={{ fontSize: 22, color: paymentMethod === 'alipay' ? accent : labelColor }} />
-                  <Text strong style={{ color: paymentMethod === 'alipay' ? accent : labelColor, fontSize: 15 }}>{t('recharge.alipay', '支付宝')}</Text>
-                </div>
-              </Col>
-            )}
-            {wechatEnabled && (
-              <Col span={12}>
-                <div
-                  onClick={() => setPaymentMethod('wechat')}
-                  style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                    height: 52, borderRadius: 10, cursor: 'pointer',
-                    border: `2px solid ${paymentMethod === 'wechat' ? '#07c160' : borderIdle}`,
-                    background: paymentMethod === 'wechat' ? 'rgba(7, 193, 96, 0.12)' : bgIdle,
-                    transition: 'all 0.25s ease',
-                  }}
-                >
-                  <WechatOutlined style={{ fontSize: 22, color: '#07c160' }} />
-                  <Text strong style={{ color: '#07c160', fontSize: 15 }}>{t('recharge.wechat_pay', '微信支付')}</Text>
-                </div>
-              </Col>
-            )}
-            {allinpayEnabled && (
-              <>
-                <Col span={12}>
-                  <div
-                    onClick={() => setPaymentMethod('allinpay_wechat')}
-                    style={{
-                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                      height: 52, borderRadius: 10, cursor: 'pointer',
-                      border: `2px solid ${paymentMethod === 'allinpay_wechat' ? '#07c160' : borderIdle}`,
-                      background: paymentMethod === 'allinpay_wechat' ? 'rgba(7, 193, 96, 0.12)' : bgIdle,
-                      transition: 'all 0.25s ease',
-                    }}
-                  >
-                    <WechatOutlined style={{ fontSize: 22, color: '#07c160' }} />
-                    <Text strong style={{ color: '#07c160', fontSize: 15 }}>{t('recharge.allinpay_wechat', '通联微信')}</Text>
-                  </div>
-                </Col>
-                <Col span={12}>
-                  <div
-                    onClick={() => setPaymentMethod('allinpay_alipay')}
-                    style={{
-                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                      height: 52, borderRadius: 10, cursor: 'pointer',
-                      border: `2px solid ${paymentMethod === 'allinpay_alipay' ? accent : borderIdle}`,
-                      background: paymentMethod === 'allinpay_alipay' ? accentSoft : bgIdle,
-                      transition: 'all 0.25s ease',
-                    }}
-                  >
-                    <AlipayCircleOutlined style={{ fontSize: 22, color: paymentMethod === 'allinpay_alipay' ? accent : labelColor }} />
-                    <Text strong style={{ color: paymentMethod === 'allinpay_alipay' ? accent : labelColor, fontSize: 15 }}>{t('recharge.allinpay_alipay', '通联支付宝')}</Text>
-                  </div>
-                </Col>
-              </>
-            )}
-            {stripeEnabled && (
-              <Col span={12}>
-                <div
-                  onClick={() => setPaymentMethod('stripe')}
-                  style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                    height: 52, borderRadius: 10, cursor: 'pointer',
-                    border: `2px solid ${paymentMethod === 'stripe' ? '#635bff' : borderIdle}`,
-                    background: paymentMethod === 'stripe' ? 'rgba(99, 91, 255, 0.12)' : bgIdle,
-                    transition: 'all 0.25s ease',
-                  }}
-                >
-                  <CreditCardOutlined style={{ fontSize: 22, color: '#635bff' }} />
-                  <Text strong style={{ color: '#635bff', fontSize: 15 }}>Stripe</Text>
-                </div>
-              </Col>
-            )}
-            {bonuspayEnabled && (
-              <Col span={12}>
-                <div
-                  onClick={() => setPaymentMethod('bonuspay')}
-                  style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                    height: 52, borderRadius: 10, cursor: 'pointer',
-                    border: `2px solid ${paymentMethod === 'bonuspay' ? '#ff6a00' : borderIdle}`,
-                    background: paymentMethod === 'bonuspay' ? 'rgba(255, 106, 0, 0.12)' : bgIdle,
-                    transition: 'all 0.25s ease',
-                  }}
-                >
-                  <ThunderboltOutlined style={{ fontSize: 22, color: '#ff6a00' }} />
-                  <Text strong style={{ color: '#ff6a00', fontSize: 15 }}>BonusPay</Text>
-                </div>
-              </Col>
-            )}
-            {hyperbcEnabled && (
-              <Col span={12}>
-                <div
-                  onClick={() => setPaymentMethod('hyperbc')}
-                  style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                    height: 52, borderRadius: 10, cursor: 'pointer',
-                    border: `2px solid ${paymentMethod === 'hyperbc' ? '#8b5cf6' : borderIdle}`,
-                    background: paymentMethod === 'hyperbc' ? 'rgba(139, 92, 246, 0.12)' : bgIdle,
-                    transition: 'all 0.25s ease',
-                  }}
-                >
-                  <span style={{ fontSize: 22 }}>₿</span>
-                  <Text strong style={{ color: '#8b5cf6', fontSize: 15 }}>HyperBC</Text>
-                </div>
-              </Col>
-            )}
-          </Row>
-
-          {/* Summary - hide for BonusPay TOPUP */}
-          {paymentMethod !== 'bonuspay' && (
-            <div style={{
-              marginTop: 24, padding: '16px 20px',
-              background: summaryBg, borderRadius: 10, border: `1px solid ${summaryBorder}`,
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            }}>
-              <Text type="secondary" style={{ fontSize: 13 }}>{t('recharge.payable_amount', '应付金额')}</Text>
-              <Title level={3} style={{ margin: 0, color: '#ff4d4f' }}>{currencySymbol} {finalAmount.toFixed(2)}</Title>
-            </div>
-          )}
-
-          {errorMessage && (
-            <div style={{
-              marginTop: 16,
-              padding: '10px 14px',
-              background: 'rgba(255, 77, 79, 0.1)',
-              border: '1px solid rgba(255, 77, 79, 0.2)',
-              borderRadius: 10,
-              textAlign: 'center',
-            }}>
-              <Text type="danger" style={{ fontSize: 13, fontWeight: 500 }}>⚠️ {errorMessage}</Text>
-            </div>
-          )}
-
-          <Button
-            type="primary"
-            block
-            size="large"
-            loading={loading}
-            onClick={handleCreateOrder}
-            disabled={paymentMethod !== 'bonuspay' && finalAmount < 0.01}
+        /* 主选择界面：横版双列 (Left: 金额选择，Right: 支付方式) */
+        <Row gutter={isMobile ? [0, 12] : [24, 20]} style={{ margin: 0 }}>
+          {/* 左侧 Column：选择支付金额 */}
+          <Col
+            xs={24}
+            md={11}
             style={{
-              marginTop: 20, borderRadius: 10, height: 50, fontSize: 16, fontWeight: 600,
-              background: paymentMethod === 'bonuspay'
-                ? 'linear-gradient(135deg, #ff6a00, #ee0979)'
-                : paymentMethod === 'hyperbc'
-                  ? 'linear-gradient(135deg, #8b5cf6, #6d28d9)'
-                  : paymentMethod === 'stripe'
-                    ? 'linear-gradient(135deg, #635bff, #4b45c6)'
-                    : accent,
-              color: paymentMethod === 'bonuspay' || paymentMethod === 'hyperbc' || paymentMethod === 'stripe'
-                ? '#fff'
-                : accentOn,
-              border: 'none',
-              boxShadow: paymentMethod === 'bonuspay'
-                ? '0 4px 16px rgba(255, 106, 0, 0.35)'
-                : paymentMethod === 'hyperbc'
-                  ? '0 4px 16px rgba(139, 92, 246, 0.35)'
-                  : paymentMethod === 'stripe'
-                    ? '0 4px 16px rgba(99, 91, 255, 0.35)'
-                    : (isLight ? '0 4px 16px rgba(24, 24, 27, 0.2)' : '0 4px 16px rgba(0, 0, 0, 0.4)'),
+              padding: isMobile ? 0 : '0 12px 0 0',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: isMobile ? 10 : 16,
             }}
           >
-            {paymentMethod === 'bonuspay' ? (
-              <Space><ThunderboltOutlined />{t('recharge.get_address', '获取充值地址')}</Space>
-            ) : paymentMethod === 'hyperbc' ? (
-              <Space><span>₿</span>{t('recharge.go_hyperbc', '去 HyperBC 支付')}</Space>
-            ) : paymentMethod === 'stripe' ? (
-              <Space><CreditCardOutlined />{t('recharge.go_stripe', '去 Stripe 支付')}</Space>
-            ) : paymentMethod === 'alipay' ? (
-              <Space><AlipayCircleOutlined />{t('recharge.go_alipay', '去支付宝支付')}</Space>
-            ) : paymentMethod === 'allinpay_alipay' ? (
-              <Space><AlipayCircleOutlined />{t('recharge.gen_alipay_qr', '生成支付宝支付码')}</Space>
-            ) : (
-              <Space><WechatOutlined />{t('recharge.gen_wechat_qr', '生成微信支付码')}</Space>
-            )}
-          </Button>
+            {paymentMethod !== 'bonuspay' ? (
+              <>
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isMobile ? 8 : 10 }}>
+                    <Text strong style={{ fontSize: isMobile ? 13 : 14, color: labelColor }}>
+                      {t('recharge.select_amount', { defaultValue: `选择充值金额 (${currencyUnit})`, unit: currencyUnit })}
+                    </Text>
+                    <Text style={{ fontSize: 11, color: subColor }}>点击快捷选择</Text>
+                  </div>
+                  
+                  {/* 快捷金额卡片网格 */}
+                  <Row gutter={[8, 8]}>
+                    {amounts.map((amt: number) => {
+                      const isSelected = !isCustom && selectedAmount === amt;
+                      return (
+                        <Col span={8} key={amt}>
+                          <div
+                            onClick={() => handlePresetClick(amt)}
+                            style={{
+                              border: `2px solid ${isSelected ? (isLight ? '#18181b' : '#3b82f6') : borderIdle}`,
+                              borderRadius: isMobile ? 10 : 12,
+                              padding: isMobile ? '8px 0' : '12px 0',
+                              textAlign: 'center',
+                              cursor: 'pointer',
+                              background: isSelected
+                                ? (isLight ? '#18181b' : 'rgba(59, 130, 246, 0.15)')
+                                : bgIdle,
+                              transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+                              boxShadow: isSelected ? (isLight ? '0 4px 14px rgba(24, 24, 27, 0.12)' : '0 4px 14px rgba(59, 130, 246, 0.25)') : 'none',
+                            }}
+                          >
+                            <div style={{
+                              fontSize: isMobile ? 15 : 18,
+                              fontWeight: 700,
+                              color: isSelected ? (isLight ? '#ffffff' : '#60a5fa') : labelColor,
+                              lineHeight: 1.2
+                            }}>
+                              {amt}
+                            </div>
+                          </div>
+                        </Col>
+                      );
+                    })}
+                  </Row>
+                </div>
 
-          {/* Trust badge */}
-          <div style={{ textAlign: 'center', marginTop: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
-            <SafetyCertificateOutlined style={{ fontSize: 13, color: '#52c41a' }} />
-            <Text type="secondary" style={{ fontSize: 11 }}>{t('recharge.trust_badge', '资金安全保障 · 充值后即时到账 · 正规支付渠道')}</Text>
-          </div>
-        </div>
+                {/* 自定义金额输入卡片 */}
+                <div>
+                  <Text strong style={{ fontSize: isMobile ? 12 : 13, color: labelColor, display: 'block', marginBottom: isMobile ? 6 : 8 }}>
+                    {t('recharge.custom_amount', '或输入自定义金额')}
+                  </Text>
+                  <div
+                    onClick={handleCustomFocus}
+                    style={{
+                      border: `2px solid ${isCustom ? (isLight ? '#18181b' : '#3b82f6') : borderIdle}`,
+                      borderRadius: isMobile ? 10 : 12,
+                      padding: isMobile ? '6px 12px' : '8px 14px',
+                      background: isCustom ? (isLight ? 'rgba(24, 24, 27, 0.04)' : 'rgba(59, 130, 246, 0.1)') : bgIdle,
+                      transition: 'all 0.2s ease',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                    }}
+                  >
+                    <Text strong style={{ color: isCustom ? (isLight ? '#18181b' : '#60a5fa') : descColor, fontSize: 16 }}>{currencySymbol}</Text>
+                    <InputNumber
+                      min={0.01}
+                      max={50000}
+                      precision={2}
+                      placeholder={t('recharge.input_amount', '输入金额')}
+                      value={customAmount}
+                      onChange={(val) => { setCustomAmount(val); setIsCustom(true); setSelectedAmount(null); setErrorMessage(null); }}
+                      onFocus={handleCustomFocus}
+                      controls={false}
+                      variant="borderless"
+                      style={{ flex: 1, background: 'transparent', fontSize: 15 }}
+                    />
+                    <Text style={{ color: subColor, fontSize: 13 }}>{currencyUnit}</Text>
+                  </div>
+                </div>
+
+                {/* 应付金额汇总卡片 */}
+                <div style={{
+                  marginTop: isMobile ? 0 : 'auto',
+                  padding: isMobile ? '10px 12px' : '14px 18px',
+                  background: summaryBg,
+                  borderRadius: isMobile ? 10 : 14,
+                  border: `1px solid ${summaryBorder}`,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                }}>
+                  <div>
+                    <Text type="secondary" style={{ fontSize: isMobile ? 11 : 12, display: 'block' }}>
+                      {t('recharge.payable_amount', '预计应付金额')}
+                    </Text>
+                    {!isMobile && <Text style={{ fontSize: 11, color: subColor }}>实时按通道计费</Text>}
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: isMobile ? 20 : 24, fontWeight: 800, color: '#ef4444', lineHeight: 1 }}>
+                      {currencySymbol} {finalAmount.toFixed(2)}
+                    </div>
+                  </div>
+                </div>
+              </>
+            ) : (
+              /* BonusPay 加密货币面板 */
+              <div style={{
+                padding: isMobile ? '12px' : '16px',
+                borderRadius: 14,
+                background: bgIdle,
+                border: `1px solid ${borderIdle}`,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: isMobile ? 10 : 14,
+                height: isMobile ? 'auto' : '100%',
+              }}>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    width: 40, height: 40, borderRadius: 10,
+                    background: 'linear-gradient(135deg, #ff6a00, #ee0979)',
+                    marginBottom: 6,
+                  }}>
+                    <ThunderboltOutlined style={{ fontSize: 20, color: '#fff' }} />
+                  </div>
+                  <Title level={5} style={{ color: labelColor, margin: 0 }}>{t('recharge.crypto_recharge', '加密货币充值')}</Title>
+                  <Text type="secondary" style={{ fontSize: 11 }}>{t('recharge.crypto_desc', '充值金额以实际链上到账金额为准')}</Text>
+                </div>
+
+                <div>
+                  <Text strong style={{ display: 'block', marginBottom: 6, color: labelColor, fontSize: 12 }}>{t('recharge.recharge_currency', '充值币种')}</Text>
+                  <Row gutter={8}>
+                    {(['USDT', 'USDC'] as const).map(code => (
+                      <Col span={12} key={code}>
+                        <div
+                          onClick={() => setAssetCode(code)}
+                          style={{
+                            textAlign: 'center', padding: '8px 0', borderRadius: 8, cursor: 'pointer',
+                            border: `2px solid ${assetCode === code ? '#ff6a00' : borderIdle}`,
+                            background: assetCode === code ? 'rgba(255, 106, 0, 0.1)' : 'transparent',
+                            transition: 'all 0.2s ease',
+                          }}
+                        >
+                          <Text strong style={{ color: assetCode === code ? '#ff6a00' : labelColor, fontSize: 14 }}>{code}</Text>
+                        </div>
+                      </Col>
+                    ))}
+                  </Row>
+                </div>
+
+                <div>
+                  <Text strong style={{ display: 'block', marginBottom: 6, color: labelColor, fontSize: 12 }}>{t('recharge.recharge_network', '充值网络')}</Text>
+                  <Row gutter={8}>
+                    {(['TRON', 'ETH', 'POLYGON'] as const).map(net => (
+                      <Col span={8} key={net}>
+                        <div
+                          onClick={() => setDepositNetwork(net)}
+                          style={{
+                            textAlign: 'center', padding: '8px 0', borderRadius: 8, cursor: 'pointer',
+                            border: `2px solid ${depositNetwork === net ? '#ff6a00' : borderIdle}`,
+                            background: depositNetwork === net ? 'rgba(255, 106, 0, 0.1)' : 'transparent',
+                            transition: 'all 0.2s ease',
+                          }}
+                        >
+                          <Text strong style={{ color: depositNetwork === net ? '#ff6a00' : labelColor, fontSize: 12 }}>{net}</Text>
+                        </div>
+                      </Col>
+                    ))}
+                  </Row>
+                </div>
+              </div>
+            )}
+          </Col>
+
+          {/* 右侧 Column：选择支付方式 */}
+          <Col xs={24} md={13} style={{
+            padding: isMobile ? 0 : '0 0 0 12px',
+            borderLeft: isMobile ? 'none' : `1px solid ${borderIdle}`,
+            borderTop: isMobile ? `1px solid ${borderIdle}` : 'none',
+            paddingTop: isMobile ? 12 : 0,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: isMobile ? 10 : 14,
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text strong style={{ fontSize: isMobile ? 13 : 14, color: labelColor }}>
+                {t('recharge.payment_method', '选择支付方式')}
+              </Text>
+              <Text style={{ fontSize: 11, color: subColor }}>
+                已选 {paymentOptions.find(o => o.key === selectedChannel)?.name || '支付方式'}
+                {selectedChannel === 'allinpay' && paymentMethod === 'allinpay_wechat' ? ' · 微信' : ''}
+                {selectedChannel === 'allinpay' && paymentMethod === 'allinpay_alipay' ? ' · 支付宝' : ''}
+              </Text>
+            </div>
+
+            {/* 多支付方式网格列表（带自适应滚动容器） */}
+            <div style={{
+              maxHeight: isMobile ? undefined : 250,
+              overflowY: isMobile ? 'visible' : 'auto',
+              paddingRight: isMobile ? 0 : 4,
+            }}>
+              <Row gutter={[8, 8]}>
+                {paymentOptions.map((opt) => {
+                  const isSel = selectedChannel === opt.key;
+                  return (
+                    <Col span={12} key={opt.key}>
+                      <div
+                        onClick={() => applyChannelSelection(opt.channel)}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          padding: isMobile ? '8px 10px' : '10px 12px',
+                          height: isMobile ? 46 : 52,
+                          borderRadius: isMobile ? 10 : 12,
+                          cursor: 'pointer',
+                          border: `2px solid ${isSel ? opt.activeBorderColor : borderIdle}`,
+                          background: isSel ? opt.activeBg : bgIdle,
+                          transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+                          position: 'relative',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
+                          {opt.icon}
+                          <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                            <Text strong style={{
+                              color: labelColor,
+                              fontSize: isMobile ? 12 : 13,
+                              lineHeight: 1.2,
+                              whiteSpace: 'nowrap',
+                              textOverflow: 'ellipsis',
+                              overflow: 'hidden'
+                            }}>
+                              {opt.name}
+                            </Text>
+                            {opt.badge && (
+                              <span style={{
+                                fontSize: 10,
+                                color: opt.badgeColor,
+                                fontWeight: 600,
+                                marginTop: 2,
+                                lineHeight: 1,
+                              }}>
+                                {opt.badge}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* 单选 Radio 选中指示器 */}
+                        <div style={{
+                          width: 18,
+                          height: 18,
+                          borderRadius: '50%',
+                          border: `2px solid ${isSel ? opt.activeBorderColor : borderIdle}`,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          background: isSel ? opt.activeBorderColor : 'transparent',
+                          transition: 'all 0.2s ease',
+                          flexShrink: 0,
+                          marginLeft: 4,
+                        }}>
+                          {isSel && (
+                            <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#ffffff' }} />
+                          )}
+                        </div>
+                      </div>
+                    </Col>
+                  );
+                })}
+              </Row>
+            </div>
+
+            {showAllinpaySubPicker && (
+              <div style={{
+                padding: 12,
+                borderRadius: 12,
+                border: `1px solid ${borderIdle}`,
+                background: bgIdle,
+              }}>
+                <Text style={{ fontSize: 12, color: subColor, display: 'block', marginBottom: 8 }}>
+                  请选择通联支付方式
+                </Text>
+                <Row gutter={[10, 10]}>
+                  {allinpayMethods.map((method) => {
+                    const isSel = paymentMethod === method;
+                    const isWechat = method === 'allinpay_wechat';
+                    const accent = isWechat ? '#07c160' : '#1677ff';
+                    return (
+                      <Col span={12} key={method}>
+                        <div
+                          onClick={() => setPaymentMethod(method)}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 8,
+                            padding: '10px 12px',
+                            borderRadius: 10,
+                            cursor: 'pointer',
+                            border: `2px solid ${isSel ? accent : borderIdle}`,
+                            background: isSel ? (isLight ? `${accent}0f` : `${accent}26`) : 'transparent',
+                          }}
+                        >
+                          {isWechat
+                            ? <WechatOutlined style={{ fontSize: 20, color: accent }} />
+                            : <AlipayCircleOutlined style={{ fontSize: 20, color: accent }} />}
+                          <Text strong style={{ color: labelColor, fontSize: 13 }}>
+                            {isWechat ? '微信支付' : '支付宝'}
+                          </Text>
+                        </div>
+                      </Col>
+                    );
+                  })}
+                </Row>
+              </div>
+            )}
+
+            {/* 错误提示 */}
+            {errorMessage && (
+              <div style={{
+                padding: '8px 12px',
+                background: 'rgba(239, 68, 68, 0.08)',
+                border: '1px solid rgba(239, 68, 68, 0.2)',
+                borderRadius: 10,
+                textAlign: 'center',
+              }}>
+                <Text type="danger" style={{ fontSize: 12, fontWeight: 500 }}>⚠️ {errorMessage}</Text>
+              </div>
+            )}
+
+            {/* 支付触发主按钮 */}
+            <Button
+              type="primary"
+              block
+              size="large"
+              loading={loading}
+              onClick={handleCreateOrder}
+              disabled={paymentMethod !== 'bonuspay' && finalAmount < 0.01}
+              className="recharge-pay-btn"
+              style={{
+                marginTop: isMobile ? 4 : 'auto',
+                borderRadius: 12,
+                height: isMobile ? 44 : 48,
+                fontSize: isMobile ? 14 : 15,
+                fontWeight: 600,
+                background: getPayButtonBackground(paymentMethod),
+                color: '#ffffff',
+                border: 'none',
+                boxShadow: getPayButtonShadow(paymentMethod),
+                transition: 'all 0.25s ease',
+              }}
+            >
+              {(() => {
+                const btnFg = { color: '#ffffff' };
+                if (paymentMethod === 'bonuspay') {
+                  return <Space style={btnFg}><ThunderboltOutlined style={btnFg} />{t('recharge.get_address', '获取充值地址')}</Space>;
+                }
+                if (paymentMethod === 'hyperbc') {
+                  return <Space style={btnFg}><span style={btnFg}>₿</span>{t('recharge.go_hyperbc', '去 HyperBC 支付')}</Space>;
+                }
+                if (paymentMethod === 'stripe') {
+                  return <Space style={btnFg}><CreditCardOutlined style={btnFg} />{t('recharge.go_stripe', '去 Stripe 支付')}</Space>;
+                }
+                if (paymentMethod === 'alipay' || paymentMethod === 'allinpay_alipay') {
+                  return (
+                    <Space style={btnFg}>
+                      <AlipayCircleOutlined style={btnFg} />
+                      {paymentMethod === 'alipay'
+                        ? t('recharge.go_alipay', '去支付宝支付')
+                        : t('recharge.gen_alipay_qr', '生成支付宝支付码')}
+                    </Space>
+                  );
+                }
+                if (paymentMethod === 'wechat' || paymentMethod === 'allinpay_wechat') {
+                  return <Space style={btnFg}><WechatOutlined style={btnFg} />{t('recharge.gen_wechat_qr', '生成微信支付码')}</Space>;
+                }
+                return <Space style={btnFg}><WalletOutlined style={btnFg} />去支付</Space>;
+              })()}
+            </Button>
+
+            {/* 安全验证 Footer */}
+            <div style={{ textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+              <SafetyCertificateOutlined style={{ fontSize: 12, color: '#10b981' }} />
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                {t('recharge.trust_badge', '资金安全保障 · 充值后即时到账 · 正规支付渠道')}
+              </Text>
+            </div>
+          </Col>
+        </Row>
       )}
     </Modal>
   );

@@ -59,11 +59,14 @@ pub async fn create_channel_config(
     };
 
     let status = if req.status == 0 { 0 } else { 1 };
+    let daily_reset_hour = req.daily_reset_hour.unwrap_or(0).clamp(0, 23);
+    let daily_reset_minute = req.daily_reset_minute.unwrap_or(0).clamp(0, 59);
+    let daily_reset_cooldown_minutes = req.daily_reset_cooldown_minutes.unwrap_or(0).max(0);
 
     sqlx::query(
         &state.db.format_query(
-            "INSERT INTO channel_configs (name, provider_type, base_url, api_key, remark, yid, sort_order, rate, priority, weight, quota_limit, daily_quota_limit, weekly_quota_limit, monthly_quota_limit, status, category_id) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO channel_configs (name, provider_type, base_url, api_key, remark, yid, sort_order, rate, priority, weight, quota_limit, daily_quota_limit, weekly_quota_limit, monthly_quota_limit, daily_reset_hour, daily_reset_minute, daily_reset_cooldown_minutes, status, category_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
     )
     .bind(&req.name)
@@ -80,6 +83,9 @@ pub async fn create_channel_config(
     .bind(req.daily_quota_limit.unwrap_or(-1.0))
     .bind(req.weekly_quota_limit.unwrap_or(-1.0))
     .bind(req.monthly_quota_limit.unwrap_or(-1.0))
+    .bind(daily_reset_hour)
+    .bind(daily_reset_minute)
+    .bind(daily_reset_cooldown_minutes)
     .bind(status)
     .bind(req.category_id)
     .execute(&state.db.pool)
@@ -145,6 +151,15 @@ pub async fn update_channel_config(
     if let Some(m) = req.monthly_quota_limit {
         config.monthly_quota_limit = m;
     }
+    if let Some(h) = req.daily_reset_hour {
+        config.daily_reset_hour = h.clamp(0, 23);
+    }
+    if let Some(m) = req.daily_reset_minute {
+        config.daily_reset_minute = m.clamp(0, 59);
+    }
+    if let Some(c) = req.daily_reset_cooldown_minutes {
+        config.daily_reset_cooldown_minutes = c.max(0);
+    }
     if let Some(s) = req.status {
         config.status = if s == 0 { 0 } else { 1 };
     }
@@ -155,7 +170,8 @@ pub async fn update_channel_config(
     sqlx::query(
         &state.db.format_query(
             "UPDATE channel_configs SET name = ?, provider_type = ?, base_url = ?, api_key = ?, remark = ?, \
-             sort_order = ?, rate = ?, priority = ?, weight = ?, quota_limit = ?, daily_quota_limit = ?, weekly_quota_limit = ?, monthly_quota_limit = ?, status = ?, category_id = ? \
+             sort_order = ?, rate = ?, priority = ?, weight = ?, quota_limit = ?, daily_quota_limit = ?, weekly_quota_limit = ?, monthly_quota_limit = ?, \
+             daily_reset_hour = ?, daily_reset_minute = ?, daily_reset_cooldown_minutes = ?, status = ?, category_id = ? \
              WHERE id = ?"
         )
     )
@@ -172,6 +188,9 @@ pub async fn update_channel_config(
     .bind(config.daily_quota_limit)
     .bind(config.weekly_quota_limit)
     .bind(config.monthly_quota_limit)
+    .bind(config.daily_reset_hour)
+    .bind(config.daily_reset_minute)
+    .bind(config.daily_reset_cooldown_minutes)
     .bind(config.status)
     .bind(config.category_id)
     .bind(id)

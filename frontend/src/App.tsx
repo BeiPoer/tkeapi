@@ -6,11 +6,13 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
+import { Spin } from 'antd';
 import { useTranslation } from 'react-i18next';
 import axios from 'axios';
 import request from './utils/request';
 import { captureInviteFromSearch } from './utils/inviteTracking';
+import { coalesceAsync } from './utils/coalesceAsync';
 import Login from './pages/Login/Login';
 import Register from './pages/Login/Register';
 import ForgotPassword from './pages/Login/ForgotPassword';
@@ -48,6 +50,7 @@ import {
   PlaygroundHome,
   Playground2026,
   PlaygroundHome2026,
+  WorkflowCreateBootstrap2026,
   ModelMarketplace,
 } from './plugins-registry';
 import Redemptions from './pages/Redemptions/Redemptions';
@@ -79,22 +82,36 @@ const PrivateRoute = ({ children, adminOnly = false, userOnly = false }: { child
   return <>{children}</>;
 };
 
+/** 兼容旧画布路径 /playground-2026/:projectId → /playground-2026/projects/:projectId */
+const Playground2026LegacyRedirect = () => {
+  const { projectId } = useParams<{ projectId: string }>();
+  if (!projectId || Number.isNaN(parseInt(projectId, 10))) {
+    return <Navigate to="/playground-2026/projects" replace />;
+  }
+  return <Navigate to={`/playground-2026/projects/${projectId}`} replace />;
+};
+
 /**
  * 全新安装（尚无管理员）时，任意入口都直接进入管理员初始化页。
  */
 const AdminSetupGate = ({ children }: { children: React.ReactNode }) => {
   const [bootState, setBootState] = useState<'loading' | 'ready' | 'need_setup'>('loading');
   const adminPath = localStorage.getItem('tokensbyte_admin_path') || 'admin1688';
-  const { token, setToken, setUser } = useAuthStore();
 
   useEffect(() => {
     let cancelled = false;
     const check = async () => {
       try {
-        const response = await axios.get<{ initialized: boolean }>('/api/v1/auth/admin/init-status');
+        // StrictMode 双挂载 / 并发进入时合并为一次请求
+        const response = await coalesceAsync(
+          'auth:admin-init-status',
+          () => axios.get<{ initialized: boolean }>('/api/v1/auth/admin/init-status'),
+          { recentMs: 10_000 },
+        );
         if (cancelled) return;
         if (!response.data.initialized) {
           // 清空残留登录态，避免初始化页被旧 token 误跳转
+          const { token, setToken, setUser } = useAuthStore.getState();
           if (token) {
             setToken(null);
             setUser(null);
@@ -109,8 +126,10 @@ const AdminSetupGate = ({ children }: { children: React.ReactNode }) => {
       }
     };
     void check();
-    return () => { cancelled = true; };
-  }, [token, setToken, setUser]);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   if (bootState === 'loading') {
     return (
@@ -132,6 +151,14 @@ const AdminSetupGate = ({ children }: { children: React.ReactNode }) => {
   return <>{children}</>;
 };
 
+/** 后端编译重启 / 代理网关暂时不可达等瞬时网络错误（与 request 拦截器 502/503/504 对齐） */
+function isTransientNetworkError(error: any): boolean {
+  if (!error || axios.isCancel(error)) return false;
+  const status = error?.response?.status;
+  if (!error?.response) return true;
+  return status === 502 || status === 503 || status === 504;
+}
+
 const PluginRoute = ({
   children,
   pluginName,
@@ -141,56 +168,114 @@ const PluginRoute = ({
   pluginName: string;
   allowGuest?: boolean;
 }) => {
-  const [loading, setLoading] = React.useState(true);
-  const [isActive, setIsActive] = React.useState(false);
+  const isPublicPlugin =
+    allowGuest &&
+    ['site_portal_pro', 'site_portal', 'docs_api', 'model_marketplace'].includes(pluginName);
+  // loading | waiting_network | ready | denied
+  const [phase, setPhase] = React.useState<
+    'loading' | 'waiting_network' | 'ready' | 'denied'
+  >(isPublicPlugin ? 'ready' : 'loading');
+  const [isActive, setIsActive] = React.useState(isPublicPlugin);
   const { user } = useAuthStore();
 
   React.useEffect(() => {
+    if (isPublicPlugin) return undefined;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const resolveAccess = (matched: any): boolean => {
+      if (!matched) return false;
+      if (
+        allowGuest &&
+        (matched.mp_allow_guest ||
+          ['site_portal_pro', 'site_portal', 'docs_api', 'model_marketplace'].includes(pluginName))
+      ) {
+        return true;
+      }
+      if (!user) return false;
+      if (user?.role === 'admin' || matched.allowed_levels === 'all') return true;
+      const userGroup = user?.user_group || '';
+      const levelId = user?.level_id != null ? String(user.level_id) : '';
+      const levels = String(matched.allowed_levels || '').split(',');
+      return levels.includes(userGroup) || (levelId !== '' && levels.includes(levelId));
+    };
+
     const checkPlugin = async () => {
       try {
-        const response: any = await request.get('/plugins/active');
+        // 对齐 Dashboard /metrics/live：瞬时失败静默重试，不打断页面
+        const response: any = await request.get('/plugins/active', {
+          skipErrorHandler: true,
+        } as any);
+        if (cancelled) return;
         const plugins: any[] = response?.active_plugins || [];
         const matched = plugins.find((p: any) => p.name === pluginName);
-        if (!matched) {
-          setIsActive(false);
-          return;
+        const ok = resolveAccess(matched);
+        setIsActive(ok);
+        setPhase(ok ? 'ready' : 'denied');
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
         }
-        if (
-          allowGuest &&
-          (matched.mp_allow_guest ||
-            ['site_portal_pro', 'site_portal', 'docs_api', 'model_marketplace'].includes(pluginName))
-        ) {
-          setIsActive(true);
-          return;
-        }
-        if (!user) {
-          setIsActive(false);
-          return;
-        }
-        if (user?.role === 'admin' || matched.allowed_levels === 'all') {
-          setIsActive(true);
-          return;
-        }
-        const userGroup = user?.user_group || '';
-        const levelId = user?.level_id != null ? String(user.level_id) : '';
-        const levels = String(matched.allowed_levels || '').split(',');
-        setIsActive(levels.includes(userGroup) || (levelId !== '' && levels.includes(levelId)));
       } catch (e) {
+        if (cancelled) return;
+        if (isTransientNetworkError(e)) {
+          // 网络/编译重启：留在当前路由等待，周期性重试（同 metrics/live 5s）
+          setPhase((prev) => (prev === 'ready' ? prev : 'waiting_network'));
+          if (!timer) {
+            timer = setInterval(() => {
+              void checkPlugin();
+            }, 5000);
+          }
+          return;
+        }
+        // 非瞬时错误仍视为不可用
         setIsActive(false);
-      } finally {
-        setLoading(false);
+        setPhase('denied');
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
+        }
       }
     };
-    checkPlugin();
-  }, [pluginName, user, allowGuest]);
 
-  if (loading) return <div style={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center' }}>加载中...</div>;
-  if (!isActive) {
+    void checkPlugin();
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [pluginName, user, allowGuest, isPublicPlugin]);
+
+  if (phase === 'loading' || phase === 'waiting_network') {
+    return (
+      <div
+        style={{
+          minHeight: '100vh',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 12,
+          padding: 24,
+        }}
+      >
+        <Spin size="large" />
+        <div style={{ fontSize: 13, opacity: 0.65, textAlign: 'center' }}>
+          {phase === 'waiting_network'
+            ? '后端服务连接中，请稍候…'
+            : '加载中…'}
+        </div>
+      </div>
+    );
+  }
+
+  if (phase === 'denied' || !isActive) {
     if (!user) {
       return <Navigate to="/login" replace />;
     }
     return <Navigate to="/dashboard" replace />;
   }
+
   return <>{children}</>;
 };
 
@@ -272,7 +357,7 @@ const App: React.FC = () => {
   return (
     <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <InviteParamCapture />
-      <React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', color: '#666' }}>Loading...</div>}>
+      <React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}><Spin size="large" /></div>}>
         <AdminSetupGate>
         <Routes>
         {/* Public Routes */}
@@ -307,17 +392,158 @@ const App: React.FC = () => {
           element={
             <PrivateRoute>
               <PluginRoute pluginName="playground_2026">
+                <Navigate to="/playground-2026/works" replace />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/playground-2026/works"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
                 <PlaygroundHome2026 />
               </PluginRoute>
             </PrivateRoute>
           }
         />
         <Route
-          path="/playground-2026/:projectId"
+          path="/playground-2026/works/favorites"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
+                <PlaygroundHome2026 />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/playground-2026/works/albums/:albumId"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
+                <PlaygroundHome2026 />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/playground-2026/projects"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
+                <PlaygroundHome2026 />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/playground-2026/projects/:projectId"
           element={
             <PrivateRoute>
               <PluginRoute pluginName="playground_2026">
                 <Playground2026 />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/playground-2026/images"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
+                <PlaygroundHome2026 />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/playground-2026/images/generate"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
+                <Navigate to="/playground-2026/images" replace />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/playground-2026/videos"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
+                <PlaygroundHome2026 />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/playground-2026/workflows"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
+                <PlaygroundHome2026 />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/playground-2026/workflows/create"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
+                <WorkflowCreateBootstrap2026 />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/playground-2026/workflows/:workflowId"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
+                <Playground2026 />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/playground-2026/videos/generate"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
+                <Navigate to="/playground-2026/videos" replace />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/playground-2026/generate-image"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
+                <Navigate to="/playground-2026/images" replace />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/playground-2026/generate-video"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
+                <Navigate to="/playground-2026/videos" replace />
+              </PluginRoute>
+            </PrivateRoute>
+          }
+        />
+        {/* 兼容旧路径 /playground-2026/:projectId */}
+        <Route
+          path="/playground-2026/:projectId"
+          element={
+            <PrivateRoute>
+              <PluginRoute pluginName="playground_2026">
+                <Playground2026LegacyRedirect />
               </PluginRoute>
             </PrivateRoute>
           }

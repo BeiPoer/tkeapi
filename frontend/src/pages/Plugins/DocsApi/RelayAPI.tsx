@@ -15,8 +15,11 @@ import {
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  Popover, List, Badge, message, Spin, Empty, Dropdown, Button, Space, Tooltip, Drawer
+  Popover, List, Badge, message, Spin, Empty, Dropdown, Button, Space, Tooltip, Drawer,
+  Layout, Grid
 } from 'antd';
+const { Header, Sider, Content } = Layout;
+const { useBreakpoint } = Grid;
 import {
   Sidebar as SidebarIcon, Bell, Folder, FolderOpen,
   FileText, ChevronRight, Search, ArrowLeft, Copy, ExternalLink,
@@ -258,15 +261,34 @@ const RelayAPI: React.FC<RelayAPIProps> = ({ apiPrefix, baseRoute }) => {
   const { t: _t, i18n } = useTranslation();
   const { t: docsT } = useTranslation('docs_api');
 
-  const [collapsed, setCollapsed] = useState(false);
+  const screens = useBreakpoint();
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      if (typeof window !== 'undefined' && window.innerWidth <= 576) {
+        return true;
+      }
+      const saved = localStorage.getItem('docs_api_sidebar_collapsed');
+      return saved !== null ? JSON.parse(saved) : false;
+    } catch {
+      return false;
+    }
+  });
   const [openOutlineDrawer, setOpenOutlineDrawer] = useState(false);
   const [announcementsDrawerVisible, setAnnouncementsDrawerVisible] = useState(false);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [activePlugins, setActivePlugins] = useState<any[]>([]);
-  const [isNarrow, setIsNarrow] = useState(
-    typeof window !== 'undefined' ? window.innerWidth <= 768 : false
-  );
+
+  useEffect(() => {
+    if (screens.xs) {
+      setCollapsed(true);
+    }
+  }, [screens.xs]);
+
+  const handleCollapsedChange = (val: boolean) => {
+    setCollapsed(val);
+    localStorage.setItem('docs_api_sidebar_collapsed', JSON.stringify(val));
+  };
 
   // 动态文档状态
   const [treeData, setTreeData] = useState<DocTreeNode[]>([]);
@@ -338,21 +360,16 @@ const RelayAPI: React.FC<RelayAPIProps> = ({ apiPrefix, baseRoute }) => {
 
   const isLight = themeMode === 'light';
   const c = {
+    siderBg: isLight ? '#f8f9fa' : '#141414',
     cardBorder: isLight ? '#eaeaea' : '#222225',
     text1: isLight ? '#1f2937' : 'rgba(255,255,255,0.95)',
     text2: isLight ? '#4b5563' : 'rgba(255,255,255,0.75)',
     text3: isLight ? '#6b7280' : 'rgba(255,255,255,0.5)',
+    scrollThumb: isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.06)',
   };
-
   useEffect(() => {
     document.title = `${docsT('client_doc_title')} - ${siteTitle}`;
   }, [isEn, siteTitle]);
-
-  useEffect(() => {
-    const onResize = () => setIsNarrow(window.innerWidth <= 768);
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
 
   // 拉取公告 + 已启用插件（对齐控制台右上角）
   useEffect(() => {
@@ -898,15 +915,17 @@ const RelayAPI: React.FC<RelayAPIProps> = ({ apiPrefix, baseRoute }) => {
   };
 
   const getSidebarIcon = (title: string) => {
+    const sizeClass = 'w-3.5 h-3.5';
+    const colorClass = 'text-zinc-500 dark:text-zinc-200 group-hover:text-zinc-900 dark:group-hover:text-white transition-colors';
     const t = title.toLowerCase();
-    if (t.includes('example') || t.includes('示例')) return <Sparkles className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-200 group-hover:text-zinc-900 dark:group-hover:text-white transition-colors" />;
-    if (t.includes('form') || t.includes('表单')) return <ClipboardList className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-200 group-hover:text-zinc-900 dark:group-hover:text-white transition-colors" />;
-    if (t.includes('query') || t.includes('api') || t.includes('code') || t.includes('开发') || t.includes('代码') || t.includes('relay')) return <Code className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-200 group-hover:text-zinc-900 dark:group-hover:text-white transition-colors" />;
-    if (t.includes('icon') || t.includes('图标') || t.includes('paint') || t.includes('color') || t.includes('style') || t.includes('设计') || t.includes('样式')) return <Palette className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-200 group-hover:text-zinc-900 dark:group-hover:text-white transition-colors" />;
-    if (t.includes('setting') || t.includes('config') || t.includes('配置') || t.includes('设置')) return <Settings className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-200 group-hover:text-zinc-900 dark:group-hover:text-white transition-colors" />;
-    if (t.includes('guide') || t.includes('doc') || t.includes('指南') || t.includes('文档') || t.includes('入门')) return <BookOpen className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-200 group-hover:text-zinc-900 dark:group-hover:text-white transition-colors" />;
-    if (t.includes('quick') || t.includes('start') || t.includes('快速')) return <Rocket className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-200 group-hover:text-zinc-900 dark:group-hover:text-white transition-colors" />;
-    return <Folder className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-200 group-hover:text-zinc-900 dark:group-hover:text-white transition-colors" />;
+    if (t.includes('example') || t.includes('示例')) return <Sparkles className={`${sizeClass} ${colorClass}`} />;
+    if (t.includes('form') || t.includes('表单')) return <ClipboardList className={`${sizeClass} ${colorClass}`} />;
+    if (t.includes('query') || t.includes('api') || t.includes('code') || t.includes('开发') || t.includes('代码') || t.includes('relay')) return <Code className={`${sizeClass} ${colorClass}`} />;
+    if (t.includes('icon') || t.includes('图标') || t.includes('paint') || t.includes('color') || t.includes('style') || t.includes('设计') || t.includes('样式')) return <Palette className={`${sizeClass} ${colorClass}`} />;
+    if (t.includes('setting') || t.includes('config') || t.includes('配置') || t.includes('设置')) return <Settings className={`${sizeClass} ${colorClass}`} />;
+    if (t.includes('guide') || t.includes('doc') || t.includes('指南') || t.includes('文档') || t.includes('入门')) return <BookOpen className={`${sizeClass} ${colorClass}`} />;
+    if (t.includes('quick') || t.includes('start') || t.includes('快速')) return <Rocket className={`${sizeClass} ${colorClass}`} />;
+    return <Folder className={`${sizeClass} ${colorClass}`} />;
   };
 
   // 递归渲染自定义树状目录大纲（Fumadocs 极简暗黑科技风）
@@ -915,8 +934,6 @@ const RelayAPI: React.FC<RelayAPIProps> = ({ apiPrefix, baseRoute }) => {
       const isDir = node.is_dir;
       const isSelected = selectedDocId === node.id;
       const isOpen = expandedMenuKeys.includes(`dir-${node.id}`);
-
-      // 仅首层（level === 0）展示左侧图标
       const showIcon = level === 0;
 
       if (isDir) {
@@ -964,6 +981,7 @@ const RelayAPI: React.FC<RelayAPIProps> = ({ apiPrefix, baseRoute }) => {
                 ? `${basePath}/${parentSlug}/${idToSlug(node.id)}`
                 : `${basePath}/${idToSlug(node.id)}`;
               navigate(path);
+              if (screens.xs) handleCollapsedChange(true);
             }}
             style={{ paddingLeft: showIcon ? '4px' : '10px' }}
             className={`group flex items-center gap-2 w-full h-7 text-left text-[13px] rounded-md transition-all cursor-pointer mb-0.5 select-none pl-1 pr-2 ${
@@ -1308,186 +1326,320 @@ const RelayAPI: React.FC<RelayAPIProps> = ({ apiPrefix, baseRoute }) => {
 
   const isCyberHacker = isSitePortalPro;
   const systemClass = isCyberHacker ? 'cyber-hacker-docs' : 'docs-api-system';
+  const showHeaderBrand = !!(screens.xs || collapsed);
 
   return (
-    <div className={`flex h-screen w-screen overflow-hidden bg-background text-foreground font-sans ${systemClass}`}>
+    <div className={`h-screen w-screen overflow-hidden bg-background text-foreground font-sans ${systemClass}`}>
+      <style>{`
+        .docs-top-nav-glass.ant-layout-header {
+          line-height: inherit;
+        }
+        .docs-sidebar-content { padding: 8px 0; overflow-y: auto; height: 100%; }
+        .docs-sidebar-content::-webkit-scrollbar { width: 4px; }
+        .docs-sidebar-content::-webkit-scrollbar-thumb { background: ${c.scrollThumb}; border-radius: 4px; }
+        .docs-api-system .custom-sider.ant-layout-sider,
+        .cyber-hacker-docs .custom-sider.ant-layout-sider {
+          transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        }
+      `}</style>
 
-      {/* 左侧侧边栏 */}
-      <aside
-        className={`flex-shrink-0 flex flex-col h-full bg-[#f8f9fa] dark:bg-[#141414] border-r border-border transition-all duration-300 ${
-          collapsed ? 'w-0 border-r-0 overflow-hidden' : 'w-[240px]'
-        }`}
-      >
-        {/* Logo 与站点名 */}
-        <div
+      <Layout style={{ height: '100vh', overflow: 'hidden', background: isLight ? '#ffffff' : '#000000' }}>
+        <Sider
+          trigger={null}
+          collapsible
+          collapsed={collapsed}
+          theme={themeMode}
+          width={240}
+          collapsedWidth={0}
           style={{
-            height: 56,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '0 8px',
-            borderBottom: isLight ? '1px solid #e4e4e7' : '1px solid #1f1f23',
-            cursor: 'pointer',
-            transition: 'all 0.2s'
-          }}
-          onClick={() => navigate(isCyberHacker ? '/home-pro' : '/dashboard')}
-        >
-          {siteLogo ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', justifyContent: 'center' }}>
-              <img src={siteLogo} alt="logo" style={{ width: 28, height: 28, objectFit: 'contain', flexShrink: 0 }} />
-              <div style={{ color: isLight ? '#1f2937' : '#fff', margin: 0, fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18, fontWeight: 700, lineHeight: 1.2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-all' }}>
-                {siteName}
-              </div>
-            </div>
-          ) : (
-            <div style={{ color: isLight ? '#1f2937' : '#fff', margin: 0, fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18, fontWeight: 700, lineHeight: 1.2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-all', textAlign: 'center' }}>
-              {siteName}
-            </div>
-          )}
-        </div>
-
-        {/* 快捷搜索触发框 */}
-        <div className="p-3 border-b border-border/40">
-          <button
-            onClick={() => {
-              setSearchQuery('');
-              setOpenSearch(true);
-            }}
-            className="flex items-center justify-between w-full h-8 px-3 text-xs text-zinc-400 bg-zinc-50/50 dark:bg-zinc-900/60 border border-border rounded-md hover:bg-zinc-100/50 dark:hover:bg-zinc-800/40 transition-colors cursor-pointer"
-          >
-            <span className="flex items-center gap-2">
-              <Search className="w-3.5 h-3.5" />
-              <span>{docsT('search_placeholder')}</span>
-            </span>
-            <kbd className="hidden sm:inline-block font-mono bg-zinc-200/60 dark:bg-zinc-800/80 px-1.5 py-0.5 rounded border border-border scale-90 text-[10px]">⌘K</kbd>
-          </button>
-        </div>
-
-        {/* 目录树大纲滚动区域 */}
-        <div className="flex-1 overflow-y-auto p-2 docs-sidebar-scroll">
-          {loading ? (
-            <div className="flex items-center justify-center pt-10"><Spin size="small" /></div>
-          ) : treeData.length === 0 ? (
-            <Empty description="暂无文档" image={Empty.PRESENTED_IMAGE_SIMPLE} className="mt-8" />
-          ) : (
-            renderSidebarTree(filteredTree)
-          )}
-        </div>
-      </aside>
-
-      {/* 右侧主体布局 */}
-      <div className="flex-1 flex flex-col h-full overflow-hidden bg-slate-50/70 dark:bg-[#0a0c10] relative">
-        {/* 顶栏 Header（毛玻璃，浮于内容之上） */}
-        <header
-          className="docs-top-nav-glass select-none"
-          style={{
-            position: 'absolute',
-            top: 0,
+            boxShadow: 'none',
+            borderRight: isLight ? '1px solid #e4e4e7' : '1px solid #1f1f23',
+            zIndex: 10,
+            position: screens.xs ? 'fixed' : 'relative',
+            height: '100%',
             left: 0,
-            right: 0,
-            zIndex: 20,
-            padding: '0 12px',
-            // 更透一些，滚动时标题/正文穿过顶栏才看得出模糊
-            background: themeMode === 'light' ? 'rgba(255, 255, 255, 0.62)' : 'rgba(10, 12, 16, 0.48)',
-            backdropFilter: 'blur(18px) saturate(180%)',
-            WebkitBackdropFilter: 'blur(18px) saturate(180%)',
-            height: 56,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            paddingRight: isNarrow ? 8 : 24,
-            borderBottom: themeMode === 'light'
-              ? '1px solid rgba(228, 228, 231, 0.45)'
-              : '1px solid rgba(255, 255, 255, 0.08)',
+            top: 0,
+            bottom: 0,
+            overflow: 'hidden',
+            background: c.siderBg,
           }}
+          className="custom-sider"
         >
-          {/* 左侧：侧边栏折叠按钮 + 分类导航菜单 */}
-          <div style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
-            <Button
-              type="text"
-              icon={<SidebarIcon size={16} />}
-              onClick={() => setCollapsed(!collapsed)}
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              height: '100%',
+              // 固定内容宽度，收拢时只被 sider overflow 裁切，文字不会被挤压变形
+              width: 240,
+              minWidth: 240,
+              opacity: collapsed ? 0 : 1,
+              transition: collapsed
+                ? 'opacity 0.1s ease'
+                : 'opacity 0.2s ease 0.16s',
+              pointerEvents: collapsed ? 'none' : 'auto',
+            }}
+          >
+            {/* Logo Area */}
+            <div
               style={{
-                width: 32,
-                height: 32,
+                height: screens.xs ? 48 : 56,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                color: themeMode === 'light' ? '#71717a' : '#a1a1aa',
-                borderRadius: 6
+                padding: '0 8px',
+                borderBottom: isLight ? '1px solid #e4e4e7' : '1px solid #1f1f23',
+                cursor: 'pointer',
+                flexShrink: 0,
               }}
-            />
-
-            {categories.length > 0 && (
-              <div className="flex items-center gap-3.5 overflow-x-auto no-scrollbar py-2 px-3 ml-[8px]">
-                {categories.map(c => (
-                  <button
-                    key={c.id}
-                    className={`docs-category-btn px-3.5 py-1 text-sm rounded-full transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
-                      activeCategoryId === c.id ? 'active' : ''
-                    }`}
-                    onClick={() => handleCategoryChange(c.id)}
-                  >
-                    {/[\u4e00-\u9fff]/.test(c.name) ? c.name.replace(/\s+/g, '') : c.name}
-                  </button>
-                ))}
+              onClick={() => navigate(isCyberHacker ? '/home-pro' : '/dashboard')}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', justifyContent: 'center', minWidth: 0, overflow: 'hidden' }}>
+                {siteLogo ? (
+                  <img src={siteLogo} alt="logo" style={{ width: 20, height: 20, objectFit: 'contain', flexShrink: 0 }} />
+                ) : (
+                  <div className="flex items-center justify-center w-5 h-5 rounded bg-primary text-primary-foreground flex-shrink-0">
+                    <Terminal className="w-3 h-3" />
+                  </div>
+                )}
+                <div
+                  style={{
+                    color: isLight ? '#1f2937' : '#fff',
+                    margin: 0,
+                    fontSize: siteName.length > 12 ? 14 : siteName.length > 8 ? 16 : 18,
+                    fontWeight: 700,
+                    lineHeight: 1.2,
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    minWidth: 0,
+                  }}
+                  title={siteName}
+                >
+                  {siteName}
+                </div>
               </div>
-            )}
-          </div>
+            </div>
 
-          {/* 右侧：对齐控制台顶栏功能按钮 */}
-          <div className="flex items-center flex-shrink-0">
-            <style>{`
-              .docs-api-system .header-badge.ant-badge {
-                display: flex !important;
-                align-items: center;
-                justify-content: center;
-                height: 40px;
-              }
-            `}</style>
-            <Space size={isNarrow ? 4 : 8} align="center">
-              {!isNarrow && isPluginVisibleForUser('model_marketplace') && (
-                <Tooltip title={_t('menu.model_marketplace', '模型广场')} placement="bottom">
-                  <Button
-                    type="text"
-                    href="/home/models"
-                    icon={
-                      <svg
-                        width="20"
-                        height="20"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                        style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}
-                      >
-                        <path d="M12 2L19.5 6.2L12 10.5L4.5 6.2Z" fill={themeMode === 'light' ? '#e0e0e0' : '#2e2e2e'} />
-                        <path d="M3.5 7.8L11 12V21L3.5 16.8Z" fill={themeMode === 'light' ? '#b0b0b0' : '#555555'} />
-                        <path d="M13 12L20.5 7.8V16.8L13 21Z" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
-                      </svg>
+            {/* 快捷搜索 */}
+            <div className="p-3 border-b border-border/40">
+              <button
+                onClick={() => {
+                  setSearchQuery('');
+                  setOpenSearch(true);
+                }}
+                className="flex items-center justify-between w-full h-8 px-3 text-xs text-zinc-400 bg-zinc-50/50 dark:bg-zinc-900/60 border border-border rounded-md hover:bg-zinc-100/50 dark:hover:bg-zinc-800/40 transition-colors cursor-pointer"
+              >
+                <span className="flex items-center gap-2">
+                  <Search className="w-3.5 h-3.5" />
+                  <span>{docsT('search_placeholder')}</span>
+                </span>
+                <kbd className="hidden sm:inline-block font-mono bg-zinc-200/60 dark:bg-zinc-800/80 px-1.5 py-0.5 rounded border border-border scale-90 text-[10px]">⌘K</kbd>
+              </button>
+            </div>
+
+            {/* 目录树 */}
+            <div className="docs-sidebar-content docs-sidebar-scroll" style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '8px', transition: 'all 0.2s' }}>
+              {loading ? (
+                <div className="flex items-center justify-center pt-10"><Spin size="small" /></div>
+              ) : treeData.length === 0 ? (
+                <Empty description="暂无文档" image={Empty.PRESENTED_IMAGE_SIMPLE} className="mt-8" />
+              ) : (
+                renderSidebarTree(filteredTree)
+              )}
+            </div>
+          </div>
+        </Sider>
+
+        <Layout style={{
+          background: isLight ? '#ffffff' : '#000000',
+          position: 'relative',
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+        }}>
+          <Header
+            className="docs-top-nav-glass select-none"
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              zIndex: 20,
+              padding: '0 12px',
+              background: themeMode === 'light' ? 'rgba(255, 255, 255, 0.72)' : 'rgba(0, 0, 0, 0.55)',
+              backdropFilter: 'blur(16px) saturate(180%)',
+              WebkitBackdropFilter: 'blur(16px) saturate(180%)',
+              height: screens.xs ? 48 : 56,
+              lineHeight: (screens.xs ? 48 : 56) + 'px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              paddingRight: screens.xs ? 8 : 24,
+              borderBottom: themeMode === 'light'
+                ? '1px solid rgba(228, 228, 231, 0.55)'
+                : '1px solid rgba(31, 31, 35, 0.55)',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, flexShrink: 1, overflow: 'hidden' }}>
+              <Button
+                type="text"
+                icon={<SidebarIcon size={16} />}
+                onClick={() => handleCollapsedChange(!collapsed)}
+                style={{
+                  width: 32,
+                  height: 32,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: themeMode === 'light' ? '#71717a' : '#a1a1aa',
+                  borderRadius: 6,
+                  flexShrink: 0
+                }}
+              />
+
+              <div
+                style={{
+                  overflow: 'hidden',
+                  maxWidth: showHeaderBrand ? 220 : 0,
+                  marginLeft: showHeaderBrand ? 6 : 0,
+                  opacity: showHeaderBrand ? 1 : 0,
+                  flexShrink: 0,
+                  // 收拢：侧栏淡出后再显现；展开：先淡出再让位
+                  transition: showHeaderBrand
+                    ? 'opacity 0.2s ease 0.14s, max-width 0.28s cubic-bezier(0.4, 0, 0.2, 1) 0.08s, margin-left 0.28s cubic-bezier(0.4, 0, 0.2, 1) 0.08s'
+                    : 'opacity 0.1s ease, max-width 0.22s cubic-bezier(0.4, 0, 0.2, 1), margin-left 0.22s cubic-bezier(0.4, 0, 0.2, 1)',
+                }}
+              >
+                <div
+                  role="button"
+                  tabIndex={showHeaderBrand ? 0 : -1}
+                  aria-hidden={!showHeaderBrand}
+                  onClick={() => {
+                    if (!showHeaderBrand) return;
+                    navigate(isCyberHacker ? '/home-pro' : '/dashboard');
+                  }}
+                  onKeyDown={(e) => {
+                    if (!showHeaderBrand) return;
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      navigate(isCyberHacker ? '/home-pro' : '/dashboard');
                     }
+                  }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    // 内层固定内容宽度，外层裁切，避免 max-width 动画挤压文字
+                    width: 'max-content',
+                    maxWidth: 220,
+                    whiteSpace: 'nowrap',
+                    cursor: showHeaderBrand ? 'pointer' : 'default',
+                    pointerEvents: showHeaderBrand ? 'auto' : 'none',
+                  }}
+                >
+                  {siteLogo ? (
+                    <img src={siteLogo} alt="logo" style={{ width: 18, height: 18, objectFit: 'contain', flexShrink: 0 }} />
+                  ) : (
+                    <div className="flex items-center justify-center w-4.5 h-4.5 rounded bg-primary text-primary-foreground flex-shrink-0">
+                      <Terminal className="w-3 h-3" />
+                    </div>
+                  )}
+                  <span
                     style={{
                       color: themeMode === 'light' ? '#1f2937' : '#fff',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
+                      margin: 0,
                       fontSize: 14,
-                      fontWeight: 500,
-                      height: 40,
-                      padding: '0 12px',
+                      fontWeight: 600,
+                      whiteSpace: 'nowrap',
+                      lineHeight: 1.2,
+                      flexShrink: 0,
                     }}
-                    onClick={(e) => {
-                      if (!e.metaKey && !e.ctrlKey) {
-                        e.preventDefault();
-                        navigate('/home/models');
-                      }
-                    }}
+                    title={siteName}
                   >
-                    <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{_t('menu.model_marketplace', 'Models')}</span>
-                  </Button>
-                </Tooltip>
-              )}
+                    {siteName}
+                  </span>
+                </div>
+              </div>
 
-              {!isNarrow && (
+              {!screens.xs && categories.length > 0 && (
+                <div
+                  className="flex items-center gap-3.5 overflow-x-auto no-scrollbar py-2 px-3"
+                  style={{
+                    marginLeft: 8,
+                    transition: 'margin-left 0.28s cubic-bezier(0.4, 0, 0.2, 1)',
+                  }}
+                >
+                  {categories.map(cat => (
+                    <button
+                      key={cat.id}
+                      className={`docs-category-btn px-3.5 py-1 text-sm rounded-full transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
+                        activeCategoryId === cat.id ? 'active' : ''
+                      }`}
+                      onClick={() => handleCategoryChange(cat.id)}
+                    >
+                      {/[\u4e00-\u9fff]/.test(cat.name) ? cat.name.replace(/\s+/g, '') : cat.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center flex-shrink-0">
+              <style>{`
+                .docs-api-system .header-badge.ant-badge {
+                  display: flex !important;
+                  align-items: center;
+                  justify-content: center;
+                  height: 40px;
+                }
+              `}</style>
+              <Space size={screens.xs ? 2 : 8} align="center" style={{ flexShrink: 0 }}>
+                {isPluginVisibleForUser('model_marketplace') && (
+                  <Tooltip title={_t('menu.model_marketplace', '模型广场')} placement="bottom">
+                    <Button
+                      type="text"
+                      href="/home/models"
+                      icon={
+                        <svg
+                          width="20"
+                          height="20"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          xmlns="http://www.w3.org/2000/svg"
+                          style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}
+                        >
+                          <path d="M12 2L19.5 6.2L12 10.5L4.5 6.2Z" fill={themeMode === 'light' ? '#e0e0e0' : '#2e2e2e'} />
+                          <path d="M3.5 7.8L11 12V21L3.5 16.8Z" fill={themeMode === 'light' ? '#b0b0b0' : '#555555'} />
+                          <path d="M13 12L20.5 7.8V16.8L13 21Z" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} />
+                        </svg>
+                      }
+                      style={{
+                        color: themeMode === 'light' ? '#1f2937' : '#fff',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 6,
+                        fontSize: 14,
+                        fontWeight: 500,
+                        height: screens.xs ? 34 : 40,
+                        width: screens.xs ? 34 : undefined,
+                        padding: screens.xs ? 0 : '0 12px',
+                      }}
+                      onClick={(e) => {
+                        if (!e.metaKey && !e.ctrlKey) {
+                          e.preventDefault();
+                          navigate('/home/models');
+                        }
+                      }}
+                    >
+                      {!screens.xs && (
+                        <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{_t('menu.model_marketplace', 'Models')}</span>
+                      )}
+                    </Button>
+                  </Tooltip>
+                )}
+
                 <Tooltip title={_t('menu.relay_api', 'API教程')} placement="bottom">
                   <Button
                     type="text"
@@ -1514,11 +1666,13 @@ const RelayAPI: React.FC<RelayAPIProps> = ({ apiPrefix, baseRoute }) => {
                       color: themeMode === 'light' ? '#1f2937' : '#fff',
                       display: 'flex',
                       alignItems: 'center',
+                      justifyContent: 'center',
                       gap: 6,
                       fontSize: 14,
                       fontWeight: 500,
-                      height: 40,
-                      padding: '0 12px',
+                      height: screens.xs ? 34 : 40,
+                      width: screens.xs ? 34 : undefined,
+                      padding: screens.xs ? 0 : '0 12px',
                     }}
                     onClick={(e) => {
                       if (!e.metaKey && !e.ctrlKey) {
@@ -1527,170 +1681,192 @@ const RelayAPI: React.FC<RelayAPIProps> = ({ apiPrefix, baseRoute }) => {
                       }
                     }}
                   >
-                    <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{_t('menu.relay_api', 'API教程')}</span>
+                    {!screens.xs && (
+                      <span style={{ display: 'inline-block', transform: 'translateY(1.5px)' }}>{_t('menu.relay_api', 'API教程')}</span>
+                    )}
                   </Button>
                 </Tooltip>
-              )}
 
-              {enableThemeToggle && (
-                <Tooltip
-                  title={themeMode === 'light' ? _t('header.switch_dark_mode', '切换暗色模式') : _t('header.switch_light_mode', '切换亮色模式')}
-                  placement="bottom"
-                  color={themeMode === 'light' ? '#fff' : '#2b2b2b'}
-                  styles={{ container: { color: themeMode === 'light' ? '#1f2937' : '#fff' } }}
-                >
-                  <Button
-                    type="text"
-                    shape="circle"
-                    onClick={toggleTheme}
-                    icon={
-                      themeMode === 'light'
-                        ? (
-                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}>
-                            <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79Z" fill="#757575" />
-                          </svg>
-                        )
-                        : (
-                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}>
-                            <circle cx="12" cy="12" r="6" fill="#555555" />
-                            <path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32l1.41-1.41" stroke="#9e9e9e" strokeWidth="2.2" strokeLinecap="round" />
-                          </svg>
-                        )
-                    }
-                    style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 40, height: 40 }}
-                  />
-                </Tooltip>
-              )}
+                {enableThemeToggle && (
+                  <Tooltip
+                    title={themeMode === 'light' ? _t('header.switch_dark_mode', '切换暗色模式') : _t('header.switch_light_mode', '切换亮色模式')}
+                    placement="bottom"
+                    color={themeMode === 'light' ? '#fff' : '#2b2b2b'}
+                    styles={{ container: { color: themeMode === 'light' ? '#1f2937' : '#fff' } }}
+                  >
+                    <Button
+                      type="text"
+                      shape="circle"
+                      onClick={toggleTheme}
+                      icon={
+                        themeMode === 'light'
+                          ? (
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}>
+                              <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79Z" fill="#757575" />
+                            </svg>
+                          )
+                          : (
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}>
+                              <circle cx="12" cy="12" r="6" fill="#555555" />
+                              <path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32l1.41-1.41" stroke="#9e9e9e" strokeWidth="2.2" strokeLinecap="round" />
+                            </svg>
+                          )
+                      }
+                      style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: screens.xs ? 34 : 40, height: screens.xs ? 34 : 40 }}
+                    />
+                  </Tooltip>
+                )}
 
-              {enableMultilingual && (
-                <Dropdown menu={{ items: langItems }} placement="bottomRight">
-                  <Button
-                    type="text"
-                    shape="circle"
-                    icon={
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}>
-                        <circle cx="12" cy="12" r="8.5" stroke={themeMode === 'light' ? '#757575' : '#9e9e9e'} strokeWidth="2" />
-                        <path d="M3.5 12h17" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="2" strokeLinecap="round" />
-                        <ellipse cx="12" cy="12" rx="3.5" ry="8.5" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="2" />
-                      </svg>
-                    }
-                    style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 40, height: 40 }}
-                  />
-                </Dropdown>
-              )}
-
-              <Popover
-                content={announcementContent}
-                trigger="click"
-                placement="bottomRight"
-                overlayClassName="custom-premium-popover"
-                open={announcementsDrawerVisible}
-                onOpenChange={setAnnouncementsDrawerVisible}
-                styles={{ container: { padding: 0, background: 'transparent', boxShadow: 'none' } }}
-                motion={{ motionName: '' }}
-                arrow={false}
-              >
-                <Tooltip
-                  title={_t('header.notifications', '通知')}
-                  placement="bottom"
-                  color={themeMode === 'light' ? '#fff' : '#2b2b2b'}
-                  styles={{ container: { color: themeMode === 'light' ? '#1f2937' : '#fff' } }}
-                >
-                  <Badge count={unreadCount} overflowCount={99} offset={[-4, 4]} className="header-badge">
+                {enableMultilingual && (
+                  <Dropdown menu={{ items: langItems }} placement="bottomRight">
                     <Button
                       type="text"
                       shape="circle"
                       icon={
-                        <svg
-                          width="20"
-                          height="20"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          xmlns="http://www.w3.org/2000/svg"
-                          style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}
-                        >
-                          <path d="M19 16.5v-6.5a7 7 0 00-14 0v6.5l-2 2h18l-2-2z" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} stroke={themeMode === 'light' ? '#757575' : '#9e9e9e'} strokeWidth="1.5" strokeLinejoin="round" />
-                          <path d="M10 19.5a2 2 0 004 0" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="2.5" strokeLinecap="round" />
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}>
+                          <circle cx="12" cy="12" r="8.5" stroke={themeMode === 'light' ? '#757575' : '#9e9e9e'} strokeWidth="2" />
+                          <path d="M3.5 12h17" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="2" strokeLinecap="round" />
+                          <ellipse cx="12" cy="12" rx="3.5" ry="8.5" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="2" />
                         </svg>
                       }
-                      style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 40, height: 40 }}
-                      onClick={() => {
-                        setUnreadCount(0);
-                      }}
+                      style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: screens.xs ? 34 : 40, height: screens.xs ? 34 : 40 }}
                     />
-                  </Badge>
-                </Tooltip>
-              </Popover>
+                  </Dropdown>
+                )}
 
-              {user && (
-                <UserAvatarMenu isUserEnd={true} agreement={agreement} />
-              )}
-            </Space>
-          </div>
-        </header>
-
-        {/* 主体自适应布局：铺满整列高度，滚动内容可穿过顶栏毛玻璃 */}
-        <div className="flex-1 flex overflow-hidden min-h-0">
-          {/* 中间主要文章展示区 */}
-          <main
-            id="docs-main-content"
-            className="flex-1 overflow-y-auto px-6 pb-6 pt-[80px] md:px-10 md:pb-10 md:pt-[96px] xl:pr-16 xl:pl-8 no-scrollbar"
-          >
-            <div className="max-w-[820px] mx-auto pb-20">
-              {pluginEnabled ? (
-                <>
-                  {/* 面包屑导航 Breadcrumbs */}
-                  {breadcrumbs.length > 0 && (
-                    <nav className="flex items-center gap-1 text-[11px] text-zinc-400 mb-6 select-none">
-                      {breadcrumbs.map((crumb, idx) => (
-                        <React.Fragment key={idx}>
-                          {idx > 0 && <span className="text-[9px] text-zinc-300 dark:text-zinc-700 mx-1">/</span>}
-                          <span className={idx === breadcrumbs.length - 1 ? "text-zinc-700 dark:text-zinc-300 font-medium" : ""}>
-                            {crumb}
-                          </span>
-                        </React.Fragment>
-                      ))}
-                    </nav>
-                  )}
-                  {/* 主区域无最外层边框 */}
-                  <div className="py-2 px-1">
-                    {renderDocBody()}
-                  </div>
-                </>
-              ) : (
-                <div className="max-w-md mx-auto text-center border border-border bg-card p-10 rounded-xl mt-16 shadow-sm">
-                  <BookOpen className="text-4xl text-red-500 mb-6 mx-auto" />
-                  <h3 className="text-base font-bold mb-2">{docsT('client_plugin_disabled')}</h3>
-                  <p className="text-xs text-zinc-500 mb-6 leading-relaxed">
-                    {docsT('client_plugin_disabled_desc')}
-                  </p>
-                  <button
-                    onClick={() => navigate(isCyberHacker ? '/home-pro' : '/dashboard')}
-                    className="px-4 h-9 text-xs font-medium bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-50 dark:hover:bg-zinc-100 dark:text-zinc-950 rounded-md transition-colors cursor-pointer"
+                <Popover
+                  content={announcementContent}
+                  trigger="click"
+                  placement="bottomRight"
+                  overlayClassName="custom-premium-popover"
+                  open={announcementsDrawerVisible}
+                  onOpenChange={setAnnouncementsDrawerVisible}
+                  styles={{ container: { padding: 0, background: 'transparent', boxShadow: 'none' } }}
+                  motion={{ motionName: '' }}
+                  arrow={false}
+                >
+                  <Tooltip
+                    title={_t('header.notifications', '通知')}
+                    placement="bottom"
+                    color={themeMode === 'light' ? '#fff' : '#2b2b2b'}
+                    styles={{ container: { color: themeMode === 'light' ? '#1f2937' : '#fff' } }}
                   >
-                    {docsT('client_back_to_dashboard')}
-                  </button>
+                    <Badge count={unreadCount} overflowCount={99} offset={[-4, 4]} className="header-badge">
+                      <Button
+                        type="text"
+                        shape="circle"
+                        icon={
+                          <svg
+                            width="20"
+                            height="20"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                            style={{ verticalAlign: 'middle', transform: 'translateY(1.5px)' }}
+                          >
+                            <path d="M19 16.5v-6.5a7 7 0 00-14 0v6.5l-2 2h18l-2-2z" fill={themeMode === 'light' ? '#757575' : '#9e9e9e'} stroke={themeMode === 'light' ? '#757575' : '#9e9e9e'} strokeWidth="1.5" strokeLinejoin="round" />
+                            <path d="M10 19.5a2 2 0 004 0" stroke={themeMode === 'light' ? '#b0b0b0' : '#555555'} strokeWidth="2.5" strokeLinecap="round" />
+                          </svg>
+                        }
+                        style={{ color: themeMode === 'light' ? '#1f2937' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', width: screens.xs ? 34 : 40, height: screens.xs ? 34 : 40 }}
+                        onClick={() => {
+                          setUnreadCount(0);
+                        }}
+                      />
+                    </Badge>
+                  </Tooltip>
+                </Popover>
+
+                {user && (
+                  <UserAvatarMenu isUserEnd={true} agreement={agreement} />
+                )}
+              </Space>
+            </div>
+          </Header>
+
+          <Content style={{
+            margin: 0,
+            padding: 0,
+            flex: 1,
+            overflow: 'hidden',
+            background: isLight ? '#f8fafc' : '#0a0c10',
+            display: 'flex',
+            flexDirection: 'column',
+          }}>
+            <div className="flex-1 flex overflow-hidden min-h-0">
+              <main
+                id="docs-main-content"
+                className="flex-1 overflow-y-auto px-6 pb-6 pt-[80px] md:px-10 md:pb-10 md:pt-[96px] xl:pr-16 xl:pl-8 no-scrollbar"
+              >
+                <div className="max-w-[820px] mx-auto pb-20">
+                  {pluginEnabled ? (
+                    <>
+                      {breadcrumbs.length > 0 && (
+                        <nav className="flex items-center gap-1 text-[11px] text-zinc-400 mb-6 select-none">
+                          {breadcrumbs.map((crumb, idx) => (
+                            <React.Fragment key={idx}>
+                              {idx > 0 && <span className="text-[9px] text-zinc-300 dark:text-zinc-700 mx-1">/</span>}
+                              <span className={idx === breadcrumbs.length - 1 ? "text-zinc-700 dark:text-zinc-300 font-medium" : ""}>
+                                {crumb}
+                              </span>
+                            </React.Fragment>
+                          ))}
+                        </nav>
+                      )}
+                      <div className="py-2 px-1">
+                        {renderDocBody()}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="max-w-md mx-auto text-center border border-border bg-card p-10 rounded-xl mt-16 shadow-sm">
+                      <BookOpen className="text-4xl text-red-500 mb-6 mx-auto" />
+                      <h3 className="text-base font-bold mb-2">{docsT('client_plugin_disabled')}</h3>
+                      <p className="text-xs text-zinc-500 mb-6 leading-relaxed">
+                        {docsT('client_plugin_disabled_desc')}
+                      </p>
+                      <button
+                        onClick={() => navigate(isCyberHacker ? '/home-pro' : '/dashboard')}
+                        className="px-4 h-9 text-xs font-medium bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-50 dark:hover:bg-zinc-100 dark:text-zinc-950 rounded-md transition-colors cursor-pointer"
+                      >
+                        {docsT('client_back_to_dashboard')}
+                      </button>
+                    </div>
+                  )}
                 </div>
+              </main>
+
+              {pluginEnabled && tocList.length > 0 && (
+                <aside className="hidden xl:block w-[280px] flex-shrink-0 pt-[88px] pb-8 pl-4 pr-4 select-none overflow-y-auto no-scrollbar">
+                  <div className="sticky top-0">
+                    <div className="flex items-center gap-2 text-zinc-500 dark:text-zinc-400 mb-5">
+                      <GalleryVerticalEnd className="w-4 h-4 text-zinc-400 dark:text-zinc-500" />
+                      <h4 className="text-xs font-semibold m-0 text-zinc-700 dark:text-zinc-300">{docsT('client_toc_title')}</h4>
+                    </div>
+                    <div className="flex flex-col">
+                      {renderOutline(false)}
+                    </div>
+                  </div>
+                </aside>
               )}
             </div>
-          </main>
+          </Content>
 
-          {/* 右侧 TOC 目录导航栏 - On This Page */}
-          {pluginEnabled && tocList.length > 0 && (
-            <aside className="hidden xl:block w-[280px] flex-shrink-0 pt-[88px] pb-8 pl-4 pr-4 select-none overflow-y-auto no-scrollbar">
-              <div className="sticky top-0">
-                <div className="flex items-center gap-2 text-zinc-500 dark:text-zinc-400 mb-5">
-                  <GalleryVerticalEnd className="w-4 h-4 text-zinc-400 dark:text-zinc-500" />
-                  <h4 className="text-xs font-semibold m-0 text-zinc-700 dark:text-zinc-300">{docsT('client_toc_title')}</h4>
-                </div>
-                <div className="flex flex-col">
-                  {renderOutline(false)}
-                </div>
-              </div>
-            </aside>
+          {screens.xs && !collapsed && (
+            <div
+              style={{
+                position: 'fixed',
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                background: 'rgba(0,0,0,0.5)',
+                zIndex: 9,
+              }}
+              onClick={() => handleCollapsedChange(true)}
+            />
           )}
-        </div>
-      </div>
+        </Layout>
+      </Layout>
 
       {/* 全局命令调色板搜索弹窗 Command Palette */}
       {openSearch && (

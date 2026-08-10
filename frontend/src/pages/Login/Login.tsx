@@ -145,7 +145,9 @@ const Login: React.FC = () => {
     }
   }, [searchParams, setToken, setUser, navigate]);
 
-  const loginTitle = settings?.site?.login_title || settings?.site?.name || 'TokensByte';
+  const baseTitle = settings?.site?.login_title || settings?.site?.name || 'TokensByte';
+  const loginTitle = `${baseTitle} ${t('login.title')}`;
+  const loginTitleUrl = settings?.site?.login_title_url || '';
   const loginSubtitle = settings?.site?.login_subtitle || 'Next-gen LLM API Gateway';
   const login = settings?.login;
   const reg = settings?.registration;
@@ -306,6 +308,7 @@ const Login: React.FC = () => {
     <AuthLayout
       title={loginTitle}
       subtitle={loginSubtitle}
+      titleHref={loginTitleUrl}
       logo={settings?.site?.logo}
       loading={!settings}
       methodsLabel={t('login.title')}

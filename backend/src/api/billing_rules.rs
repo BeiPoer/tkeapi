@@ -536,7 +536,7 @@ fn get_default_by_name(name: &str) -> Option<BillingRuleDefault> {
             duration_rate: 0.0,
             billing_rule: "seedance2.0",
             pricing_tiers: "[]",
-            extended_config: r#"{"resolution_rates":{"1080p":{"with_video":31,"without_video":51},"480p":{"with_video":28,"without_video":46},"720p":{"with_video":28,"without_video":46}}}"#,
+            extended_config: r#"{"resolution_rates":{"1080p":{"with_video":31,"without_video":51},"480p":{"with_video":28,"without_video":46},"4k":{"with_video":16,"without_video":26},"720p":{"with_video":28,"without_video":46}}}"#,
         }),
         "Seedance2.0Fast官方计费" => Some(BillingRuleDefault {
             billing_type: "tokens",
@@ -550,6 +550,19 @@ fn get_default_by_name(name: &str) -> Option<BillingRuleDefault> {
             billing_rule: "seedance2.0",
             pricing_tiers: "[]",
             extended_config: r#"{"resolution_rates":{"480p":{"with_video":22,"without_video":37},"720p":{"with_video":22,"without_video":37}}}"#,
+        }),
+        "Seedance2.5官方计费" => Some(BillingRuleDefault {
+            billing_type: "tokens",
+            prompt_rate: 0.0,
+            completion_rate: 0.0,
+            cached_rate: 0.0,
+            claude_cache_creation_rate: 0.0,
+            claude_cache_read_rate: 0.0,
+            fixed_rate: 0.0,
+            duration_rate: 0.0,
+            billing_rule: "seedance2.0",
+            pricing_tiers: "[]",
+            extended_config: r#"{"enable_time_multipliers":false,"resolution_rates":{"480p":{"with_video":42,"without_video":70},"720p":{"with_video":42,"without_video":70}},"time_multipliers":[]}"#,
         }),
         "可灵视频官方计费" => Some(BillingRuleDefault {
             billing_type: "duration",

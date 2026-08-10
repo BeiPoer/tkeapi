@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExtractedFeatures {
     pub has_video: bool,
@@ -43,6 +43,8 @@ pub struct ExtractedFeatures {
     pub version: Option<String>,
     /// 联网搜索次数（Responses API 联网搜索计费）
     pub web_search: Option<i32>,
+    /// 峰谷时段倍率快照（请求开始/冻结时锁定；异步结算优先使用，避免跨时段变价）
+    pub time_multiplier: Option<f64>,
 }
 
 /// content[].type 是否包含指定关键字
@@ -75,6 +77,19 @@ fn nonempty_array_field(obj: &Value, key: &str) -> bool {
         .is_some_and(|a| !a.is_empty())
 }
 
+/// 媒体字段是否有有效载荷（非空字符串 / 对象 / 非空数组）
+#[inline]
+fn media_payload_present(v: &Value) -> bool {
+    v.as_str().is_some_and(|s| !s.is_empty())
+        || v.is_object()
+        || v.as_array().is_some_and(|a| !a.is_empty())
+}
+
+#[inline]
+fn field_media_present(body: &Value, key: &str) -> bool {
+    body.get(key).is_some_and(media_payload_present)
+}
+
 fn set_str_if_none(dst: &mut Option<String>, val: Option<&str>) {
     if dst.is_none() {
         if let Some(s) = val.filter(|s| !s.is_empty()) {
@@ -91,6 +106,50 @@ fn set_f64_if_none(dst: &mut Option<f64>, val: Option<f64>) {
     }
 }
 
+fn set_opt_if_none<T>(dst: &mut Option<T>, src: Option<T>) {
+    if dst.is_none() {
+        *dst = src;
+    }
+}
+
+fn overwrite_if_some<T>(dst: &mut Option<T>, src: Option<T>) {
+    if src.is_some() {
+        *dst = src;
+    }
+}
+
+/// SSE 行 → JSON 载荷；空行 / [DONE] 返回 None
+#[inline]
+fn sse_json_payload(line: &str) -> Option<&str> {
+    let line = line.trim();
+    if line.is_empty() || line.ends_with("[DONE]") {
+        return None;
+    }
+    Some(if let Some(rest) = line.strip_prefix("data: ") {
+        rest
+    } else if let Some(rest) = line.strip_prefix("data:") {
+        rest
+    } else {
+        line
+    })
+}
+
+#[inline]
+fn json_i32(v: &Value) -> i32 {
+    v.as_i64().unwrap_or(0) as i32
+}
+
+#[inline]
+fn json_field_i32(obj: &Value, key: &str) -> i32 {
+    obj.get(key).map(json_i32).unwrap_or(0)
+}
+
+/// on/off：true→on，false→off
+#[inline]
+fn on_off(enabled: bool) -> String {
+    if enabled { "on" } else { "off" }.to_string()
+}
+
 /// 扫描 content 数组：可分别开关 video/audio（Responses input 仅检 audio）
 fn scan_typed_content(
     arr: Option<&Vec<Value>>,
@@ -99,34 +158,79 @@ fn scan_typed_content(
     has_video: &mut bool,
     has_audio: &mut bool,
 ) {
+    if (!video || *has_video) && (!audio || *has_audio) {
+        return;
+    }
     let Some(arr) = arr else { return };
     for item in arr {
-        if video && type_contains(item, "video") {
+        if video && !*has_video && type_contains(item, "video") {
             *has_video = true;
         }
-        if audio && type_contains(item, "audio") {
+        if audio && !*has_audio && type_contains(item, "audio") {
             *has_audio = true;
+        }
+        if (!video || *has_video) && (!audio || *has_audio) {
+            break;
         }
     }
 }
 
-/// 腾讯云参考图数量：FileInfos 匹配项 + 非空 LastFrameUrl
-fn count_tencent_image_refs(body: &Value) -> i32 {
-    let mut n = body
-        .get("FileInfos")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter(|item| {
-                    is_tencent_ref_usage(item.get("Usage").and_then(|u| u.as_str()).unwrap_or(""))
-                })
-                .count() as i32
-        })
-        .unwrap_or(0);
-    if nonempty_str_field(body, "LastFrameUrl") {
-        n += 1;
+/// 可灵 3.0 contents：一次扫描视频参考 + 输入图条目
+fn scan_kling_contents(arr: &[Value]) -> (bool, i32) {
+    let mut has_video = false;
+    let mut image_n = 0i32;
+    for c in arr {
+        match c.get("type").and_then(|t| t.as_str()) {
+            Some("base_video" | "feature_video") => has_video = true,
+            Some("first_frame" | "last_frame" | "refer_image") => image_n += 1,
+            _ => {}
+        }
     }
-    n
+    (has_video, image_n)
+}
+
+/// 腾讯云 FileInfos：参考图数量 + 是否含视频参考；LastFrameUrl 计入参考图
+fn scan_tencent_file_infos(body: &Value) -> (i32, bool) {
+    let mut refs = 0i32;
+    let mut has_video = false;
+    if let Some(arr) = body.get("FileInfos").and_then(|v| v.as_array()) {
+        for item in arr {
+            let usage = item.get("Usage").and_then(|u| u.as_str()).unwrap_or("");
+            if is_tencent_ref_usage(usage) {
+                refs += 1;
+            }
+            if item.get("Category").and_then(|c| c.as_str()) == Some("Video")
+                && usage.eq_ignore_ascii_case("Reference")
+            {
+                has_video = true;
+            }
+        }
+    }
+    if nonempty_str_field(body, "LastFrameUrl") {
+        refs += 1;
+    }
+    (refs, has_video)
+}
+
+fn count_image_field(body: &Value) -> i32 {
+    body.get("image")
+        .map(|v| {
+            if v.as_str().filter(|s| !s.is_empty()).is_some() {
+                1
+            } else {
+                v.as_array().map(|a| a.len() as i32).unwrap_or(0)
+            }
+        })
+        .unwrap_or(0)
+}
+
+fn count_image_list_fields(body: &Value) -> i32 {
+    body.get("images")
+        .or(body.get("image_urls"))
+        .or(body.get("image_list"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.len() as i32)
+        .unwrap_or(0)
 }
 
 pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
@@ -163,9 +267,20 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
                 &mut has_video,
                 &mut has_audio,
             );
+            if has_video && has_audio {
+                break;
+            }
         }
     }
     has_video |= nonempty_array_field(body, "videos");
+
+    let (kling_video, contents_images) = body
+        .get("contents")
+        .and_then(|v| v.as_array())
+        .map(|a| scan_kling_contents(a))
+        .unwrap_or((false, 0));
+    has_video |= kling_video;
+
     scan_typed_content(
         body.get("content").and_then(|c| c.as_array()),
         true,
@@ -183,6 +298,9 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
                 &mut has_video,
                 &mut has_audio,
             );
+            if has_audio {
+                break;
+            }
         }
     }
     // DashScope input.media：仅检 video
@@ -196,7 +314,7 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
         &mut has_audio,
     );
 
-    // resolution / duration：根、final_result、task、parameters、OutputConfig
+    // resolution / duration：根、final_result、task、parameters、OutputConfig、settings
     for src in [
         body,
         body.get("final_result").unwrap_or(body),
@@ -234,6 +352,15 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
             .and_then(|oc| oc.get("Duration"))
             .and_then(|d| d.as_f64()),
     );
+    set_str_if_none(
+        &mut resolution,
+        body.pointer("/settings/resolution")
+            .and_then(|r| r.as_str()),
+    );
+    set_f64_if_none(
+        &mut duration_seconds,
+        body.pointer("/settings/duration").and_then(parse_json_f64),
+    );
 
     let prompt_extend = body
         .get("prompt_extend")
@@ -249,56 +376,46 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
         .get("mode")
         .and_then(|v| v.as_str())
         .map(|s| s.to_lowercase());
-    // generate_audio 优先于 sound
+    // generate_audio 优先于 sound；新协议 settings.audio（native→on）
     let sound = if let Some(ga) = body.get("generate_audio") {
         let enabled = ga.as_bool().unwrap_or(false) || ga.as_str() == Some("true");
-        Some(if enabled {
-            "on".to_string()
-        } else {
-            "off".to_string()
-        })
+        Some(on_off(enabled))
+    } else if let Some(a) = body.pointer("/settings/audio").and_then(|v| v.as_str()) {
+        let a = a.to_ascii_lowercase();
+        Some(on_off(!(a == "off" || a == "false")))
     } else {
         body.get("sound")
             .and_then(|v| v.as_str())
             .map(|s| s.to_lowercase())
     };
 
-    let tencent_refs = count_tencent_image_refs(body);
-    let mut has_image_ref = body.get("image").is_some_and(|v| {
-        v.as_str().is_some_and(|s| !s.is_empty())
-            || v.is_object()
-            || v.as_array().is_some_and(|a| !a.is_empty())
-    }) || nonempty_array_field(body, "image_urls")
+    let (tencent_refs, tencent_video) = scan_tencent_file_infos(body);
+    has_video |= tencent_video;
+
+    let mut has_image_ref = field_media_present(body, "image")
+        || field_media_present(body, "image_tail")
+        || nonempty_array_field(body, "image_urls")
         || nonempty_array_field(body, "image_list")
         || nonempty_array_field(body, "subject_image_list")
         || body.get("image_reference").is_some_and(|v| !v.is_null())
-        || tencent_refs > 0;
+        || tencent_refs > 0
+        || contents_images > 0;
 
     let mut image_ref_count = {
-        let from_image = body
-            .get("image")
-            .map(|v| {
-                if v.as_str().filter(|s| !s.is_empty()).is_some() {
-                    1
-                } else if let Some(a) = v.as_array() {
-                    a.len() as i32
-                } else {
-                    0
-                }
-            })
-            .unwrap_or(0);
-        let count = if from_image > 0 {
-            from_image
+        let flat = count_image_field(body)
+            + if field_media_present(body, "image_tail") {
+                1
+            } else {
+                0
+            };
+        let count = if flat > 0 {
+            flat
         } else {
-            let from_lists = body
-                .get("images")
-                .or(body.get("image_urls"))
-                .or(body.get("image_list"))
-                .and_then(|v| v.as_array())
-                .map(|a| a.len() as i32)
-                .unwrap_or(0);
+            let from_lists = count_image_list_fields(body);
             if from_lists > 0 {
                 from_lists
+            } else if contents_images > 0 {
+                contents_images
             } else {
                 tencent_refs
             }
@@ -358,16 +475,6 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
                 });
             }
         }
-    }
-    if let Some(fi_arr) = body.get("FileInfos").and_then(|v| v.as_array()) {
-        has_video |= fi_arr.iter().any(|fi| {
-            fi.get("Category").and_then(|c| c.as_str()) == Some("Video")
-                && fi
-                    .get("Usage")
-                    .and_then(|u| u.as_str())
-                    .unwrap_or("")
-                    .eq_ignore_ascii_case("Reference")
-        });
     }
 
     if let Some(ref mut res) = resolution {
@@ -454,48 +561,27 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
         fps,
         version,
         web_search: None,
+        time_multiplier: None,
     }
 }
 
 impl ExtractedFeatures {
     /// 严谨合并另外一个特征结构体中的字段（用于出参特征与入参特征融合，保障计费一致性）
     pub fn merge(&mut self, other: ExtractedFeatures) {
-        if other.duration_seconds.is_some() {
-            self.duration_seconds = other.duration_seconds;
-        }
-        if self.resolution.is_none() {
-            self.resolution = other.resolution;
-        }
-        if self.mode.is_none() {
-            self.mode = other.mode;
-        }
-        if self.sound.is_none() {
-            self.sound = other.sound;
-        }
-        if self.version.is_none() {
-            self.version = other.version;
-        }
-        if other.has_video {
-            self.has_video = true;
-        }
-        if other.has_audio {
-            self.has_audio = true;
-        }
-        if other.has_image_ref {
-            self.has_image_ref = true;
-        }
-        if other.web_search.is_some() {
-            self.web_search = other.web_search;
-        }
-        if other.image_ref_count.is_some() {
-            self.image_ref_count = other.image_ref_count;
-        }
-        if other.size.is_some() {
-            self.size = other.size;
-        }
-        if other.image_count.is_some() {
-            self.image_count = other.image_count;
-        }
+        overwrite_if_some(&mut self.duration_seconds, other.duration_seconds);
+        set_opt_if_none(&mut self.resolution, other.resolution);
+        set_opt_if_none(&mut self.mode, other.mode);
+        set_opt_if_none(&mut self.sound, other.sound);
+        set_opt_if_none(&mut self.version, other.version);
+        self.has_video |= other.has_video;
+        self.has_audio |= other.has_audio;
+        self.has_image_ref |= other.has_image_ref;
+        overwrite_if_some(&mut self.web_search, other.web_search);
+        overwrite_if_some(&mut self.image_ref_count, other.image_ref_count);
+        overwrite_if_some(&mut self.size, other.size);
+        overwrite_if_some(&mut self.image_count, other.image_count);
+        // 峰谷快照：已锁定的值不被后续 merge 冲掉
+        set_opt_if_none(&mut self.time_multiplier, other.time_multiplier);
     }
 
     /// 轮询结算：叠加终态响应特征，并应用厂商覆盖（顺序与历史一致，不可打乱）
@@ -541,31 +627,6 @@ impl ExtractedFeatures {
     }
 }
 
-impl Default for ExtractedFeatures {
-    fn default() -> Self {
-        Self {
-            has_video: false,
-            has_audio: false,
-            has_image_ref: false,
-            duration_seconds: None,
-            resolution: None,
-            image_count: None,
-            service_tier: None,
-            prompt_extend: false,
-            mode: None,
-            sound: None,
-            cache_creation: None,
-            image_ref_count: None,
-            size: None,
-            quality: None,
-            text_characters: None,
-            fps: None,
-            version: None,
-            web_search: None,
-        }
-    }
-}
-
 /// 从接口响应中提取实际返回的图片数量。
 /// 支持 OpenAI/火山方舟 `data` 数组、Google Gemini `candidates.content.parts` 中的图片，
 /// 以及 SSE 流式缓冲后的文本（逐行解析 `data: {...}` 提取图片数组）。
@@ -583,26 +644,14 @@ pub fn count_response_images(response: &str) -> Option<i32> {
     let mut usage_total: Option<i32> = None;
 
     for line in response.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.ends_with("[DONE]") {
+        let Some(json_str) = sse_json_payload(line) else {
             continue;
-        }
-        let json_str = if line.starts_with("data: ") {
-            &line[6..]
-        } else if line.starts_with("data:") {
-            &line[5..]
-        } else {
-            line
         };
 
         if let Ok(v) = serde_json::from_str::<Value>(json_str) {
-            // 优先检查流中是否包含官方明确的总计数量字段（如火山方舟/阿里百炼）
-            if let Some(usage) = v.get("usage") {
-                if let Some(c) = usage.get("generated_images").and_then(|c| c.as_i64()) {
-                    usage_total = Some(c as i32);
-                } else if let Some(c) = usage.get("image_count").and_then(|c| c.as_i64()) {
-                    usage_total = Some(c as i32);
-                }
+            // 优先官方总计（MiniMax metadata.success_count / 火山 usage.*）
+            if let Some(c) = official_image_count(&v) {
+                usage_total = Some(c);
             }
 
             // 累加数组中的实体数
@@ -626,27 +675,40 @@ pub fn count_response_images(response: &str) -> Option<i32> {
 
 /// 从单个 JSON Value 中提取图片数量
 fn count_images_from_value(v: &Value) -> Option<i32> {
-    // 首先尝试从官方明确的 usage 字段获取总数
-    if let Some(usage) = v.get("usage") {
-        if let Some(c) = usage.get("generated_images").and_then(|c| c.as_i64()) {
-            return Some(c as i32);
-        } else if let Some(c) = usage.get("image_count").and_then(|c| c.as_i64()) {
-            return Some(c as i32);
-        }
+    // 官方计数字段优先（MiniMax metadata.success_count / 火山 usage.*）
+    if let Some(c) = official_image_count(v) {
+        return Some(c);
     }
     count_images_from_arrays(v)
+}
+
+/// 解析 JSON 中的非负计数值（兼容整数与数字字符串，如 MiniMax 示例 `"3"`）
+#[inline]
+fn json_nonneg_count(v: &Value) -> Option<i32> {
+    v.as_i64()
+        .or_else(|| v.as_u64().map(|n| n as i64))
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+        .filter(|&n| n >= 0)
+        .map(|n| n as i32)
+}
+
+/// 上游官方成功张数：MiniMax `metadata.success_count` → usage.generated_images / image_count
+fn official_image_count(v: &Value) -> Option<i32> {
+    v.pointer("/metadata/success_count")
+        .and_then(json_nonneg_count)
+        .or_else(|| {
+            let usage = v.get("usage")?;
+            usage
+                .get("generated_images")
+                .or_else(|| usage.get("image_count"))
+                .and_then(json_nonneg_count)
+        })
 }
 
 /// 内部辅助函数：深度遍历各种嵌套的 data/results 数组结构提取数量
 fn count_images_from_arrays(v: &Value) -> Option<i32> {
     let mut total_count = 0i32;
 
-    #[inline]
-    fn non_empty_str(v: &Value, key: &str) -> bool {
-        v.get(key)
-            .and_then(|x| x.as_str())
-            .is_some_and(|s| !s.is_empty())
-    }
     #[inline]
     fn count_url_val(url: &Value) -> i32 {
         if let Some(arr) = url.as_array() {
@@ -661,9 +723,9 @@ fn count_images_from_arrays(v: &Value) -> Option<i32> {
     }
     #[inline]
     fn has_media(item: &Value) -> bool {
-        non_empty_str(item, "b64_json")
-            || non_empty_str(item, "image")
-            || non_empty_str(item, "url")
+        nonempty_str_field(item, "b64_json")
+            || nonempty_str_field(item, "image")
+            || nonempty_str_field(item, "url")
     }
 
     // 1. OpenAI / 火山方舟: { "data": [{"url"|"b64_json"|"image": "..."}, ...] }
@@ -672,7 +734,7 @@ fn count_images_from_arrays(v: &Value) -> Option<i32> {
             let from_url = item.get("url").map(count_url_val).unwrap_or(0);
             if from_url > 0 {
                 total_count += from_url;
-            } else if non_empty_str(item, "b64_json") || non_empty_str(item, "image") {
+            } else if nonempty_str_field(item, "b64_json") || nonempty_str_field(item, "image") {
                 total_count += 1;
             }
         }
@@ -681,22 +743,16 @@ fn count_images_from_arrays(v: &Value) -> Option<i32> {
     // 2. 异步终态: data.result.images / data.task_result.images / result.images / images
     if total_count == 0 {
         let images_node = v
-            .get("data")
-            .and_then(|d| d.get("result"))
-            .and_then(|r| r.get("images"))
-            .or_else(|| {
-                v.get("data")
-                    .and_then(|d| d.get("task_result"))
-                    .and_then(|r| r.get("images"))
-            })
-            .or_else(|| v.get("result").and_then(|r| r.get("images")))
-            .or_else(|| v.get("task_result").and_then(|r| r.get("images")))
+            .pointer("/data/result/images")
+            .or_else(|| v.pointer("/data/task_result/images"))
+            .or_else(|| v.pointer("/result/images"))
+            .or_else(|| v.pointer("/task_result/images"))
             .or_else(|| v.get("images"));
         if let Some(images) = images_node.and_then(|i| i.as_array()) {
             for img in images {
                 if let Some(url) = img.get("url") {
                     total_count += count_url_val(url);
-                } else if non_empty_str(img, "b64_json") || non_empty_str(img, "image") {
+                } else if nonempty_str_field(img, "b64_json") || nonempty_str_field(img, "image") {
                     total_count += 1;
                 }
             }
@@ -740,32 +796,27 @@ fn count_images_from_arrays(v: &Value) -> Option<i32> {
         }
     }
 
-    // 5. 即梦: data.image_urls[] / data.binary_data_base64[]
+    // 5. 即梦 / MiniMax: data.image_urls[] / data.binary_data_base64[] / data.image_base64[]
     if total_count == 0 {
-        if let Some(arr) = v.pointer("/data/image_urls").and_then(|a| a.as_array()) {
-            total_count = arr
-                .iter()
-                .filter(|item| item.as_str().is_some_and(|s| !s.is_empty()))
-                .count() as i32;
-        }
-    }
-    if total_count == 0 {
-        if let Some(arr) = v
-            .pointer("/data/binary_data_base64")
-            .and_then(|a| a.as_array())
-        {
-            total_count = arr
-                .iter()
-                .filter(|item| item.as_str().is_some_and(|s| !s.is_empty()))
-                .count() as i32;
+        for path in [
+            "/data/image_urls",
+            "/data/binary_data_base64",
+            "/data/image_base64",
+        ] {
+            if let Some(arr) = v.pointer(path).and_then(|a| a.as_array()) {
+                let n = arr
+                    .iter()
+                    .filter(|item| item.as_str().is_some_and(|s| !s.is_empty()))
+                    .count() as i32;
+                if n > 0 {
+                    total_count = n;
+                    break;
+                }
+            }
         }
     }
 
-    if total_count > 0 {
-        Some(total_count)
-    } else {
-        None
-    }
+    (total_count > 0).then_some(total_count)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -835,40 +886,14 @@ pub fn enrich_features_from_usage(features: &mut ExtractedFeatures, usage: &Usag
 fn apply_usage_max(u: &mut UsageTokens, usage: &Value) {
     // 独立提取两组字段名后取较大值，避免上游同时返回 prompt_tokens=0 和 input_tokens>0
     // 时 or_else 回退链不触发导致漏取（如 gpt-image-2 上游返回 prompt_tokens:0 + input_tokens:1136）
-    let p_std = usage
-        .get("prompt_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0) as i32;
-    let p_alt = usage
-        .get("input_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0) as i32;
-    let img_tokens = (usage
-        .get("image_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0) as i32)
-        .max(max_usage_detail_i32(usage, "image_tokens"));
-    let p = p_std.max(p_alt);
-
-    let c_std = usage
-        .get("completion_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0) as i32;
-    let c_alt = usage
-        .get("output_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0) as i32;
-    let c = c_std.max(c_alt);
+    let p = json_field_i32(usage, "prompt_tokens").max(json_field_i32(usage, "input_tokens"));
+    let img_tokens =
+        json_field_i32(usage, "image_tokens").max(max_usage_detail_i32(usage, "image_tokens"));
+    let c = json_field_i32(usage, "completion_tokens").max(json_field_i32(usage, "output_tokens"));
     assign_max(&mut u.prompt, p);
     assign_max(&mut u.completion, c);
     assign_max(&mut u.image_tokens, img_tokens);
-    assign_upstream_total(
-        u,
-        usage
-            .get("total_tokens")
-            .and_then(|val| val.as_i64())
-            .unwrap_or(0) as i32,
-    );
+    assign_upstream_total(u, json_field_i32(usage, "total_tokens"));
     // Chat Completions: prompt_tokens_details；Responses: input_tokens_details
     assign_max(&mut u.cached, max_usage_detail_i32(usage, "cached_tokens"));
     assign_max(
@@ -884,34 +909,18 @@ fn apply_usage_max(u: &mut UsageTokens, usage: &Value) {
         max_usage_detail_i32(usage, "audio_cached_tokens"),
     );
     // Claude 缓存创建（APImart: 5m+1h 合并，兜底: Claude 原生 cache_creation_input_tokens）
-    let cc_5m = usage
-        .get("claude_cache_creation_5_m_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let cc_1h = usage
-        .get("claude_cache_creation_1_h_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let cc_5m = json_field_i32(usage, "claude_cache_creation_5_m_tokens");
+    let cc_1h = json_field_i32(usage, "claude_cache_creation_1_h_tokens");
     let cc = if cc_5m + cc_1h > 0 {
-        (cc_5m + cc_1h) as i32
+        cc_5m + cc_1h
     } else {
-        usage
-            .get("cache_creation_input_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as i32
+        json_field_i32(usage, "cache_creation_input_tokens")
     };
     assign_max(&mut u.cache_creation, cc);
     // 根级缓存命中兜底：Claude cache_read_input_tokens / DeepSeek prompt_cache_hit_tokens
     if u.cached == 0 {
-        let claude_hit = usage
-            .get("cache_read_input_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as i32;
-        let deepseek_hit = usage
-            .get("prompt_cache_hit_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as i32;
-        u.cached = claude_hit.max(deepseek_hit);
+        u.cached = json_field_i32(usage, "cache_read_input_tokens")
+            .max(json_field_i32(usage, "prompt_cache_hit_tokens"));
     }
     // 联网搜索次数提取（Responses API 等）
     assign_max(
@@ -919,8 +928,8 @@ fn apply_usage_max(u: &mut UsageTokens, usage: &Value) {
         usage
             .get("tool_usage")
             .and_then(|t| t.get("web_search"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as i32,
+            .map(json_i32)
+            .unwrap_or(0),
     );
 }
 
@@ -944,26 +953,17 @@ pub fn parse_usage(response: &str) -> UsageTokens {
             apply_usage_max(&mut u, usage);
             found = true;
         }
-        // 2. Google Gemini
+        // Google Gemini
         if let Some(usage) = v.get("usageMetadata") {
-            u.prompt = usage
-                .get("promptTokenCount")
-                .and_then(|val| val.as_i64())
-                .unwrap_or(0) as i32;
-            let total = usage
-                .get("totalTokenCount")
-                .and_then(|val| val.as_i64())
-                .unwrap_or(0) as i32;
+            u.prompt = json_field_i32(usage, "promptTokenCount");
+            let total = json_field_i32(usage, "totalTokenCount");
             assign_upstream_total(&mut u, total);
             u.completion = if total >= u.prompt {
                 total - u.prompt
             } else {
                 0
             };
-            u.cached = usage
-                .get("cachedContentTokenCount")
-                .and_then(|val| val.as_i64())
-                .unwrap_or(0) as i32;
+            u.cached = json_field_i32(usage, "cachedContentTokenCount");
             found = true;
         }
         // 3. Volcengine Video (final_result.usage)
@@ -988,19 +988,9 @@ pub fn parse_usage(response: &str) -> UsageTokens {
     } else {
         // SSE流的情况下按行解析（兼容有无 data: 前缀的情况）
         for line in response.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.ends_with("[DONE]") {
+            let Some(json_str) = sse_json_payload(line) else {
                 continue;
-            }
-
-            let json_str = if line.starts_with("data: ") {
-                &line[6..]
-            } else if line.starts_with("data:") {
-                &line[5..]
-            } else {
-                line
             };
-
             if let Ok(v) = serde_json::from_str::<Value>(json_str) {
                 extract_from_value(&v);
             }
@@ -1039,17 +1029,8 @@ pub fn extract_usage_json_string(response: &str) -> Option<String> {
         // SSE 模式下，寻找最后一条包含 usage 字段的 chunk，仅提取 usage 部分
         let mut last_usage_json = None;
         for line in response.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.ends_with("[DONE]") {
+            let Some(json_str) = sse_json_payload(line) else {
                 continue;
-            }
-
-            let json_str = if line.starts_with("data: ") {
-                &line[6..]
-            } else if line.starts_with("data:") {
-                &line[5..]
-            } else {
-                line
             };
 
             if let Ok(v) = serde_json::from_str::<Value>(json_str) {
@@ -1071,9 +1052,10 @@ pub fn extract_usage_json_string(response: &str) -> Option<String> {
 }
 
 /// 从可灵视频终态响应中提取实际生成时长（秒）。
-/// 路径: data.task_result.videos[0].duration（字符串，如 "5.1"）
+/// 旧: data.task_result.videos[0].duration；新 3.0: data[0].outputs[0].duration
 fn extract_kling_video_duration(resp: &Value) -> Option<f64> {
-    resp.pointer("/data/task_result/videos/0/duration")
+    resp.pointer("/data/0/outputs/0/duration")
+        .or_else(|| resp.pointer("/data/task_result/videos/0/duration"))
         .and_then(parse_json_f64)
         .filter(|&d| d > 0.0)
 }

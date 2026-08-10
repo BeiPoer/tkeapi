@@ -57,6 +57,9 @@ export const Playground = loadPluginComponent('Playground/Playground.tsx');
 export const PlaygroundHome = loadPluginComponent('Playground/PlaygroundHome.tsx');
 export const Playground2026 = loadPluginComponent('Playground_2026/Playground.tsx');
 export const PlaygroundHome2026 = loadPluginComponent('Playground_2026/PlaygroundHome.tsx');
+export const WorkflowCreateBootstrap2026 = loadPluginComponent(
+  'Playground_2026/components/WorkflowCreateBootstrap.tsx',
+);
 export const ModelMarketplace = loadPluginComponent('ModelMarketplace/ModelMarketplace.tsx');
 export const UserAssets = loadPluginComponent('UserAssets/UserAssets.tsx');
 export const AdvancedMarketing = loadPluginComponent('AdvancedMarketing/AdvancedMarketing.tsx');

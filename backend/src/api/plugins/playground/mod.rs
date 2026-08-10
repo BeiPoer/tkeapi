@@ -1191,21 +1191,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
 }
 
 async fn download_remote_file(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {}", e))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("读取数据失败: {}", e))?;
-    Ok(bytes.to_vec())
+    crate::services::http_client::download_bytes(client, url).await
 }
 
 fn guess_extension(url: &str, asset_type: &str) -> String {
@@ -1521,14 +1507,8 @@ pub async fn cleanup_stale_playground_nodes(state: &crate::AppState) {
                 .and_then(|e| e.split('|').next())
                 .unwrap_or("/v1/images/generations");
             let formatted = crate::relay::response_formatter::apply_format(
-                &state.db.pool,
-                raw_path,
-                category,
-                &raw,
-                false,
-                None,
-            )
-            .await;
+                raw_path, category, &raw, false, None,
+            );
             let result: serde_json::Value = match serde_json::from_str(&formatted) {
                 Ok(v) => v,
                 Err(_) => continue,
@@ -1914,14 +1894,12 @@ async fn recover_by_log_id(
     let category = if is_video { "视频" } else { "图片" };
 
     let formatted = crate::relay::response_formatter::apply_format(
-        &state.db.pool,
         clean_path,
         category,
         &raw_response,
         false,
         None,
-    )
-    .await;
+    );
 
     let result: serde_json::Value = serde_json::from_str(&formatted).unwrap_or(json!({}));
 

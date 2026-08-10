@@ -127,6 +127,33 @@ pub async fn create_token(
 ) -> AppResult<Json<ApiToken>> {
     let name_val = normalize_token_name(request.name.as_deref().unwrap_or("default"))?;
 
+    // 管理员豁免；普通用户按注册设置绑定策略硬拦截（prompt_only 不拦截）
+    if claims.role != "admin" {
+        let settings = crate::api::settings::load_all_settings(&state).await?;
+        let reg = &settings.registration;
+        if reg.bind_policy_active() && reg.bind_enforcement != "prompt_only" {
+            let email: String = sqlx::query_scalar(
+                &state
+                    .db
+                    .format_query("SELECT email FROM users WHERE id = ?"),
+            )
+            .bind(&claims.sub)
+            .fetch_one(&state.db.pool)
+            .await?;
+            let mobile: Option<String> = sqlx::query_scalar(
+                &state
+                    .db
+                    .format_query("SELECT mobile FROM users WHERE id = ?"),
+            )
+            .bind(&claims.sub)
+            .fetch_one(&state.db.pool)
+            .await?;
+            if reg.should_block_token_create(&email, mobile.as_deref()) {
+                return Err(AppError::BadRequest(reg.token_bind_block_message()));
+            }
+        }
+    }
+
     let current_count: i64 = sqlx::query_scalar(
         &state
             .db

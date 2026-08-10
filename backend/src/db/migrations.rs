@@ -524,8 +524,9 @@ macro_rules! pg_migration_blocks {
         FROM (VALUES 
             ('标准1M万字计费 (1)', 'tokens', 1.0, 2.0, 0.0, 0.0, 'standard', '{}', 1),
             ('单次请求扣费 (0.1)', 'requests', 0.0, 0.0, 0.1, 0.0, 'standard', '{}', 1),
-            ('Seedance2.0官方计费', 'tokens', 0.0, 0.0, 0.0, 0.0, 'seedance2.0', '{"resolution_rates":{"1080p":{"with_video":31,"without_video":51},"480p":{"with_video":28,"without_video":46},"720p":{"with_video":28,"without_video":46}}}', 1),
+            ('Seedance2.0官方计费', 'tokens', 0.0, 0.0, 0.0, 0.0, 'seedance2.0', '{"resolution_rates":{"1080p":{"with_video":31,"without_video":51},"480p":{"with_video":28,"without_video":46},"4k":{"with_video":16,"without_video":26},"720p":{"with_video":28,"without_video":46}}}', 1),
             ('Seedance2.0Fast官方计费', 'tokens', 0.0, 0.0, 0.0, 0.0, 'seedance2.0', '{"resolution_rates":{"480p":{"with_video":22,"without_video":37},"720p":{"with_video":22,"without_video":37}}}', 1),
+            ('Seedance2.5官方计费', 'tokens', 0.0, 0.0, 0.0, 0.0, 'seedance2.0', '{"enable_time_multipliers":false,"resolution_rates":{"480p":{"with_video":42,"without_video":70},"720p":{"with_video":42,"without_video":70}},"time_multipliers":[]}', 1),
             ('可灵视频官方计费', 'duration', 0.0, 0.0, 0.0, 0.10, 'kling_video', '{"mode_multipliers":{"std":1.0,"pro":1.33,"4k":2.0},"sound_multipliers":{"off":1.0,"on":1.5}}', 1),
             ('可灵V3-Omni视频计费', 'duration', 0.0, 0.0, 0.0, 0.60, 'kling_video', '{"price_table":{"std|off|no":0.6,"std|on|no":0.8,"std|off|yes":0.9,"pro|off|no":0.8,"pro|on|no":1.0,"pro|off|yes":1.2,"4k|off|no":3.0,"4k|on|no":3.0,"4k|off|yes":3.0},"enable_mode":true,"enable_sound":true,"enable_video_ref":true}', 1),
             ('可灵Video-O1视频计费', 'duration', 0.0, 0.0, 0.0, 0.60, 'kling_video', '{"price_table":{"std|off|no":0.6,"std|off|yes":0.9,"pro|off|no":0.8,"pro|off|yes":1.2},"enable_mode":true,"enable_sound":false,"enable_video_ref":true}', 1),
@@ -2912,7 +2913,7 @@ macro_rules! pg_migration_blocks {
     // ── 补全预置 MiniMax 视频生成转发规则（并回填缺失 eid）──
     once_migration!(pool, "minimax_video_forward_rule_v1",
         r#"INSERT INTO forward_rules (name, rule_type, description, config_json, category, is_system, eid)
-        SELECT 'MiniMax 视频生成', 'minimax_video', 'MiniMax V2 视频生成原生通道，自动将多模态请求转换为 prompt 数组，并支持异步任务轮询', '{"target_type":"minimax_video","path_rewrite":{"old":"/v1/video/generations","new":"/v2/video_generation"},"auth_type":"bearer","poll_path":"/v2/query/video_generation/${task_id}"}', '视频', 1, '1' || lpad((floor(random() * 10000)::int)::text, 4, '0')
+        SELECT 'MiniMax 视频生成', 'minimax', 'MiniMax V2 视频生成原生通道，自动将多模态请求转换为 prompt 数组，并支持异步任务轮询', '{"target_type":"minimax_video","path_rewrite":{"old":"/v1/video/generations","new":"/v2/video_generation"},"auth_type":"bearer","poll_path":"/v2/query/video_generation/${task_id}"}', '视频', 1, '1' || lpad((floor(random() * 10000)::int)::text, 4, '0')
         WHERE NOT EXISTS (SELECT 1 FROM forward_rules WHERE name = 'MiniMax 视频生成')"#,
         "UPDATE forward_rules SET eid = '1' || lpad((floor(random() * 10000)::int)::text, 4, '0') WHERE eid IS NULL OR eid = ''"
     );
@@ -2980,10 +2981,223 @@ macro_rules! pg_migration_blocks {
         "COMMENT ON COLUMN channel_configs.status IS '1=启用, 0=禁用'"
     );
 
+    // ── 补全预置 MiniMax 图片生成转发规则 ──
+    once_migration!(pool, "minimax_image_forward_rule_v1",
+        r#"INSERT INTO forward_rules (name, rule_type, description, config_json, category, is_system, eid)
+        SELECT 'MiniMax 图片生成', 'minimax', 'MiniMax 文生图/图生图原生通道（/v1/image_generation），兼容 OpenAI 参数并透传官方字段（aspect_ratio/subject_reference/prompt_optimizer 等）', '{"target_type":"minimax_image","path_rewrite":{"old":"/v1/images/generations","new":"/v1/image_generation"},"auth_type":"bearer"}', '图片', 1, '1' || lpad((floor(random() * 10000)::int)::text, 4, '0')
+        WHERE NOT EXISTS (SELECT 1 FROM forward_rules WHERE name = 'MiniMax 图片生成')"#
+    );
+
+    // ── MiniMax 规则 rule_type 统一为 minimax（target_type 仍为 minimax_image / minimax_video）──
+    once_migration!(pool, "minimax_forward_rule_unify_v1",
+        r#"UPDATE forward_rules
+        SET rule_type = 'minimax'
+        WHERE rule_type IN ('minimax_image', 'minimax_video')"#
+    );
+
     // ── 上游渠道配置分类（复用 channel_categories）──
     once_migration!(pool, "channel_configs_category_v1",
         "ALTER TABLE channel_configs ADD COLUMN IF NOT EXISTS category_id BIGINT REFERENCES channel_categories(id)",
         "COMMENT ON COLUMN channel_configs.category_id IS '上游分类，关联 channel_categories.id'"
+    );
+
+    // ── 兑换码：单用户活动参与次数上限（与单码多次兑换解耦）──
+    once_migration!(pool, "redemptions_per_user_activity_limit_v1",
+        "ALTER TABLE redemptions ADD COLUMN IF NOT EXISTS per_user_activity_limit INTEGER NOT NULL DEFAULT -1",
+        "COMMENT ON COLUMN redemptions.per_user_activity_limit IS '同一活动(同 name)下单用户可兑换次数，-1=不限制'",
+        "CREATE INDEX IF NOT EXISTS idx_redemptions_name ON redemptions (name)"
+    );
+
+    // ── 兑换日志按 user_id 索引：活动参与次数统计 / 防刷查询 ──
+    once_migration!(pool, "redemption_logs_user_id_idx_v1",
+        "CREATE INDEX IF NOT EXISTS idx_redemption_logs_user_id ON redemption_logs (user_id)"
+    );
+
+    // ── 创作中心2026：独立作品表（图片/视频 outputs，与 projects 平级）──
+    once_migration!(pool, "init_playground_2026_outputs_v1",
+        r#"CREATE TABLE IF NOT EXISTS playground_2026_outputs (
+            id BIGSERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            uid TEXT NOT NULL DEFAULT '',
+            media_type TEXT NOT NULL DEFAULT 'image',
+            status TEXT NOT NULL DEFAULT 'pending',
+            prompt TEXT NOT NULL DEFAULT '',
+            model_name TEXT NOT NULL DEFAULT '',
+            model_mid TEXT NOT NULL DEFAULT '',
+            param_values TEXT NOT NULL DEFAULT '{}',
+            preview_url TEXT NOT NULL DEFAULT '',
+            aspect_ratio TEXT NOT NULL DEFAULT '',
+            resolution TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            upstream_task_id TEXT NOT NULL DEFAULT '',
+            sys_log_id TEXT NOT NULL DEFAULT '',
+            batch_id TEXT NOT NULL DEFAULT '',
+            is_deleted INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"#,
+        "CREATE INDEX IF NOT EXISTS idx_pg2026_outputs_user_media_created ON playground_2026_outputs(user_id, media_type, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_pg2026_outputs_upstream_task ON playground_2026_outputs(upstream_task_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pg2026_outputs_batch ON playground_2026_outputs(batch_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pg2026_outputs_user_deleted ON playground_2026_outputs(user_id, is_deleted)",
+        "COMMENT ON TABLE playground_2026_outputs IS '创作中心2026作品表（图片/视频，独立于 assets/projects）'",
+        "COMMENT ON COLUMN playground_2026_outputs.media_type IS 'image|video'",
+        "COMMENT ON COLUMN playground_2026_outputs.status IS 'pending|done|error'",
+        "COMMENT ON COLUMN playground_2026_outputs.upstream_task_id IS '上游异步任务 id，对应 /v1/tasks/{id}'",
+        "COMMENT ON COLUMN playground_2026_outputs.batch_id IS '同一次生成多张结果的批次 id'",
+        "COMMENT ON COLUMN playground_2026_outputs.param_values IS '灵活 JSON：方案参数 key→value + _fields[{key,label}] 显示名 + 可选 reference_urls；勿拆成死字段'"
+    );
+
+    // ── 创作中心2026：作品分类（收藏夹系统分类 + 用户自定义）──
+    once_migration!(pool, "init_playground_2026_albums_v1",
+        r#"CREATE TABLE IF NOT EXISTS playground_2026_albums (
+            id BIGSERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL DEFAULT 'custom',
+            is_system INTEGER NOT NULL DEFAULT 0,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS playground_2026_album_items (
+            album_id BIGINT NOT NULL REFERENCES playground_2026_albums(id) ON DELETE CASCADE,
+            output_id BIGINT NOT NULL REFERENCES playground_2026_outputs(id) ON DELETE CASCADE,
+            user_id TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (album_id, output_id)
+        )"#,
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_pg2026_albums_user_favorites ON playground_2026_albums(user_id) WHERE kind = 'favorites'",
+        "CREATE INDEX IF NOT EXISTS idx_pg2026_albums_user_sort ON playground_2026_albums(user_id, sort_order ASC, id ASC)",
+        "CREATE INDEX IF NOT EXISTS idx_pg2026_album_items_output ON playground_2026_album_items(output_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pg2026_album_items_user ON playground_2026_album_items(user_id, album_id)",
+        "COMMENT ON TABLE playground_2026_albums IS '创作中心2026作品分类：favorites 系统收藏夹 + custom 用户分类'",
+        "COMMENT ON COLUMN playground_2026_albums.kind IS 'favorites|custom'",
+        "COMMENT ON TABLE playground_2026_album_items IS '作品与分类的多对多归属'"
+    );
+
+    once_migration!(pool, "pg2026_outputs_param_values_comment_v1",
+        "COMMENT ON COLUMN playground_2026_outputs.param_values IS '灵活 JSON：方案参数 key→value + _fields[{key,label}] 显示名 + 可选 reference_urls；勿拆成死字段'"
+    );
+
+    // ── 可灵 3.0 推荐转发规则（kling_video，与旧 kling 解耦；文/图一条 + Omni 一条）──
+    once_migration!(pool, "kling_video_v3_forward_rules_v1",
+        r#"INSERT INTO forward_rules (name, rule_type, description, config_json, category, is_system, eid)
+        SELECT * FROM (VALUES
+            ('可灵视频 3.0（文/图·推荐）', 'kling_video', '可灵官方 3.0 文生/图生推荐通道：URL 为 /text-to-video/${model}，body 含 contents 时自动改写为 /image-to-video/${model}；统一轮询 /tasks；渠道密钥填官方 API Key（Authorization: Bearer，无需 JWT）', '{"target_type":"kling_video","path_rewrite":{"old":"/v1/video/generations","new":"/text-to-video/${model}"},"auth_type":"bearer","poll_path":"/tasks?task_ids=${task_id}"}', '视频', 1, '1' || lpad((floor(random() * 10000)::int)::text, 4, '0')),
+            ('可灵 Omni 视频 3.0（推荐）', 'kling_video', '可灵官方 Omni 3.0 推荐通道：URL 为 /omni-video/${model}；多模态 contents；统一轮询 /tasks；渠道密钥填官方 API Key（Authorization: Bearer，无需 JWT）', '{"target_type":"kling_video","path_rewrite":{"old":"/v1/video/generations","new":"/omni-video/${model}"},"auth_type":"bearer","poll_path":"/tasks?task_ids=${task_id}"}', '视频', 1, '1' || lpad((floor(random() * 10000)::int)::text, 4, '0'))
+        ) AS t(name, rule_type, description, config_json, category, is_system, eid)
+        WHERE NOT EXISTS (SELECT 1 FROM forward_rules WHERE name = t.name)"#
+    );
+
+    // ── 上游渠道配置：日额度自定义刷新时刻 + 冷却分钟 ──
+    once_migration!(pool, "channel_configs_daily_reset_cutover_v1",
+        "ALTER TABLE channel_configs ADD COLUMN IF NOT EXISTS daily_reset_hour INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE channel_configs ADD COLUMN IF NOT EXISTS daily_reset_minute INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE channel_configs ADD COLUMN IF NOT EXISTS daily_reset_cooldown_minutes INTEGER NOT NULL DEFAULT 0",
+        "COMMENT ON COLUMN channel_configs.daily_reset_hour IS '日额度刷新时(0-23)，站点时区'",
+        "COMMENT ON COLUMN channel_configs.daily_reset_minute IS '日额度刷新分(0-59)，站点时区'",
+        "COMMENT ON COLUMN channel_configs.daily_reset_cooldown_minutes IS '到达刷新时刻后再冷却多少分钟才真正刷新日已用(0=立即)'"
+    );
+
+    // ── 火山 MediaKit：插件日志关联表（log_id = logs.id，列表不再全表扫 model）──
+    once_migration!(pool, "volcengine_enhance_logs_link_v1",
+        r#"CREATE TABLE IF NOT EXISTS volcengine_enhance_logs (
+            log_id BIGINT PRIMARY KEY
+        )"#,
+        "COMMENT ON TABLE volcengine_enhance_logs IS '火山 MediaKit 使用日志关联：log_id=logs.id'",
+        "COMMENT ON COLUMN volcengine_enhance_logs.log_id IS '关联主日志表 logs.id'"
+    );
+
+    // ── 创作中心2026：工作流（镜像 projects，独立于画布项目）──
+    once_migration!(pool, "init_playground_2026_workflows_v1",
+        r#"CREATE TABLE IF NOT EXISTS playground_2026_workflows (
+            id BIGSERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            uid TEXT NOT NULL,
+            name TEXT NOT NULL DEFAULT '未命名工作流',
+            description TEXT DEFAULT '',
+            cover_url TEXT DEFAULT '',
+            canvas_data TEXT DEFAULT '{}',
+            is_deleted INTEGER NOT NULL DEFAULT 0,
+            is_pinned INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"#,
+        "CREATE INDEX IF NOT EXISTS idx_pg2026_workflows_user ON playground_2026_workflows(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pg2026_workflows_uid ON playground_2026_workflows(uid)",
+        "COMMENT ON TABLE playground_2026_workflows IS '创作中心2026工作流表（节点编排，独立于 playground_2026_projects）'"
+    );
+
+    // ── 高可用插件：使用日志（log_id=logs.id，attempts 含全量子渠过程）──
+    once_migration!(pool, "ha_usage_logs_v1",
+        r#"CREATE TABLE IF NOT EXISTS ha_usage_logs (
+            log_id BIGINT PRIMARY KEY,
+            group_aid TEXT,
+            attempt_count SMALLINT NOT NULL DEFAULT 0,
+            final_ok SMALLINT NOT NULL DEFAULT 0,
+            final_status_code INT NOT NULL DEFAULT 0,
+            attempts JSONB NOT NULL DEFAULT '[]',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )"#,
+        "CREATE INDEX IF NOT EXISTS idx_ha_usage_logs_created ON ha_usage_logs (created_at DESC)",
+        "COMMENT ON TABLE ha_usage_logs IS '高可用插件使用日志：log_id=logs.id，attempts=子渠过程JSON'"
+    );
+
+    // ── 用户实名认证 KYC ──
+    once_migration!(pool, "user_kyc_v1",
+        r#"CREATE TABLE IF NOT EXISTS user_kyc (
+            id BIGSERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+            kyc_type TEXT NOT NULL DEFAULT 'personal',
+            status TEXT NOT NULL DEFAULT 'none',
+            real_name TEXT,
+            id_doc_type TEXT,
+            id_doc_front_url TEXT,
+            id_doc_back_url TEXT,
+            company_name TEXT,
+            business_license_url TEXT,
+            tax_registration_url TEXT,
+            legal_notarization_url TEXT,
+            validity_type TEXT NOT NULL DEFAULT 'long_term',
+            expire_at TIMESTAMPTZ,
+            reject_reason TEXT,
+            admin_remark TEXT,
+            reviewed_by TEXT,
+            reviewed_at TIMESTAMPTZ,
+            submitted_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"#,
+        "CREATE INDEX IF NOT EXISTS idx_user_kyc_status ON user_kyc(status)",
+        "COMMENT ON TABLE user_kyc IS '用户实名认证：个人/企业证件与有效期'",
+        "COMMENT ON COLUMN user_kyc.kyc_type IS 'personal|enterprise'",
+        "COMMENT ON COLUMN user_kyc.status IS 'none|pending|approved|rejected|expired'",
+        "COMMENT ON COLUMN user_kyc.id_doc_type IS 'id_card|passport|driver_license'",
+        "COMMENT ON COLUMN user_kyc.validity_type IS 'long_term|expire_date'"
+    );
+
+    // ── 新增模型：折扣限价默认开启，倍率默认 1.0 ──
+    once_migration!(pool, "models_site_discount_default_on_v1",
+        "ALTER TABLE models ALTER COLUMN site_discount SET DEFAULT 1.0",
+        "ALTER TABLE models ALTER COLUMN site_discount_enabled SET DEFAULT 1",
+        "COMMENT ON COLUMN models.site_discount IS '折扣限价倍率（开启时折扣不低于此值，默认 1.0=原价）'",
+        "COMMENT ON COLUMN models.site_discount_enabled IS '折扣限价开关（0=关，1=开，新增默认开启）'"
+    );
+
+    // ── 更新 Seedance 2.0 官方计费规则（PID 74112）系统默认配置（包含 4K 分辨率计费） ──
+    once_migration!(pool, "update_seedance2_0_default_rule_4k_v1",
+        r#"UPDATE billing_rules SET extended_config = '{"resolution_rates":{"1080p":{"with_video":31,"without_video":51},"480p":{"with_video":28,"without_video":46},"4k":{"with_video":16,"without_video":26},"720p":{"with_video":28,"without_video":46}}}' WHERE (name = 'Seedance2.0官方计费' OR pid = '74112') AND is_system = 1"#,
+        "UPDATE billing_rules SET pid = '74112' WHERE name = 'Seedance2.0官方计费' AND is_system = 1 AND (pid = '' OR pid IS NULL)"
+    );
+
+    // ── 将 Seedance 2.5 官方计费规则调整为系统计费规则 ──
+    once_migration!(pool, "make_seedance2_5_system_rule_v1",
+        "UPDATE billing_rules SET is_system = 1, pid = CASE WHEN pid LIKE '6%' OR pid = '' OR pid IS NULL THEN '73119' ELSE pid END WHERE name = 'Seedance2.5官方计费'",
+        r#"INSERT INTO billing_rules (name, billing_type, prompt_rate, completion_rate, fixed_rate, duration_rate, billing_rule, extended_config, is_system, pid, pricing_type)
+        SELECT 'Seedance2.5官方计费', 'tokens', 0.0, 0.0, 0.0, 0.0, 'seedance2.0', '{"enable_time_multipliers":false,"resolution_rates":{"480p":{"with_video":42,"without_video":70},"720p":{"with_video":42,"without_video":70}},"time_multipliers":[]}', 1, '73119', 'official'
+        WHERE NOT EXISTS (SELECT 1 FROM billing_rules WHERE name = 'Seedance2.5官方计费')
+        "#
     );
 
     tracing::info!("PostgreSQL AnyPool migrations completed successfully");

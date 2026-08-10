@@ -66,6 +66,20 @@ static KLING_VID_EN: LazyLock<String> = LazyLock::new(|| {
         include_str!("en/common-errors.md")
     )
 });
+static MINIMAX_IMG_EN: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n\n{}",
+        include_str!("en/minimax-image.md"),
+        include_str!("en/common-errors.md")
+    )
+});
+static MINIMAX_VID_EN: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n\n{}",
+        include_str!("en/minimax-video.md"),
+        include_str!("en/common-errors.md")
+    )
+});
 
 pub struct ArticleTranslation {
     pub lang: &'static str,
@@ -570,6 +584,16 @@ pub fn get_article_translations(slug: &str) -> Vec<ArticleTranslation> {
             lang: "en",
             title: "Kling-v3 Video Generation",
             content: &*KLING_VID_EN,
+        }],
+        "minimax-image" => vec![ArticleTranslation {
+            lang: "en",
+            title: "MiniMax Image Generation",
+            content: &*MINIMAX_IMG_EN,
+        }],
+        "minimax-video" => vec![ArticleTranslation {
+            lang: "en",
+            title: "MiniMax Video Generation",
+            content: &*MINIMAX_VID_EN,
         }],
         _ => vec![],
     }

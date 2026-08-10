@@ -1,9 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { Switch, Typography, Divider, Button, Form, Input, Select, Row, Col, Card, Space } from 'antd';
+import { Switch, Typography, Divider, Button, Form, Input, Select, Row, Col, Card, Space, Tag } from 'antd';
 import { SaveOutlined, PlusOutlined, DeleteOutlined, ArrowUpOutlined, ArrowDownOutlined } from '@ant-design/icons';
 import { useThemeStore } from '../../../store/theme';
 
 const { Title, Text } = Typography;
+
+const isVideoUrl = (url?: string): boolean => {
+  if (!url) return false;
+  const cleanUrl = url.split('?')[0].split('#')[0].toLowerCase();
+  if (/\.(mp4|webm|ogg|mov|m3u8|m4v|flv)$/i.test(cleanUrl)) return true;
+  if (url.startsWith('data:video/')) return true;
+  if (url.includes('video/mp4') || url.includes('video/webm')) return true;
+  return false;
+};
 
 const DEFAULT_HERO_SLIDES = [
   {
@@ -129,15 +138,19 @@ const MarketplaceTrendingTab: React.FC<MarketplaceTrendingTabProps> = ({
   const handleHeroSlideChange = (index: number, field: string, val: any) => {
     const updated = [...heroSlides];
     if (field === 'try_model_id' && val) {
+      const targetId = typeof val === 'string' && val.startsWith('orig:') ? val.replace('orig:', '') : val;
       const selectedModel = allModels?.find(m => 
         m.mid === val || 
         m.id?.toString() === val || 
         m.original_id === val || 
-        m.name === val
+        m.original_id === targetId ||
+        m.model_id === targetId ||
+        m.name === val ||
+        m.name === targetId
       );
       if (selectedModel) {
         const autoCategory = selectedModel.type_name || selectedModel.category || '';
-        const autoTitle = selectedModel.name || selectedModel.original_id || '';
+        const autoTitle = selectedModel.name || selectedModel.original_id || targetId || '';
         const autoDesc = selectedModel.description || selectedModel.model_description || '';
         updated[index] = { 
           ...updated[index], 
@@ -208,10 +221,65 @@ const MarketplaceTrendingTab: React.FC<MarketplaceTrendingTabProps> = ({
     triggerChange(enabled, heroSlides, updatedSections);
   };
 
-  const modelOptions = (allModels || []).map((m: any) => ({
+  // Extract all unique model categories/groups from allModels
+  const extractedGroups = Array.from(new Set(
+    (allModels || [])
+      .map((m: any) => m.type_name || m.category)
+      .filter(Boolean)
+  ));
+  
+  // Default common categories if list is short
+  const defaultCategories = ['图生视频', '文生视频', '视频生视频', '文生图', '图生图', '文本生成', '对话模型', '文本转语音', '代码生成', '多模态'];
+  const allCategoryNames = Array.from(new Set([...extractedGroups, ...defaultCategories]));
+
+  const groupOptions = allCategoryNames.map((cat: string) => ({
+    label: `📦 模型组/类型: ${cat}`,
+    value: `group:${cat}`
+  }));
+
+  const rawModelOptions = (allModels || []).map((m: any) => ({
     label: `${m.name || m.original_id || m.model_id || '未命名模型'} (${m.provider_name || '公共'})`,
     value: m.mid || m.original_id || m.model_id || m.id?.toString() || m.name
   }));
+
+  const modelOptions = rawModelOptions;
+
+  // Group models by original_id to build multi-price model options
+  const origIdMap = new Map<string, any[]>();
+  (allModels || []).forEach((m: any) => {
+    const origId = m.original_id || m.model_id;
+    if (origId) {
+      if (!origIdMap.has(origId)) {
+        origIdMap.set(origId, []);
+      }
+      origIdMap.get(origId)!.push(m);
+    }
+  });
+
+  const originalIdOptions = Array.from(origIdMap.entries())
+    .map(([origId, items]) => {
+      const displayName = items[0]?.name || origId;
+      const count = items.length;
+      return {
+        label: `🏷️ 原始ID模型组: ${displayName} (${origId}) [${count}个价格渠道]`,
+        value: `orig:${origId}`
+      };
+    });
+
+  const combinedModelAndGroupOptions = [
+    {
+      label: '🏷️ 同原始ID模型组 (支持多渠道价格展示)',
+      options: originalIdOptions
+    },
+    {
+      label: '📦 能力分类模型组 (选中可包含该类型全部模型)',
+      options: groupOptions
+    },
+    {
+      label: '🤖 独立站点模型渠道',
+      options: rawModelOptions
+    }
+  ];
 
   const providerOptions = (allProviders || []).map((p: any) => ({
     label: p.name,
@@ -302,16 +370,40 @@ const MarketplaceTrendingTab: React.FC<MarketplaceTrendingTabProps> = ({
               />
             </Col>
             <Col span={24}>
-              <Text style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>幻灯片背景图片 URL (可选)</Text>
+              <Text style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>幻灯片背景图片/视频 URL (可选)</Text>
               <Input 
                 value={slide.bg_image} 
                 onChange={e => handleHeroSlideChange(idx, 'bg_image', e.target.value)} 
-                placeholder="请输入背景图片 URL 或绝对路径（配置后作为全屏 Banner 背景展示）" 
+                placeholder="请输入背景图片或视频 URL（支持 .mp4, .webm, .m3u8, .mov 或网络/本地媒体链接）" 
                 allowClear
               />
+              <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+                支持图片 (JPG/PNG/WebP/GIF) 或视频 (MP4/WebM/M3U8) 链接。填入视频链接时，前台将自动在 Banner 背景静音无缝循环播放。
+              </Text>
+              {slide.bg_image && (
+                <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Tag color={isVideoUrl(slide.bg_image) ? 'blue' : 'green'}>
+                    {isVideoUrl(slide.bg_image) ? '视频背景' : '图片背景'}
+                  </Tag>
+                  {isVideoUrl(slide.bg_image) ? (
+                    <video
+                      src={slide.bg_image}
+                      muted
+                      style={{ width: 100, height: 56, objectFit: 'cover', borderRadius: 4, border: `1px solid ${_isLight ? '#d9d9d9' : '#333'}` }}
+                    />
+                  ) : (
+                    <img
+                      src={slide.bg_image}
+                      alt="背景预览"
+                      style={{ width: 100, height: 56, objectFit: 'cover', borderRadius: 4, border: `1px solid ${_isLight ? '#d9d9d9' : '#333'}` }}
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                    />
+                  )}
+                </div>
+              )}
             </Col>
             <Col span={12}>
-              <Text style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>"立即体验" 关联模型</Text>
+              <Text style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>"立即体验" 关联模型 / 原始ID模型组</Text>
               <Select
                 showSearch
                 allowClear
@@ -319,8 +411,8 @@ const MarketplaceTrendingTab: React.FC<MarketplaceTrendingTabProps> = ({
                 style={{ width: '100%' }}
                 value={slide.try_model_id}
                 onChange={val => handleHeroSlideChange(idx, 'try_model_id', val)}
-                options={modelOptions}
-                placeholder="选择点击体验时直接打开的模型"
+                options={combinedModelAndGroupOptions}
+                placeholder="选择点击体验时关联的模型或同原始ID模型组"
               />
             </Col>
             <Col span={12}>
@@ -406,7 +498,8 @@ const MarketplaceTrendingTab: React.FC<MarketplaceTrendingTabProps> = ({
                 value={sec.type}
                 onChange={val => handleSectionChange(idx, 'type', val)}
                 options={[
-                  { label: '模型列表 (Models)', value: 'models' },
+                  { label: '模型列表 / 模型组 (Models)', value: 'models' },
+                  { label: '仅模型组/类型 (Model Groups)', value: 'groups' },
                   { label: '模型厂家 (Providers)', value: 'providers' }
                 ]}
               />
@@ -421,7 +514,7 @@ const MarketplaceTrendingTab: React.FC<MarketplaceTrendingTabProps> = ({
             </Col>
             <Col span={24}>
               <Text style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>
-                {`关联数据内容 (${sec.type === 'models' ? '选择站点模型' : '选择站点模型厂家'})`}
+                {`关联数据内容 (${sec.type === 'models' ? '选择站点模型或模型组' : (sec.type === 'groups' ? '选择模型组' : '选择站点模型厂家')})`}
               </Text>
               <Select
                 mode="multiple"
@@ -431,8 +524,12 @@ const MarketplaceTrendingTab: React.FC<MarketplaceTrendingTabProps> = ({
                 style={{ width: '100%' }}
                 value={sec.items}
                 onChange={val => handleSectionChange(idx, 'items', val)}
-                options={sec.type === 'models' ? modelOptions : providerOptions}
-                placeholder={`请选择该专题下要展示的${sec.type === 'models' ? '大模型' : '服务商'}`}
+                options={(sec.type === 'models' ? combinedModelAndGroupOptions : (sec.type === 'groups' ? groupOptions : providerOptions)) as any}
+                placeholder={
+                  sec.type === 'models' 
+                    ? '请选择要展示的站点模型或模型组（按模型组选择可包含该类型全部模型）' 
+                    : (sec.type === 'groups' ? '请选择该专题要展示的模型组/分类' : '请选择该专题要展示的服务商')
+                }
               />
             </Col>
           </Row>

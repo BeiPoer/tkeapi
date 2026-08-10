@@ -36,7 +36,7 @@ curl -X POST https://{{domain}}/v1/chat/completions \
 * **요청 방식**: `POST`
 
 > [!NOTE]
-> 게이트웨이의 자동 매개변수 검증 및 프로토콜 변환을 건너뛰고, 백엔드의 OpenAI 또는 볼케인진(Volcengine) 모델에 직접 공식 네이티브 요청 페이로드(Request Payload) 전체를 전송하려는 경우, `/v1/responses` 인터페이스를 사용할 수 있습니다. 게이트웨이는 요청 바디를 상류 채널로 손실 없이 직접 전달(Pass-through)하면서도, 전체 빌링, 할당량 제한, 사용 로그 감사 등 플랫폼의 핵심 기능은 그대로 보장합니다.
+> 클라이언트가 이미 Responses 형식 페이로드를 쓰는 경우 `/v1/responses`를 호출하세요. 과금·쿼터·사용 로그는 계속 적용됩니다.
 
 #### 요청 예시
 ```json

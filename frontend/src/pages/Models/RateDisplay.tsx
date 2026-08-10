@@ -7,6 +7,7 @@
 
 import React from 'react';
 import { Space, Tag, Typography, Tooltip } from 'antd';
+import { resolveFreeImageCount } from '../../utils/billingFreeImages';
 
 const { Text } = Typography;
 
@@ -27,7 +28,7 @@ const RULE_LABELS: Record<string, string> = {
   image_resolution: '按分辨率K',
   image_size_pixel: '按分辨率像素',
   video_resolution: '按分辨率阶梯',
-  minimax_h3: 'MiniMax H3',
+  minimax_h3: '视频秒价+输入图',
   video_quality: '按画质帧率阶梯',
   kling_video: '可灵视频',
   vidu_video: 'Vidu 视频',
@@ -286,10 +287,11 @@ const RateDisplay: React.FC<RateDisplayProps> = ({ rule, currencySymbol, formatP
       }
       if (rule.billing_rule === 'volc_seedream_pro') {
         const activeTiers = tiers.filter(t => t.enabled !== false);
+        const freeCount = resolveFreeImageCount(ext.free_image_count, 'volc_seedream_pro');
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
             <Text type="secondary" style={s}>
-              输入额外: {fp(rule.prompt_rate)} / 张 (首免)
+              {freeCount} 张以内免费，超出部分 {fp(rule.prompt_rate)}/张
             </Text>
             {activeTiers.map((t, idx) => (
               <Text key={idx} type="secondary" style={s}>
@@ -327,11 +329,11 @@ const RateDisplay: React.FC<RateDisplayProps> = ({ rule, currencySymbol, formatP
     }
     if (rule.billing_rule === 'minimax_h3') {
       const activeTiers = tiers.filter(t => t.enabled !== false);
-      const freeCount = ext.free_image_count ?? 5;
+      const freeCount = resolveFreeImageCount(ext.free_image_count, 'minimax_h3');
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
           <Text type="secondary" style={s}>
-            输入图超额: {fp(rule.prompt_rate)} / 张 (免费{freeCount}张)
+            {freeCount} 张以内免费，超出部分 {fp(rule.prompt_rate)}/张
           </Text>
           {activeTiers.length === 0
             ? <Text type="secondary" style={s}>分辨率阶梯 (无有效配置)</Text>

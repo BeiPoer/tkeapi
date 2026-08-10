@@ -56,8 +56,18 @@ const applyThemeSettings = (site?: AllSettings['site']) => {
   }
 };
 
-/** 用户手动切换过语言则沿用偏好；否则使用站点默认语言（不写入用户偏好） */
+/** 多语言开启时：用户手动偏好优先，否则用站点默认语言；关闭时强制站点默认语言 */
 const applyLanguageSettings = (site?: AllSettings['site']) => {
+  const defaultLang = site?.default_language;
+  const multilingualEnabled = site?.enable_multilingual !== false;
+
+  if (!multilingualEnabled) {
+    if (defaultLang && i18n.language !== defaultLang) {
+      void i18n.changeLanguage(defaultLang);
+    }
+    return;
+  }
+
   const userLang = getUserLanguagePreference();
   if (userLang) {
     if (i18n.language !== userLang) {
@@ -65,7 +75,6 @@ const applyLanguageSettings = (site?: AllSettings['site']) => {
     }
     return;
   }
-  const defaultLang = site?.default_language;
   if (defaultLang && i18n.language !== defaultLang) {
     void i18n.changeLanguage(defaultLang);
   }

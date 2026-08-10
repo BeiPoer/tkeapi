@@ -1,6 +1,6 @@
 # GPT-gpt-image-2 Image Generation Example
 
-gpt-image-2 is OpenAI's latest flagship text-to-image model, featuring unmatched prompt adherence and crisp, realistic visual details. This gateway aligns all request fields seamlessly.
+gpt-image-2 is OpenAI's latest flagship text-to-image model. Use the OpenAI-compatible endpoints below.
 
 ### 1. Base URL & Endpoint
 * **HTTP Method**: `POST`
