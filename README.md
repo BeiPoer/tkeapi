@@ -205,7 +205,7 @@ tokensbyte/
 
 许可证：[AGPL-3.0 license](https://github.com/aiqachat/tkeapi?tab=AGPL-3.0-1-ov-file#)](LICENSE)
 
-问题反馈：GitHub Issues
+问题反馈：GitHub Issues   ，wx：qcloud0755  技术支持
 
 TG交流技术支持群：[https://t.me/tokensbyte](https://t.me/tokensbyte)
 

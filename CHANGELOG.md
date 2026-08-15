@@ -1,5 +1,829 @@
 # UPDATE
 
+## 2026-08-15 — 开源版插件配置页不再因 HaLogs 静态导入崩溃
+- `PluginConfig` 改为经 `plugins-registry` 的 `import.meta.glob` 加载高可用日志页，剥离目录时 Vite 不再在 import-analysis 阶段失败
+- 开源构建保留 `HighAvailability/`（`high_availability_channel` 本就是开源插件）
+
+## 2026-08-15 — 支付渠道安装默认中英文副标题
+- 系统全新安装后，在线支付设置未自定义时使用当前站点已配置的渠道副标题：支付宝/微信「快捷 / code pay」，通联「微信/支付宝/信用卡 / wechat/alipay」，Stripe「银行卡/支付宝 / Cards/Alipay」，BonusPay 与 HyperBC「Web3 / Web3」
+
+## 2026-08-15 — 清空数据库后进入与全新安装相同的初始化流程
+- 管理后台「初始化并清空数据库」成功后立即清除登录态，整页进入管理员初始化；清空后不再杀掉后端进程（只清内存缓存），避免本地卡在「服务重启中」
+- 探测接口带超时；若仍短暂连不上，页面提示确认后端已启动后刷新
+
+## 2026-08-15 — 兑换管理列表支持按活动名称筛选查找
+- 管理后台「兑换管理」列表页新增活动名称搜索框，支持输入关键词即时与回车模糊匹配筛选查找对应活动分组；
+- 后端接口 `/redemptions/groups` 增加 `name` 参数模糊过滤与分页计数支持，保持开源与商业版同步。
+
+## 2026-08-15 — 管理后台数据库设置改为只读展示
+- 「数据库设置」只显示当前 PostgreSQL 连接（来自 `DATABASE_URL` / `data/.database_url`），字段不可编辑、不能切换连接
+- 保留「测试连接」（测当前库）和「初始化并清空数据库」：须输入「确认清空当前数据」，再倒计时 10 秒，期间可取消；到期后清空 public schema 并重建表结构，服务重启后需重新初始化管理员
+- 附加信息展示库运行时长、大小、连接数、缓存命中率、事务与站点进程状态；只读目录/共享内存快照，打开或刷新时查一次，不轮询、不扫业务表
+- 「异常计费订正」仍在「数据清理」
+
+## 2026-08-15 — 在线支付设置列表：支付通道中英文配置分组与换行直接编辑
+- 支付渠道列表将「中文配置」与「英文配置」明确分组展示为独立列；中文名称换行显示副标题，英文名称换行显示英文副标题，均支持在列表中直接编辑与失焦/回车即时保存
+- 支付渠道配置详情页同步优化为中英文配置卡片栅格分组布局
+
+## 2026-08-15 — Create Token 页面标题多语言
+- 创建/编辑令牌表单的字段标题、说明、占位与确认弹窗全部走 i18n；缺省词条已写入中/英/繁/日/韩/越语言包
+
+## 2026-08-15 — 管理后台菜单英文补全
+- 侧栏、系统关于开源/商业版、站点插件列表与管理员等级「可见菜单」权限树全部走 i18n；英文词条按中文含义补全（如存储设置、模型渠道分组、系统资金明细）
+
+## 2026-08-15 — 首次安装站点默认时区取浏览器时区
+- 系统尚未初始化管理员时，在管理后台设置首个超级管理员密码并登录，站点默认时区写入当前浏览器 IANA 时区（非法值仍保留服务器默认）
+- 系统运行时区仍固定 UTC（进程 TZ、数据库 `TIME ZONE`、管理端灰框硬编码 UTC）；首次安装只改站点业务时区，不可改运行时区
+
+## 2026-08-15 — 站点语言增加繁體中文
+- 管理后台「基础设置 → 站点信息 → 站点语言管理」在简体中文后增加繁體中文（`zh-TW`），旗帜为香港
+- 控制台、登录页、门户与文档均提供繁體中文界面；缺省词条回退简体中文
+
+## 2026-08-15 — 支付渠道配置返回停留在渠道 Tab
+- 在线支付设置里从渠道配置点「返回」，回到支付渠道列表，不再落到货币设置
+
+## 2026-08-15 — 钱包充值页与支付通道中英文名称
+- 用户端充值弹窗剩余中文文案全部走 i18n，站点语言为英文时不再露出「点击快捷选择」「已选 支付宝」等中文
+- 在线支付设置可为每个支付通道分别填写中文/英文显示名称与副标题；中文站点用中文名，其他语言用英文名（未填则用系统默认）
+
+## 2026-08-14 — 阿里百炼 multimodal 生图响应识别
+- 官方张数认 `usage.output_image_count`；数组计数对齐 `output.choices[].message.content[].image`，避免成功体被判「无有效图片」
+- OpenAI 转换沿用已有 URL 提取与 usage 挂载
+
+## 2026-08-14 — logs 慢查询：task_id 回表与仪表盘今日聚合去重
+- 异步轮询按 `task_id` 先取最新 `id` 再回表，避免大字段 Bitmap Heap 拖垮连接池；补 `(task_id, id DESC)` 复合索引
+- 仪表盘今日 logs 只聚合一次（合计/卡片/模型明细共用），COUNT/SUM/DISTINCT 合并；最近活动不再 `SELECT l.*`
+- pending 轮询补 `is_completed=0 AND status_code=200` 部分索引；`SUM(prompt_tokens+completion_tokens)` 改为分列 SUM 以走 covering
+
+## 2026-08-14 — 用户等级与管理员等级增加搜索
+- 用户等级管理页与管理员等级管理页增加搜索框，支持按等级名称、等级 ID 模糊与精准搜索
+
+## 2026-08-14 — 上游渠道配置支持 NewAPI 分组倍率同步
+- 编辑上游渠道配置时，密钥下方可选手动填写「上游系统」（兼容 / 官方 / newapi / akeapi / 火山引擎 / 阿里云）
+- 选择 newapi 后可用当前地址与密钥拉取分组倍率，选中某一分组写入本渠道倍率；可选每 N 分钟自动同步，以及同步时叠加的增量
+- 已配置同步的渠道，在列表「配置」与「状态」之间展示上游系统、分组倍率、同步间隔与增量
+
+## 2026-08-14 — 模型列表默认按名称排序，新模型暂时置顶
+- 默认按模型名称首字母（中文拼音 / 英文）排列
+- 刚添加的模型暂时排在第一位，刷新或改排序后恢复名称序
+
+## 2026-08-14 — 模型列表：系统预设筛选与安装种子
+- 管理后台「模型列表管理」标题旁增加模型分类筛选：全部模型 / 系统预设 / 自定义
+- 模型表新增 `is_system`；系统预设不可删除（可禁用）；安装时写入 Seedance / Kling 等官方计费与转发规则已绑定的预设模型
+- 火山画质增强等插件预置模型一并标为系统预设
+
+## 2026-08-14 — ComfyUI 渠道多节点与调用规则
+- 渠道「选择上游渠道」支持多选 ComfyUI 服务节点，并下拉选择调用规则（权重优先 / 随机 / 顺序 / 空闲优先）
+- 插件服务节点增加优先级、权重、排序；新增「调用规则」页，可开关上述四种系统规则
+- 提交时按所选规则从已选节点中挑一台；旧渠道仅绑单个 `comfyui_server_id` 仍可用
+
+## 2026-08-14 — 插件配置页去掉标题与 Tab 间空白
+- 管理端插件配置页头取消多余下边距与分隔线，标题紧贴 Tab，少占一截空白
+
+## 2026-08-14 — ComfyUI 节点硬件与队列
+- 管理端「服务地址」列表按节点代理 ComfyUI `GET /system_stats`、`GET /queue`，展示 GPU/显存/内存与运行中、排队任务
+- 队列详情只回传 prompt_id 等摘要，不下发整份 prompt 图
+
+## 2026-08-14 — ComfyUI 工作流与服务节点多对多
+- 导入工作流：「服务节点」可选、可多选，不必先绑节点也能保存
+- 新增/编辑服务节点时可勾选支持的工作流；两边写同一张绑定表
+
+## 2026-08-13 — ComfyUI 服务节点即渠道
+- 渠道分组「开启 ComfyUI」改为选择服务节点（不再选工作流）；节点的地址实时覆盖渠道基址
+- 工作流仍由模型转发规则或该节点已应用的工作流解析；旧渠道仅绑 `comfyui_workflow_id` 仍可用
+
+## 2026-08-13 — 合并 origin/chenzs
+- 并入 HA 日志日期筛选/尝试次数排序、纯成功不入库、402 欠费识别；DashScope 异步头仅 POST；日统计 SQL；火山素材保留天数默认 30
+- 保留本分支 ComfyUI 接入（任务表关联 logs）
+
+## 2026-08-13 — ComfyUI 接入插件
+- 系统增强插件 `comfyui_bridge`：管理 ComfyUI 地址与工作流（画布 JSON 导入后「应用」编译），插件内生成转发规则（不 SQL 预设）
+- 渠道分组可「开启 ComfyUI 渠道」并选择已应用工作流（与火山画质增强同路径）；选渠后走系统 relay，渠道工作流优先于模型转发规则
+- 识别 Save 画布 / Export API / `{workflow}` 包装；多分组按输出节点裁剪（如 FL2VA 与 Ref2VA 不同时跑）；可视化改提示词、尺寸并导入 JSON
+- Relay 仅在 `target_type=comfyui` 时走 submit/poll；轮询日志 `url` 为真实 `GET {base}/history/{prompt_id}`
+- 成片：插件 TOS → 基础设置 TOS → 本地 `/assets/comfyui/`（公开基址落盘时 `infer_base_url`，不入库）
+- 任务日志：JOIN `logs` 展示时间/状态/错误/载荷；`comfyui_jobs.log_id` = `logs.id`，仅存 prompt / 工作流 / 服务 / 成片 URL
+- 轮询失败只落 `execution_error.exception_message`（节点 id/类型），不把 current_inputs 张量写入 logs
+- 下发 ComfyUI 的 `/prompt` JSON 写入 `logs.upstream_req_content`，任务日志可对照用户入参与实际工作流
+
+## 2026-08-13 — pending 结算 CAS 未命中不再二次补偿
+- `record_and_bill_inner`：pending 更新 0 行用 `pending_cas_miss` 区分；已关单时跳过补偿退款，避免无效关单调用
+- `run_daily_stats_loop`：去掉对恒为 Ok 的外层错误分支（失败已在 `sync_daily_stats` 内记录）
+
+## 2026-08-13 — 删除 forward_rules 残留单测
+- 去掉 `forward_rules.rs` 内 `#[cfg(test)]`（keep-system-lean）；业务隐藏规则逻辑不变；保留产品页「通道测试」
+
+## 2026-08-13 — 日清理多批死循环修复与 pending 退款路径合并
+- 素材/上游缓存：本地删除失败或 0 行时停止续批，避免日任务空转死循环
+- `close_pending_and_refund` / `refund_pending` 合并为 `settle_pending_prepay`
+- 每日 UTC 03:00 等待抽 `duration_until_next_utc_hms`；数据清理文案去掉误写的 API 素材
+- DailyStats：0 点窗内未成功则 5 分钟重试，成功后睡到次日零点；HA 无预扣跳过无用行锁
+- 小提炼：`local_ymd_num` 复用；pending 关单日志分支收拢（不改行为）
+
+## 2026-08-13 — 按天清理任务降频并合并空转 cron
+- 火山素材 + TOS 过期并入每日 UTC 03:00 维护（与日志大字段清理同 tick）；日任务内多批直到清空或限流
+- `DailyStatsSync` 改为睡到站点时区次日 00:00，去掉每 5 分钟空唤醒
+- Playground / Playground2026 节点恢复合并为同一 5 分钟 tick
+- 顺带修正每日 03:00 等待为「下一次」而非总是「明天」
+
+## 2026-08-13 — pending 关单退款同行锁读金额，结算 CAS 防双动账
+- `close_pending_and_refund` / `refund_pending`：`FOR UPDATE` 读行内 `cost`/`pre_deduct_gift` 后退款，去掉事务外 SELECT 金额
+- 孤儿/启动恢复只查 `id`；去掉启动恢复对「冻结」的 LIKE 兜底（冻结本为 `status_code=200`）
+- pending 结算 `UPDATE` 增加 `status_code=0` CAS，关单后退款事务整笔回滚，避免覆盖已退日志再扣费
+
+## 2026-08-12 — 异步成功结算与 response_content 同 CAS，防 pending 覆盖
+- `execute_settlement_tx` 结算时同写终态 `response_content`；GET/后台去掉结算后二次 UPDATE
+- 中间态/失败落库经 `persist_open_poll_response`（及级联 S2 失败）仅 `is_completed=0` 可写，避免已扣费日志仍显示 running
+
+## 2026-08-12 — 火山素材清理配置并入数据清理
+- 保留天数改为站点设置「数据清理 → 火山素材保留天数」（`storage.volc_asset_retention_days`，默认 7，0=关闭）
+- 去掉各插件存储页分散配置；定时任务统一入口 `cleanup_expired_volc_assets`
+- 每 10 分钟每类最多 20 条、条间 500ms；遇 429 本批本地不删，且只跳过同一凭证后续类（国际版/上游仍继续）
+- 自动清理仅 `relay_convert` + 上游转素材缓存；**不删** `api_proxy`（用户 API 素材）及用户上传/预设
+
+## 2026-08-12 — 火山素材清理遇限流停本轮并节流
+- DeleteAsset 条间间隔 500ms；识别 429 / AccountFlowLimitExceeded 等限流后立即停止剩余
+- 定时清理改为先云端再本地：限流时本批本地不删，留待下次；单批上限 20
+- 管理端异步批删同样节流+遇限流中止剩余云端调用
+
+## 2026-08-12 — 火山素材库默认 7 天自动清理
+- `asset_manager` / `asset_manager_intl`：定时清理过期 `relay_convert`、`api_proxy`（本地 + TOS 尽力 + 方舟 DeleteAsset）
+- `upstream_asset_relay`：定时清理过期 `upstream_relay_convert` 缓存（本地 + 上游 DeleteAsset）
+- 后台每 10 分钟跑 `VolcAssetRetentionCleanup`；同 asset_id 仍有引用时跳过云端删
+
+## 2026-08-12 — 腾讯云视频：单图未标 role 推断为首帧
+- `tc_collect_video_src` 复用 `infer_image_default_roles`（与方舟等一致）：1→FirstFrame，2→首尾，3+→Reference；显式 role/type 仍优先
+
+## 2026-08-12 — 日志列表不查 plugin_tag
+- `/logs` 列表 SELECT 去掉 `plugin_tag`；展开 `/logs/{id}/detail` 按需返回（用户端仅投影 `client_ct`）
+- 仪表盘最近活动清空 `plugin_tag`；列表脱敏不再投影该字段
+- 前端使用日志 / 任务日志共用 `parsePluginTagMeta`，展开读详情缓存
+
+## 2026-08-12 — 用户列表模型折扣悬停恢复网格 Tooltip
+- 恢复早期友好布局：悬停直接显示完整模型名 + 倍率；`placement=right`、放宽 maxWidth，一次看清无需再悬停名称
+
+## 2026-08-12 — 日志详情超管可见级联 S1 上游任务 ID
+- 使用日志 / 任务日志下拉详情：`plugin_tag.cascade.s1_task_id`；仅 `admin && !admin_group_id`
+
+## 2026-08-12 — logs 短路：先 status 再级联，处理中用 response
+- `try_client_poll_from_logs`：无 status 先打上游；未完成级联 ack 取 `response.stage1` 否则整包；`is_cascade` 紧贴使用处
+- 规范：改根因勿堆兜底（全项目）
+
+## 2026-08-12 — 后台轮询周期可配
+- `RelaySettings.poll_tick_secs`（`prepared` 内 0→30 再钳 5–300）写入「模型调用设置」；TaskPoller 读已缓存字段，保存写穿
+
+## 2026-08-12 — merge origin/cgdev0808 → chenzs
+- 合并门户/日志/用户列表等 cgdev0808 改动与本分支轮询级联精简；冲突处保留双方功能（RelaySettings、支付 Divider TS 修复等）
+
+## 2026-08-12 — 轮询类别直接用 logs.action_type
+- 去掉 `task::infer_category`（path 兜底 + models 表二次查询）；手动/后台轮询与 logs 短路一律用 POST 已写入的 `action_type`
+- `TASK_RELAY_LOG_COLS` 去掉无用的 `endpoint`；`action_type` SELECT 为 `category`，结构体/调用统一用 `category`
+- `task_status` / `sync_single_task` 共用同一套 SELECT 与整行 `log`；去掉 `PollLogView` / `db_log_id` / `model_name` 等中间重命名；缺行错误文案收短为「任务不存在」「渠道不存在」「缺少 model」
+- 轮询/级联：日志与对外文案收短；抽出 `category_hint`；注释去冗（行为不变）
+- S2 无任务 id 兜底 settle：`cascade_poll_target` 返回 `(文案, status)`，优先从 stage2 体推断，无法识别才 500
+
+## 2026-08-11 — 级联 S2 提交入参收成 CascadeS2SubmitCtx
+- `cascade_stage2_submit` / `try_cascade_stage2_submit` 用上下文结构替代 10+ 散参；行为不变
+
+## 2026-08-11 — 级联未完成/失败禁止泄漏 S1 底座成片
+- `cascade_sanitize_for_user`：已完成失败或 S2 无产物 URL 时返回 failed，不再 `cascade_s1_with_s2_url` 回退 S1
+- `try_client_poll_from_logs`：关手动上游时未完成级联只回「处理中」；完成成功须 S2 有产物 URL 才 format 成功体
+- 无产物硬保证收进 `cascade_s2_client_processing`（live/logs 共用）；task 去掉重复 find_urls 兜底；ack 只取 post_response
+- 精简：内联 `cascade_clamp_base_resolution` / `apply_cascade_res_mul_to_stage1`；对外 fps 默认与提交一致为 24
+
+## 2026-08-11 — 手动/后台终态段就地精简
+- GET ~711–951 与 `sync_single_task` 终态：`mut` 压扁链式 `let`、结算用 `match`、对外体用 `(stage, status)`；行为不变（腾讯类别/align 时机/callback 路径保持差异）
+- 仅抽出两处共用的 `persist_cascade_s2_fail`，不再堆单点小函数
+
+## 2026-08-11 — 级联 stage2 无 id：去掉重复结案写库
+- 正常 S2 提交失败已在 `try_cascade_stage2_submit` 结案；轮询再遇无 id 仅 `settle_failure` CAS 补洞，不再二次改 response_content
+
+## 2026-08-11 — task/cascade 解耦精简（结算环 + 共用轮询）
+- cascade 不再调用 `settle_failure` / `execute_refund_tx`；S2 提交失败与无 task_id 由 task 统一结案
+- GET / 后台共用 `run_upstream_poll`、`try_cascade_stage2_submit`；`CascadeMk` 收为 cascade 内部
+- 去掉空 `task_id` 等不变量死兜底；MediaKit 仍复用 `task::poll_task_result`
+
+## 2026-08-11 — 级联轮询目标解析解耦精简
+- `cascade_poll_target` + `cascade_settle_s2_no_task_id` 收口到 `cascade.rs`，手动 GET / 后台轮询共用
+- 去掉 `cascade_resolve_s2_poll` / `cascade_s1_upstream_task_id` / `pick_poll_target` 等碎片 API
+- 上游轮询路径 `db_log_id` 定为 `i64`（无 logs 行时选渠已失败），去掉多余 `Option` 判断
+
+## 2026-08-11 — 手动轮询关上游：缓存无 status 时兜底打上游
+- `try_client_poll_from_logs`：未完成且关「手动轮询请求上游」时，logs 体无任务状态则降级上游，保证轮询响应带实际 status
+- 级联组合缓存仍走组装逻辑；已完成任务路径不变
+- 精简：`format_poll_from_log` 内联进 `try_client_poll_from_logs`（单调用点）；status 校验与组装同层；不新增单测
+
+## 2026-08-11 — 官方路由厂商 callback_url 代理
+- 上游请求体根级含 `callback_url` 时写入 `plugin_tag.cb`，并改写为系统 `/api/v1/relay/vendor-callback/{id}`（`logs` 主键快查）
+- 与入口是否 OpenAI 无关：火山等官方参数可经 OpenAI 路由透传后再识别改写
+- `vendor_callback` **只读** logs、不写库；**级联不转发**用户（由后台轮询 S2 结案后通知）；非级联原文转发
+- 级联 S2 提交不挂 callback，轮询结案后复用 API 同款处理再转发
+- 无回调字段零行为差
+
+## 2026-08-11 — 低余额限制未完成视频：默认关闭 + 档位按单路费用校准
+- 默认改为关闭（运营按需开启），避免新建/缺字段时误开拦截
+- 默认档按单路约 5～10 元：可用额 &lt;20→1 路，&lt;50→3 路；未命中档位即不限制（不再保留其余档占位）
+- 默认关闭时 `max_video_inflight` 直接返回 None，门禁不查在途条数；已保存配置不受影响
+
+## 2026-08-11 — OpenAI 图片响应：Gemini usageMetadata → usage
+- `/v1/images/generations` 同步格式化（`build_openai_sync`）补挂 `usage`；轮询路径原已支持
+- `usageMetadata`（promptTokenCount/candidatesTokenCount/totalTokenCount）转为 OpenAI `prompt_tokens`/`completion_tokens`/`total_tokens`
+- 上游已有 OpenAI `usage` 仍原样透传；仅缺 usage 且有 usageMetadata 时注入，不改其它厂商行为
+- 精简：统一 `resolve_client_usage`；Gemini 只认根级 `usageMetadata`；去掉零值包装 `extract_usage`；同步有用量才挂字段；全库无单测残留
+
+## 2026-08-10 — Relay：时区与 HA 分槽缓存（解耦 get_cached_config）
+- `get_cached_config` 从 `relay/mod.rs` 迁入 `relay_settings.rs`，拆为独立槽：`get_cached_site_timezone` / `get_cached_ha_enabled`（各 60s TTL，按需查库）
+- 热路径只读所需项：计费/额度/任务等只取时区；`calculate_relay_cost` / HA 只取插件开关，避免一次 miss 双查
+- 写穿一致性：保存 `site_settings` → `put_cached_site_timezone`；启停 `high_availability_channel` → `put_cached_ha_enabled`；`relay_settings` 仍写穿
+- 复查：`put`/`fill_miss` 分离，防并发查库盖掉写穿；API 只依赖 `Database`；时区默认复用 `DEFAULT_TIMEDISPLAY`；`resolve_user_timezone` 改走缓存；HA 插件名常量复用
+- 去冗余兜底：缓存层不再二次规范化空时区/空档；空视频档仅在门禁处回落 `RelaySettings::default`；时区空串交给 `parse_timedisplay`
+- 再提炼：`CacheSlot` 复用三槽；`setting_value` 复用 settings 读库；门禁非空档零 Default 分配；不留单测
+- 清理：去掉重复 `default_video_inflight_enabled`（复用 `default_true`）；前端默认档提为常量；全库无 `#[test]`/`*.test.*` 残留（`ChannelTest` 为产品功能保留）
+- 解耦：档位排序/`max_video_inflight` 下沉 `RelaySettings`；缓存层 `get_or_load` 只负责分槽；门禁三行判定
+- 复查：门禁改为「入口类别或模型类型含视频」才生效，去掉多余 category 参数，避免仅靠 type_name 漏拦
+- 行为与默认值（`Asia/Shanghai`、HA 未装视为关）不变；无单测残留
+
+## 2026-08-10 — 模型调用：低余额限制未完成视频路数 + relay 配置缓存
+- 基础设置 → 模型调用设置：可配「可用额低于」金额档与最大未完成视频路数（**0=不限制**），档位可新增/调整
+- 超限文案：`当前余额较低，未完成视频任务过多，请等待完成后再试`（与「余额不足」区分）；金额门禁仍只比钱包可用额 vs 本单预扣
+- `relay_settings` 整份内存缓存（Arc），保存写穿即时生效；手动轮询开关改读缓存，避免热路径反复查库
+- 预扣时机不变（上游成功后再扣），不影响 HA 多子渠失败退款模型
+- 复查：COUNT 走 `sqlx::Error`/`?`；档位加载时规范化排序；去掉热路径档位 clone/重复排序
+
+## 2026-08-10 — 创作中心：方案时长可设区间；属性面板隐藏具体计费名
+- 模型「参数调整」中 slider（如视频时长）可覆写最小/最大/步长，与方案编辑一致
+- 属性配置费率展示隐藏具体规则名，改用通用「计费」标题锚定折扣/峰谷标签
+
+## 2026-08-10 — 清理残留单元测试（keep-system-lean）
+- 删除 `settings.rs` 支付渠道 UI `#[cfg(test)]` 模块与 `user_kyc` 归一化单测；业务函数与支付合并逻辑保留
+- 自检：仓库无 `#[test]` / `*.test.*` / `cfg(test)` 残留；渠道「测试」页 `ChannelTest` 为产品功能保留
+
+## 2026-08-10 — Relay：手动轮询可优先走 logs，降低上游限流
+- 基础设置新增「模型调用设置」Tab（存 `relay_settings`）；开关「手动轮询请求上游」（默认开，兼容现状）
+- 开启：未完成任务手动 GET 仍打上游；关闭：优先返回 logs.response_content（复用 `apply_format` 按路由区分 OpenAI/官方），无有效缓存再兜底上游
+- 已完成任务缓存短路与后台自动轮询/计费结算不变；抽 `build_client_poll_body_from_log` 复用组装逻辑
+- 设置存 `relay_settings`，仅管理端 `/settings/full`，不进入公开接口
+- 精简：完成态与「关上游」合并为一条 logs 优先路径（`||` 短路免多余查库）；`json_poll_response` 去重；无效 JSON 用 `?` 早退；不新增单测
+- 再解耦：`PollLogView` + `try_client_poll_from_logs` / `format_poll_from_log`，去掉 10 参长列表；级联不再 clone stage；调用点一行短路返回；行为不变
+- 再精简：serde 默认复用 `default_true`；失败文案抽取收紧；仓库无单测残留
+
+## 2026-08-10 — 高可用：模型别名分辨率映射 + 映射按钮主题适配
+- 子渠道/默认别名支持「高级」按分辨率映射上游模型名（视频 480p…、图片 1k…），存 `config.res_model_mapping`
+- Relay `resolve_model` 统一接入：分辨率映射 > 渠道/HA 明文别名 > 模型表别名；计费明细与日志形如 `分辨率映射@480p: a ➞ b`
+- 分辨率回退：`子渠该档 → 默认别名该档 → 明文别名`（未填档位不占坑，720p 空则用 `doubao-seedance-1-0-pro` 这类明文）
+- 分辨率抽取收敛为 `extract_resolution`：计费特征与模型别名映射共用，去掉重复的 `peek_resolution`
+- 复查加固：HA 子配 id 解析复用 `ha_config_id_from_aid`；存库/读入分辨率 key 与后端规范化对齐；兼容历史未规范 key；映射命中日志降为 debug（计费明细仍保留）
+- 精简：前端读/存共用 `cleanResModelMapping`；`extract_resolution`/`duration` 按字段按需读取，去掉无节点时的重复扫描
+- 精简复用：`isFilled`/`countFilled`/`pruneRecordKeys`/`patchResScope`；结算侧 `mapping_resolution` 统一图片/视频才带分辨率
+- 去掉过时 `final_result` 分支（现行方舟为根 `usage` / `content.video_url`；仓库无样例、请求体亦不存在该字段）
+- 自检：仓库无 `#[test]`/`*.test.*` 残留；渠道「测试」页 `ChannelTest` 为产品功能保留（按 keep-system-lean 不新增单测）
+- 解耦：请求路径统一 `resolve_model_body`（内聚抽分辨率）；结算/测试仍用 `resolve_model(resolution)`；查找档位抽 `res_alias_in_map`
+- 性能：仅图片/视频（及 native 图片类）走 `resolve_model_body`；聊天/语音/向量等跳过分辨率解析
+- 「收起/高级」按钮去掉 ghost 白边，按明暗主题着色，不影响原有明文别名与 HA 选渠逻辑
+- 修复：`native` Gemini 路径 `body` 为 `Bytes`，改用已解析的 `body_json` 做分辨率窥探（消除 E0308）
+- 修复：分辨率高级面板按**模型类型**选档（图片仅 1k/2k/4k，视频 480p…），不再误用渠道分类 fallback 混出视频档；已配置历史档位仍可展示清理
+
+## 2026-08-10 — 模型广场：免费张数行价格不再显示 [object Object]
+- 根因：有全站折扣时 `formatPrice` 返回 React 节点，却被塞进 i18n `{{price}}` 字符串插值
+- 修复：免费行改为「文案前缀 + formatPrice 节点 + unit_per_image」拼接；不抽与 RateDisplay 的大共用层（两侧格式器不同，易引入回归）
+- 不新增单测（仓库保持精简，无业务测试残留）
+## 2026-08-11 — 门户 cyber_hacker 英雄区光标打字轮播模型名
+- 绿色方块光标改为打字机效果：逐字展示下方支持模型名，停顿后删除再切换下一个
+- 模型名优先读取页面 `.cyber-model-title`，节奏带随机抖动更自然
+
+## 2026-08-11 — 管理端日志列表用户列展示用户备注
+- 使用/任务日志列表：管理员端用户名后直接显示 `admin_remark`（有备注才显示）
+- 接口返回 `user_admin_remark`；普通用户响应脱敏不返回该字段
+
+## 2026-08-11 — 日志记录渠道列改为「渠道信息」
+- 取消「渠道AID」表头筛选漏斗
+- 表头改名为「渠道信息」，单元格展示为 `AID: XXXX`（保留上游标签）
+
+## 2026-08-11 — 用户等级列表行高更紧凑
+- 表格改为 `size="small"`，名称列与操作按钮上下间距收紧
+
+## 2026-08-11 — 普通用户列表增加赠送钱包/信控额度排序
+- 管理后台普通用户列表排序筛选新增：赠送钱包余额 ↑/↓、信控额度 ↑/↓
+- 信控额度排序：仅对额度 > 0 的用户排序（少的在前为 ↑）；额度为 0 的不参与，排在后面
+- 筛选栏 Select/Input/按钮字号与高度对齐日志记录（12px / 32px）
+
+## 2026-08-11 — 站点设置增加控制台 Logo 标题链接
+- 基础设置 → 站点信息：站点 Logo 下方新增「控制台 Logo 标题链接」
+- 控制台侧栏/顶栏 Logo 与站点名可按该链接跳转（支持外链或站内路径）
+- 登录页标题链接留空时回退使用控制台 Logo 标题链接
+
+## 2026-08-11 — 高级营销推荐用户列表对齐消费合计筛选
+- 推荐普通用户列表：钱包改为消费合计；筛选放搜索框后（排序 + 当月/全部）
+- `my-referrals` 返回当月 `current_month_system_cost` / `current_month_gift_cost`
+
+## 2026-08-11 — 普通用户列表消费合计支持全部/当月与排序
+- 钱包列恢复「全部数据 / 当月数据」切换：全部用 used_quota，当月走批量消费统计
+- 新增 `POST /users/consumption/stats_batch`（usage_daily_stats + 当日 logs）
+- 排序筛选增加「消费合计 ↑/↓」（随全部/当月口径变化）
+
+## 2026-08-11 — 普通用户列表钱包展示消费合计
+- 列表页系统/赠送钱包不再展示「总充值」，改为「消费合计」（used_quota / gift_used_quota）
+- 移除列表页钱包「全部/当月」切换及充值统计批量请求
+
+## 2026-08-11 — 普通用户列表支持按系统钱包余额排序
+- 管理后台普通用户列表工具栏新增排序筛选：默认 / 系统钱包余额从高到低 / 从低到高
+
+## 2026-08-09 — 转发规则按站点插件编译/启用来隐藏
+- `/forward-rules`：依赖插件未编译或未启用时不返回对应系统默认规则
+  - `volcengine_enhance` →「火山方舟 级联视频生成」
+  - `asset_manager` →「火山方舟 视频素材转换」
+  - `asset_manager_intl` →「火山方舟 视频素材转换(国际版)」「火山方舟 视频素材免审核转换(国际版)」及同 ns 规则
+- 与插件中心 `is_plugin_compiled` + `is_plugin_enabled` 一致
+
+## 2026-08-09 — 模型广场首屏只保留一次加载菊花
+- 进入 `/home/models`：数据未就绪前不渲染侧栏壳，与 Suspense 全屏菊花衔接，避免「中间菊花 → 热门右侧再菊花」两次加载感
+
+## 2026-08-09 — 侧栏品牌区收拢过渡去挤压
+- 模型广场 / 控制台 / API 教程：侧栏收拢时 Logo+站点名改为固定宽度裁切 + 与图标轨交叉淡入，避免文字先挤压再消失
+
+## 2026-08-09 — API 教程页顶栏/侧栏对齐模型广场
+- `/docs`（RelayAPI）外壳改为与模型广场相同的 Ant Design `Layout` / `Sider` / `Header`
+- 侧栏折叠完全收起（宽度 0，不保留图标轨）；移动端遮罩 + `xs` 断点；折叠状态写入 localStorage
+- 顶栏毛玻璃参数与模型广场一致；侧栏收起或移动端时 Logo 显示在顶栏（淡入衔接，避免硬切闪屏）
+- 收拢时侧栏/顶栏品牌区固定内容宽度 + 外层裁切，避免站点名被挤压变形
+
+## 2026-08-09 — 在线支付设置重构：渠道列表 / 排序 / 展示配置
+- 管理后台「在线支付设置」改为「货币设置 + 支付渠道」两 Tab；原各网关独立 Tab 改为列表整页配置
+- 渠道支持排序权重（数字越大越靠前）、启用开关、用户端显示名称 / 副标题 / Logo URL（留空用默认）
+- 通联支付合并为单一渠道：后台配置可分别开微信/支付宝；用户端先选「通联支付」，仅双开时再选子方式
+- 新增 settings 键 `payment_channels_ui`；公开接口增加 `payment_channels`（含 `allinpay_methods`）
+- 用户充值弹窗按后台排序与展示配置渲染
+- 下单校验：通联子渠道在 merge 旧拆分配置后再判断，避免未迁移数据绕过关闭状态
+
+## 2026-08-08 — 充值类型多语言：方舟视频消费/退款
+- `rechargeTypeLabel` 固定读默认 `translation`（不吃调用方 ns）；修复管理端钱包明细仍显示 `ark_video_*` 原始 key
+- 文案/颜色/筛选收敛到 `utils/rechargeType`；扩展类型只改工具与 locale
+
+## 2026-08-08 — 方舟对账：token + 时间双条件精准匹配（统一规则）
+- 命中须同时满足：`Count`→整数 token（`47.311`↔`47311` 或裸 token）且创建墙钟（UTC+8）5 分钟槽对齐 ExpenseTime
+- 对账入口收敛为 `bill_matches_video(bill, video)`；墙钟/`ceil_5min`/`expense_bounds` 三件套，去掉多层薄包装
+- 冲突更新同步刷新 `created_time`，便于延迟对账重匹配
+
+## 2026-08-08 — 方舟视频监控：预扣入账精简与复查加固（与网关相互独立）
+- 本插件只按任务合计做 `used−max(charged,流水)` 增量扣/退，不对接 TaskPoller/`logs`
+- 估算：tokens 未变则冻结；完整名 `…1-0-pro-fast…`→4.2、`…1-0-pro…`→15；非成功状态金额清零
+- 换绑用户/接入点：只写 `wallet_ledger_after` 隔离旧流水，**不改** `used`/`charged`（后台曾清零会导致同 ep 换用户全量重扣；换 ep 由同步重算 + 虚退跳过消化）
+- 对账：已确认任务不进匹配池（金额以账单确认为准）；去掉无效的「误标 false 拉回」循环（池内已无 confirmed）
+- 查询减压：对账只加载待估算任务的 `raw_response`；已确认仅取 task_id；迁移 `ark_monitor_ledger_after_and_indexes_v1` 合并流水起点列与热点索引
+- 入账解耦：`plan_ark_wallet` 纯决策与 IO 分离；预扣/退款/虚退共用同一执行路径，行为不变
+- 运维注意：只删 `ark_video_tasks` 而保留流水/锚点时，同步可能不再扣（视为已扣过）；需重扣须同步清锚点与相关流水
+
+## 2026-08-08 — 方舟视频监控：堵住虚退款导致钱包暴增
+- 根因：`wallet_charged_quota` 锚点远大于真实已扣流水时，`apply_binding_wallet_delta` 无上限退款（`ark_video_refund`）把差额加回 `balance`（例：1000+600000−1211≈599789）
+- 修复：退款封顶为 `max(0, 本绑定流水净扣 − used_quota)`；封顶后仍校正锚点；换绑切断旧流水且不改锚点（见上条复查）
+- 展示：钱包「充值」排除 `ark_video_*`；「消费合计」叠加方舟净消费；finance 批量充值统计同步排除
+- 已误入账余额需管理员按流水核对后手工拨回（代码不自动改历史 balance）
+
+## 2026-08-08 — 方舟监控：估算预扣 + 对账多退少补（纠正总消费变 0）
+- 流程：拉视频估算即预扣；新视频只扣 `used−charged` 增量；分账确认（`is_estimated=false`）后按差额退/补
+- 修正：恢复汇总含估算（总消费不再因「只计实价」变成 0）；`1-0-pro` 估算单价 4.2；脏锚点不虚退；锚点已=used 但流水仍多扣时补退
+
+## 2026-08-08 — 方舟对账：仅精准匹配才确认，取消错误分摊改 false
+- 根因：`updated_at` 漂移导致 Count=47.311(千token)=47311 匹配失败；失败后比例分摊把多条视频都标 `is_estimated=false`，钱包按错误合计扣费
+- 修复：按创建时间升序 + ExpenseTime 窗口/5 分钟对齐精准 1:1；只有命中才 `is_estimated=false`；未匹配保持估算、不再分摊写库；DB 重建带 `total_tokens`
+
+## 2026-08-08 — 方舟估算单价：恢复 1.0-pro=15 / pro-fast=4.2，新增 2.5=70
+- `doubao-seedance-1-0-pro`→15、`1-0-pro-fast`→4.2（先匹配 fast）；`doubao-seedance-2-5`/`2.5`→70（在线·输入无视频）
+- 复查：退款入账抽 `apply_ark_system_refund`；误标 false 仅在有未核销账单时拉回估算态且不改金额；匹配优先待对账再按创建时间
+
+## 2026-08-08 — 新增模型折扣限价默认开启
+- 管理后台添加模型时，「折扣限价」默认开启，倍率默认 `1.0`
+- 后端创建接口缺省值与库列 DEFAULT 同步为开启 / `1.0`（不影响已有模型）
+
+## 2026-08-08 — 用户实名认证 KYC
+- 注册设置新增「开启用户实名」开关（`enable_user_kyc`）
+- 管理后台普通用户编辑新增「用户实名」Tab：个人/企业证件、有效期、审核状态
+- 个人中心在开关开启后展示账号实名认证；用户可提交，管理员可录入与审核
+- 新增表 `user_kyc`；证件上传走系统 TOS（`/user/kyc/upload`）
+
+## 2026-08-08 — 去掉 ve-tos-rust-sdk，TOS 全走 reqwest 0.12 + TOS4
+- 删除 `ve-tos-rust-sdk`（及其 reqwest 0.11 / hyper 0.14 双栈）；`services/tos.rs` 共用 `signed_request`
+- 公开 API 不变：连通性 / 上传（x-tos-acl + x-tos-tagging）/ 删除 / 标签 / 列目录 / 预签名
+- 修复：去掉 SDK 后丢失传递的 `tokio/rt-multi-thread`（tokio 已 `default=[]`）；`Cargo.toml` 仅补该特征（+原有 fs/signal），避免 `#[tokio::main]` 编译失败且不扩大特征面
+- 签名对齐 SDK：Authorization 恒 empty payload hash；SignedHeaders 仅 host / content-type / x-tos-*
+- 创作中心删项目：先取 `tos_object_key` 再删库；`purge_prefix` / `spawn_purge` 汇总真实成功失败（不再吞错）
+- 精简：无 `#[test]`/`*.spec` 残留可删；去 assets 孤儿注释；TOS4 HMAC 复用；收紧 purge 模块可见性
+- `signed_request`：网络错/408/429/5xx 最多再试 2 次（100ms 起短退避）；公开 API 与预签名不变
+- TOS HTTP Client `OnceLock` 复用；重试循环去不可达尾部分支
+- 修复创作中心删项目 TOS 漏删：删库前用项目 uid + object_key/file_url；404 不计 deleted_ok
+- 修复 ListObjects `SignatureDoesNotMatch`：query 用 `Url::query_pairs` 编码，签名与发送同一字符串（含 tagging）
+- 复查完善：删项目取资源 key 失败不再 `unwrap_or_default` 吞错；`list_folder` 续页；purge 去重后并行删；标签 PUT 补 `Content-Type: application/json`
+- 再精简：删项目依赖 assets `ON DELETE CASCADE` 去掉重复 DELETE；TOS `request_host_path` 合并 Path/VHost；HMAC 少分配；list query 零拷贝字母序
+- 去掉无用兜底：ListObjects 不再 JSON 回退 / `<Code>` 启发式；ListBuckets JSON 仅 `{` 体且单路径 `Buckets[].Name`
+
+## 2026-08-07 — 级联 720p←480 裁剪开关 crop_480p
+- 转发规则新增 `crop_480p`（缺省 true）：仅目标 720p 且底座 480p 时是否 MediaKit 居中裁剪；false 跳过
+- 其它分辨率不受影响；现网未配置规则保持裁剪行为不变
+
+## 2026-08-07 — POLL_FAIL_LIMIT=15（防漏终态成功）
+- TaskPoller / `poll_task_result` 连续失败上限改为 15，上游短暂抖动时不轻易退款或放弃
+- 倒序休眠 5→1s、级联裁剪/抽帧与增强路径不变
+
+## 2026-08-07 — 复查：cascade_resolve_enhance key 只规范化一次
+- `cascade_resolve_enhance` 分辨率 key 只规范化一次（语义不变）
+
+## 2026-08-07 — 清理根目录一次性探测/部署脚本（无产品依赖）
+- 删除含硬编码 SSH 凭据的孤儿脚本：`check_*.py` / `auto_deploy.py` / `*_deploy*.sh|exp` / `find_project*` / `upload_fileio.py` / `final_install.sh` 等
+- 正式路径仍用 `deploy.sh` / `export-images.sh` / `push-images.sh` / `dev.sh`；产品「通道测试」保留；业务单测仍为 0
+
+## 2026-08-07 — 轮询/级联再精简（无行为变更）
+- 删单调用薄包装：`cascade_ai_enhance_allowed` / `cascade_s1_480p_crop_rect` / `cascade_root_str` / `cascade_json_raw_str`；延迟公式并入 `poll_wait_before_query`
+- 裁剪判定并入 `cascade_ensure_standard_480p_video`；文档旧名 `cascade_mediakit_tool` 更正为 `cascade_mk_url`
+
+## 2026-08-07 — 轮询/级联 MediaKit 参数收口（无行为变更）
+- `PollTaskOpts` 收口 `poll_task_result` 可选参（缺省 300s，MediaKit 用 Default）
+- `CascadeMk` 捆 `(http, ch, auth_type)`；裁剪/抽帧共用；删薄包装 `cascade_target_resolution` / 单调用 `processing_json_from_submit`
+
+## 2026-08-07 — 任务轮询倒序休眠 5→1s（POLL_FAIL_LIMIT 共用）
+- `poll_task_result`：每次查询前休眠 5→4→3→2→1s；连续失败改用共用 `POLL_FAIL_LIMIT`（现为 15）
+- 级联裁剪/抽帧（`cascade_mk_url`）状态轮询共用；阶段二增强仍由 GET/TaskPoller；素材转换 / POST 提交重试不套用
+
+## 2026-08-07 — 级联 MediaKit 收口为 cascade_mk_url（无行为变更）
+- 裁剪/抽帧共用 `cascade_mk_url(..., out_ptr)` 直接取产物 URL；抽帧逻辑并入 `cascade_on_s2_succeeded`
+- 去掉中间 JSON 返回层与单用 attach helper
+
+## 2026-08-07 — 级联/响应路径可见性收口（无行为变更）
+- `cascade.rs` 仅模块内使用的 helper 降为私有；`push_unique` 改为文件内私有
+- 全库无 `#[cfg(test)]` / 业务单测残留；产品「通道测试」页面保留
+
+## 2026-08-07 — 级联增强 S2 成功后按需刷新尾帧图
+- S1 有尾帧时对 S2 `/result/video_url` 抽尾帧，仅写入 stage2 `last_frame_url`（落库 stage1 保持原图）
+- 客户端 / 用户端经 `cascade_s1_with_s2_url` 叠尾帧；GET/后台共用 `cascade_on_s2_succeeded`
+- MediaKit 工具收口 `cascade_mk_url`（曾用名 cascade_mediakit_tool）；抽帧失败软降级
+
+## 2026-08-07 — FailBill 工厂 + spawn_protected（含 native，保行为）
+- `FailBill::transport` / `http` / `biz` + 短链，六模态（含 native）park 字面量收口
+- `spawn_protected` 收 oneshot 连接保护样板；native/chat 计费短 spawn 仅清晰命名，不强套 oneshot
+
+## 2026-08-07 — TaskPoller 周期改为 30 秒
+- `POLL_TICK_INTERVAL_SECS`：15 → 30；活跃窗口 / 分批 / 失败退款逻辑不变，客户端主动 GET 仍即时
+
+## 2026-08-07 — relay spawn 捕获写法收口（保连接保护）
+- 保留 `tokio::spawn`（客户端断开仍完成上游/预扣/落库）
+- 去掉 `_c` 再赋值；改为 spawn 块内一次 `clone` 成最终变量名（video/audio/generic/image/chat）
+
+## 2026-08-07 — 精简：去掉 playground_2026 残留单测
+- 删除 `standalone_path_tests`（`#[cfg(test)]`）；保留产品功能「通道测试」页面；业务路径不变
+
+## 2026-08-07 — HA 实现再收口（保行为）
+- 去掉首败上多余的 category/billing 快照；续试退预扣收成 `refund_continue`
+- 保留：末次强制停切、预扣清零防双退、首败 `endpoint`、chat 预扣走 `on_access_err`
+
+## 2026-08-07 — HA 终态正确性修补（行为对齐首败）
+- 末次尝试强制停切并在 `fail` 内 settle；续试退预扣后清零首败预扣，杜绝 finish 双退
+- 首败 `endpoint` + `FailBill.prefer_status`/响应贯通 settle；chat 预扣走 `on_access_err`+`break`
+- 不另造 audio 透传专用 HA API（原生 TTS 仍 Ok→`ha.ok`）
+
+## 2026-08-07 — HA API 解耦精简（行为不变）
+- 首败合一 `FirstFail`；`settle_first` 取代 `bill_first`；`HaAttempt::park` 合并 stash+err_of
+- `HaBillCtx::new` + `category`/`billing_model`/`db` 链式补参，端点不再堆满可选字段字面量
+
+## 2026-08-07 — 修复 HA 终态落库丢入参/上游体/响应
+- 保留首败 `FailBill` 至环结束写入；禁止把 `upstream_url` 误写入 `upstream_req_content`；无账单时响应用首败错误体
+
+## 2026-08-07 — 去掉未使用的 record_zero_cost_upstream_fail
+- HA 已统一 `FailBill`/`err_of`/`ha.fail`，该薄封装无调用方；保留 `record_zero_cost_fail` 终态/业务侧记账
+
+## 2026-08-07 — HA 记账参数收口为 HaBillCtx
+- `fail` / `finish` / `bill_first` 共用 `HaBillCtx` 命名字段；去掉 `FirstUpstreamFail` 无用 channel 字段；`ok` 的 url 改为 `&str`
+
+## 2026-08-07 — HA 插件日志路径精简
+- 选渠注入子配 `name`，snap 不再逐次查 `channel_configs`；`ok` 内含 `save`；去掉 FailBill 无意义 clone
+- `get_ha_logs` 合并重复 SQL；语义不变：中间失败不写 logs，环结束一条 `ha_usage_logs`
+
+## 2026-08-07 — HA 一条日志 + 插件收口
+- `set_pending` 禁止 `None` 覆盖；六模态统一复用同一 pending，杜绝重试再 INSERT
+- `finish` 异步收口：pending 仍为处理中时补记首败并写 `ha_usage_logs`（修复选渠耗尽/异常退出丢插件日志、主站卡「处理中」）
+
+## 2026-08-07 — HA 插件日志仅记真实 HA 渠
+- `ha_usage_logs` 写入条件改为实际命中 HA 组/子渠；令牌开 HA 但走物理渠不再入库
+
+## 2026-08-07 — HA 终态落库 + 插件使用日志
+- HA 中间失败不再反复 UPDATE `logs`，环结束一次记成功/首败；非 HA 行为不变
+- 新增 `ha_usage_logs`（关联 `logs.id`，`attempts` JSON 含子渠错误/URL/YID 等）及插件「使用日志记录」Tab
+- 去掉 `reinstate_first_log`；上游失败收口为 `HaAttempt::fail` / `save`
+
+## 2026-08-07 — 根目录精简：去掉冲突修补脚本与本地杂物
+
+- 删除 `fix_conflicts.sh`（一次性冲突标记剥离，非产品路径；开源打包排除项同步去掉）
+- 清理本地已忽略的 `*.log` / `.DS_Store` / 空 `opensource/`；不删 `backup/` 大备份与运维部署脚本
+
+## 2026-08-07 — 合并 origin/cgdev0726 到 chenzs
+
+- 保留本分支 MediaKit `volcengine_enhance_logs` 关联表与日志恢复
+- 合入对方创作中心 2026 工作流/作品/生成图视频、导出脚本与导航等改动；迁移块并存互不覆盖
+
+## 2026-08-07 — 精简复查：无单测残留；MediaKit 日志 UI 轮询复用
+
+- 全仓确认无 `#[cfg(test)]` / `#[test]` / `*.test.*` / `*.spec.*`（保留产品页 ChannelTest）
+- `VolcengineLogs`：数据恢复状态轮询合并为 `beginRecoverPoll`，去掉重复 interval 逻辑
+
+## 2026-08-07 — MediaKit 关联日志小收口（行为不变）
+
+- 列表 FromRow 去掉未查询的大字段占位；回填 keys 只补 `model_id`；空结果免二次 COUNT；回填 INSERT 去掉与 NOT EXISTS 重复的 ON CONFLICT
+
+## 2026-08-07 — 去掉 MediaKit 无用的 plugin_tag 根 mid
+
+- `video.rs`：不再写入 `plugin_tag={"mid":…}`（列表已改关联表，业务不读根 mid）；保留快乐小马 / 级联 `cascade` 标记
+- 关联写入、回填、计费与展示路径不变
+
+## 2026-08-07 — 火山 MediaKit 使用日志改为 logs.id 关联表
+
+- 新建 `volcengine_enhance_logs`（主键 `log_id` = `logs.id`）；列表 COUNT/分页走窄关联表再 JOIN，避免大表 `model=ANY` 扫全库
+- 写入：`video` pending 落库后对 `volcengine_media_enhance` 幂等关联
+- 插件「使用日志记录」Tab 增加「数据恢复」：后台分批回填历史 logs（按预置 mid/model_id），不阻塞页面
+
+## 2026-08-06 — 级联 cgt 复查修复（行为对齐、无多余超时）
+
+- `force_json_task_id`：根已有 `task_id` 时与 `id` 同步为对外号（对齐 `find_id` 优先级，避免 bill/OpenAI 提交态仍落到上游号）
+- 级联 S1 中间态/失败落库同步 cgt；用户日志脱敏仅在真实级联时强制改写 id
+- `cascade_apply_processing_status` 复用 `force_json_task_id`；裁剪轮询超时保持 **300s**（撤回误扩到 600）
+
+## 2026-08-06 — 精简复查：无单测残留；级联 helper 可见性收口
+
+- 全仓确认无 `#[cfg(test)]` / `#[test]` / `*.test.*` / `*.spec.*`（保留产品页 ChannelTest）
+- 级联：仅模块内使用的 helper 曾改为私有；其后 `cascade_json_raw_str` / `cascade_processing_json_from_submit` 已删除（逻辑并入调用方）
+
+## 2026-08-06 — 级联对外任务号 cgt-xx-xx（隐藏上游 S1 id）
+
+- 对外 id：`cgt-{YYYYMMDDHHmmss}-{5位随机}`；S1 真 id 仅 `plugin_tag.cascade.s1_task_id`（scrub 保留；用户 plugin_tag 白名单不含 cascade）
+- POST 改写响应体 `id` 后按原规则落库；S1 轮询成功写入 `response_content` 时再把 `id` 换成同一 cgt
+- 取消接口不做级联特殊处理
+
+## 2026-08-06 — 异步轮询响应加速（功能不变）
+
+- TaskPoller 周期 30s → **15s**，无人主动 GET 时更快结案 / 触发级联 S2
+- `poll_task_result`：**立即首查**再 2s→5s 递增间隔（原先睡再查，同步图/裁剪/通道测试更早看到终态）
+- 级联裁剪 POST 临时错：固定 10s → **2→4→8→10s**
+- Playground 轮询 5s → **3s**；次数上限按比例提高，软超时墙钟仍约视频 60min / 图片 15min
+
+## 2026-08-06 — 级联 S2 临时错重试改为递增短退避
+
+- `cascade_stage2_submit`：可重试错误仍最多 5 次、可恢复码不变；等待由固定 120s 改为 **10→20→40→60s**（总睡眠约 130s，原约 480s）
+- 临时限流/上游抖动仍可在重试窗口内成功提交；单次等待更短，缩短级联墙钟
+
+## 2026-08-06 — 创作方案：补齐 OpenAI 图片/视频系统预设
+
+- 图片：强化系统方案 `gpt_image_2` 为「OpenAI 图片生成方案」，覆盖文生/图生常用参数（含 style、response_format、transparent 背景等）
+- 视频：新增系统方案 `openai_video`（OpenAI 兼容/Sora），预设 size、duration、resolution、ratio、watermark；图生参考图仍由画布素材写入 `images`
+- 仍由 `load_schemes_from_db` 自动合并 `is_system` 种子，无需手工迁移；重启后端后管理端可见
+
+## 2026-08-06 — relay 日志级别与素材转换小收口
+
+- `relay` 下原 `tracing::debug!` 改为 `info`（常规跳过/进度）或 `warn`（选渠预设缺失）
+- `asset_convert`：插件不存在/未启用合并为同一跳过分支
+
+## 2026-08-06 — ha.rs 轻量收口（行为不变）
+
+- 常量上移归并；`HaTimeoutCtx::remaining` 复用剩余预算计算；`resolve` 用 filter/map 收紧
+- 去掉仅调用一次的 `push_exclude`；`begin` 日志直接用已算好的 `budget_secs`
+- 按仓库精简规范：不新增留存单测
+
+## 2026-08-06 — 精简：无单测残留；去掉超时薄封装与单测措辞
+
+- 全仓确认无 `#[cfg(test)]` / `#[test]` / `*.test.*` / `*.spec.*`（保留产品页 ChannelTest）
+- `http_client`：合并 `upstream_timeout` 薄封装进 `upstream_timeout_duration`；删除已无调用的 `with_upstream_timeout_if`
+- `is_asset_api_enabled` 注释去掉「便于单测」措辞（业务函数，非测试入口）
+
+## 2026-08-06 — HA 墙钟预算：嵌套转发避免 504 吞掉上游真实错误
+
+- 根因：深站 HA 在首败（如火山 `InternalServiceError`）后继续切子渠，墙钟被入口 Nginx（常见 600s）切断，中游只收到 504 HTML，无法透传首败 JSON
+- `HaAttempt` 增加整次墙钟预算（仅 failover 开启；`ha_total_timeout_secs`，0=自动 `min(540, 上游超时-60)`）：预算耗尽立即 `finish` 首败；首次尝试仍用全局上游超时
+- 备渠超时：`HaTimeoutCtx::resolve()` 在真正 send 前按剩余墙钟重算（避免 image transform 等前置耗时把超时算得过宽）
+- 非 HA / 未开 failover 不启用预算，行为与原先一致；多厂商 HA 遇短暂 502/504 仍可按预算切换
+- 去掉已无调用方的 `with_upstream_timeout_if`；下载超时复用 `with_timeout`
+- 插件配置/后台 UI 增加「HA 整次墙钟预算」；黑名单提示补充 `InternalServiceError` 等平台级错误码
+
+## 2026-08-06 — 清理测试残留与仅测用可见性
+
+- 确认全仓无 `#[cfg(test)]` / `#[test]` / `*.test.*`（保留产品页 ChannelTest）
+- `period::quota_day_key_with_cutover_at`、`BillingRule::multiplier_at_local_time` / `time_multipliers_enabled` 改为模块内私有（原为单测入口）
+
+## 2026-08-06 — OpenAI 响应 status 约定收口
+
+- 异步轮询/结案（`is_poll=true`）：一律 poll 骨架，带正确终态 `status`；`error`+成功类 → `failed`
+- 异步 POST 提交 ack：仅当上游响应自身有 task_id 时输出 `status:pending`（勿用 log_id 冒充）
+- 同步成功：无 `status`；同步/POST 业务错误为纯 `error` 体
+- 级联处理中响应额外去掉 `data`，避免误带出产物 URL
+- 参数由易混的 `is_async_submit` 更名为 `is_poll`；`resolve_created` / poll 内一次 `find_urls` 复用
+
+## 2026-08-05 — HA finish 保留首败头；合并 upstream_fail
+
+- HA `finish()`：业务侧原样；全失败优先返回首次 `UpstreamHttpError`（保留响应头），兜底按 `first_fail` 重建
+- `upstream_fail` / `upstream_fail_with_headers` 合并为三参 `upstream_fail(status, msg, headers)`
+
+## 2026-08-05 — 合并 record_zero_cost_upstream_fail 双入口
+
+- 去掉 `record_zero_cost_upstream_fail_hdr`，统一为 `record_zero_cost_upstream_fail(p, headers)`；无头传 `None`
+
+## 2026-08-05 — 清理无用单元测试模块
+
+- 删除 `time_system/period`、`models/settings`、`models/model` 内 `#[cfg(test)]` 模块；业务逻辑不变
+
+## 2026-08-05 — Relay 透传上游响应 Header
+
+- 新增 `relay/upstream_headers`：过滤 hop-by-hop / body 绑定头后，将上游诊断头（如 `x-request-id`、`x-client-request-id`）挂回客户端
+- 覆盖 chat / responses / image / video / audio / generic / native / SSE 成功路径；上游 HTTP 失败经 `UpstreamHttpError` 可选携带同源头
+- 不转发 `content-length` / `content-encoding` / `content-type`（body 由网关重建），避免与计费改写、解压冲突
+- 提炼 `is_sse` / `is_stream_content_type` / `header_str` / `with_content_type`；SSE 用 insert 覆盖 Cache-Control，避免重复头
+- 修复 HA `finish()` 经 `upstream_fail` 重建导致丢失上游响应头；`AppError::IntoResponse` 一次匹配拿走 HeaderMap 避免 clone
+
+## 2026-08-05 — 后台 TaskPoller 周期 120s → 30s
+
+- 未结算异步任务自动检查间隔由 2 分钟改为 30 秒（`POLL_TICK_INTERVAL_SECS`），加快结案/退费；分批上限与失败计数逻辑不变
+
+## 2026-08-05 — apply_format 去掉未用 pool 并改为同步
+
+- 确认 `apply_format` 的 `_pool` 从未使用且体内无 await：去掉 pool，改为同步 `fn`
+- 连带 `format_async_task_failed` / `ensure_client_async_failed` / `cascade_s2_client_processing` / `cascade_format_s2_succeeded` 同步化并去掉仅透传的 pool；调用点去掉无意义 `.await`
+
+## 2026-08-05 — task 日志查询内联单次 helper
+
+- `load_task_relay_log_by_task_id` / `load_task_relay_log_by_id` 仅各一处调用，内联到 `task_status` / `sync_single_task`；共用 `TASK_RELAY_LOG_COLS` / `format_task_relay_sql` 保留
+
+## 2026-08-05 — 级联 720p/1080p 底座可同档
+
+- 目标 720p：底座可选 `480p`/`720p`（默认 480p）；1080p：可选 `720p`/`480p`/`1080p`（默认 720p）；2k/4k 不变
+- 前后端 `BASE_OPTIONS` / `cascade_allowed_bases` 对齐；480→720 裁剪仅在底座实为 480p 时触发
+
+## 2026-08-05 — 级联 480p 非大模型超分改用 resolution_limit
+
+- 级联阶段二：目标 480p 且非大模型（非 vve-gt）时，MediaKit 入参用整型 `resolution_limit=480`、不传 `resolution`，锁定标准 480p 增强
+- 其它目标分辨率仍传字符串 `resolution`；`build_volcengine_media_enhance_body` 透传 `resolution_limit`
+
+## 2026-08-05 — 异步失败约定：200 + status:failed；轮询 500 可重试
+
+- 约定：异步业务结案失败对外 HTTP **200** + body **`status:failed`**（含 id/error）；传输层临时错仍非 2xx
+- `format_openai` / `is_failed_task_status` / `format_async_task_failed` / `force_json_task_id` 收口 `response_formatter`
+- 级联：`cascade_stage2_submit`、`cascade_resolve_s2_poll`、`cascade_format_s2_succeeded` 迁入 `cascade.rs`；InflightGuard 私有化；GET/后台 `pick_poll_target` 共用
+- live/缓存失败统一 `ensure_client_async_failed`：上游无 status 时补齐，已有 `status:failed` 则保留
+- `tencent_aigc_task` 收口 ErrCode/Message/FileInfos/TaskId；`is_poll_transport_retryable`（含 500/502）供轮询 / S2 POST / 裁剪复用
+
+## 2026-08-05 — 高可用：参数上限放开 + 报错停止切换黑名单
+
+- Failover 参数：去掉最大切换次数上限（原 1～100）与冷却秒数前端下限（原部分 min=5）；仅保留次数 ≥1、秒数 ≥0
+- 新增「报错信息停止切换黑名单」：错误信息命中关键词后立即停止备渠 Failover（不熔断），避免同源业务错误空耗；白名单仍为「跳过熔断、可继续切换」；缺省空列表，首次保存时写入 `plugin_configs`
+- 名单关键词：保存/加载时 trim、去空、按小写去重，避免空白词误命中；内存侧去掉多余 `Arc`（`AppState` 已包一层）
+
+## 2026-08-05 — 级联超分：大模型增强仅限 720p/1080p/2k
+
+- 转发规则管理页：增强选项中「大模型」仅在 720p、1080p、2k 可选；480p/4k 不展示且解析时回退标准
+- 后端 `cascade_resolve_enhance`：对不允许分辨率上的 `ai` 配置兜底为标准版，避免 JSON 直配绕过
+
+## 2026-08-05 — 级联 S2 解析/出参拼装收口（无行为变更）
+
+- `cascade_s2_parse_post_200` / `CascadeS2Post200Fail`：HTTP200 有无 task_id、业务错分类收口；文案与状态码仍在 `task.rs`（不引入 cascade↔proxy 耦合）
+- `cascade_upstream_req_combined`：成功/失败共用 stage1+stage2 出参拼装；裁剪提交分支略收紧，语义不变
+- S2 终态退款前统一 `normalize_error_http_status`：HTTP 4xx/5xx 原样落库；非 HTTP 业务码经 `infer_error_status_code` 转换后再规范化，与日志 `status_code` / 轮询失败路径一致
+- 裁剪判定：目标仍仅 720p；ratio 允许 S1 缺省时从上游出参/用户入参补齐；不误用入参 `resolution=720p` 挡裁；目标分辨率解析收口 `cascade_resolve_target_resolution`；非 200 错误文案统一 sanitize
+
+## 2026-08-05 — 峰谷时段倍率：开关生效、请求开始锁定
+
+- 后端仅在 `enable_time_multipliers=true` 时应用 `time_multipliers`；关闭开关后脏数据不再计费
+- 倍率在请求开始（取规则时）锁定；写入 `billing_features.time_multiplier`，异步结算优先用快照，避免长任务跨峰谷变价
+- 计费明细与金额一致：已乘过价不再重复追加「时段倍率」文案；渠道测试预览同步展示峰谷倍率
+- 管理端：开启峰谷时须至少配置一条有效时段；说明文案同步为「请求开始锁定」
+
+## 2026-08-04 — 级联 S2 失败透出真实错误并落库 stage1/stage2 出参
+
+- 阶段二 HTTP200 无 task_id：优先识别上游业务错误体并透出真实 message（不再笼统「提交成功但未能解析」）
+- 阶段二失败时同样写入 `upstream_req_content={stage1,stage2}`（尊重 enable_log），避免日志出参只剩阶段一请求体被误判为「丢了 stage」
+- 无结构化错误时 warn 截断响应体便于排查；裁剪策略不变（仅 480→720）
+
+## 2026-08-04 — 上游日额度自定义刷新时刻与冷却
+
+- 上游渠道配置支持配置每日刷新时间点与冷却分钟（有效刷新 = 时间点 + 冷却）
+- 日额度旁齿轮弹层编辑；选渠/扣费/退款按站点时区切点懒重置；默认 00:00 / 冷却 0 行为不变
+- 日键算法回退多天，正确处理冷却跨午夜；迁移：`channel_configs_daily_reset_cutover_v1`
+- 刷新时间点按站点默认时区（非系统运行时区）；开启「显示时区后缀」时标签追加 `(UTC+8)` 一类标记
+- 刷新设置改为独立弹窗（保存/取消）；日额度旁直接展示刷新时刻与冷却摘要
+
+## 2026-08-04 — 上游渠道配置弹窗布局紧凑化
+
+- 添加/编辑上游渠道配置弹窗改为多列紧凑布局：名称与服务商、分类与排序/状态、倍率/优先级/权重与额度开关同行
+- 冗长 `extra` 说明改为标签 Tooltip；表单 `size="small"`、收窄宽度与间距
+
+## 2026-08-04 — 异步轮询临时错可重试 & 级联 480→720 裁剪收口
+
+- GET 与后台轮询对临时 HTTP（429/502/503/504）及连接失败统一可重试，避免一次轮询失败立刻退费导致上下游账不一致
+- 业务终态仍立刻退费；成功轮询清零 `POLL_FAIL`；满限后若仍冻结则幂等补退
+- 错误 HTTP 状态统一 `normalize_error_http_status`（仅 4xx/5xx，其余 502）；文案兜底识别 `too many requests`
+- 级联：仅 480→720 且 S1 为 480p+16:9/9:16 时 MediaKit 居中裁标准 480p；480→480 等跳过
+
+## 2026-08-03 — 腾讯云视频转发兼容可灵官方 contents/settings
+
+- 仅 `tencent_vod_video`：可灵新协议经腾讯云转发时，从 `contents[{type:prompt}].text` 提取 `Prompt`，避免上游 `Prompt cannot be empty while FileInfos is empty`
+- `settings.resolution` / `duration` / `aspect_ratio` / `audio` 映射到 `OutputConfig`；`contents` 中首尾帧/参考图/参考视频映射到 `FileInfos`（及 `LastFrameUrl`）
+- 用户已传腾讯云原生 `FileInfos` / `OutputConfig` / 顶层 `prompt` 时仍原样优先；`tencent_vod_image` 与旧扁平字段路径不变
+- 结构：`tc_collect_video_src`（单次扫 contents）→ `tc_build_video_file_infos` / `tc_build_video_output_config`；主函数只做装配，便于后续扩展 contents 类型或 settings 字段
+
+## 2026-08-03 — API 教程隐藏上游实现细节
+
+- 常用调用示例与协议文档（DocsApi + SitePortalPro）去掉转发路径、协议转译、上游字段映射、渠道切换等内部说明
+- 保留用户侧端点、参数与示例；管理端渠道/模型配置指南未改；「重置初始化」后生效
+
+## 2026-08-03 — 模型广场输入图免费文案
+
+- `minimax_h3` / Seedream 明细输入图改为「N 张以内免费，超出部分 单价/张」；分辨率阶梯等其余展示不变
+
+- `contents` / FileInfos 单次扫描；SSE 行解析、媒体字段判定、Option 合并抽公共辅助
+- `ExtractedFeatures` 改 derive Default；`merge` 去多余 clone；计费语义不变
+
+## 2026-08-03 — API 教程去掉内部实现细节（可灵 / MiniMax）
+
+- 可灵视频/生图、MiniMax 图/视频调用文档去掉 `target_type`、上游路径、JWT/密钥形态、字段映射等后台说明
+- 保留端点、示例与用户侧参数；管理端「重置初始化」后生效
+
+## 2026-08-03 — 可灵 3.0 / 输入图计费审查修复
+
+- 计费：新可灵特征只认 `settings.resolution`（及 sound/contents 图数）；`kling_video` 结算在无 mode 时用 resolution 兜底映射 std/pro，特征侧不再写 mode
+- 请求体：`kling_video` 仅新协议（`contents`/`settings`/`options`，及 `images`/`image_urls`→contents）；不读旧可灵 `image`/`image_tail`；空 `contents` 不误切 image-to-video
+- 特征：`image_ref_count` 计入 `contents` 图条目，避免「视频秒价+输入图」漏计
+
+## 2026-08-03 — 清理 date_helper 遗留单测
+
+- 删除 `date_helper.rs` 中 `model_detail_days` 的 `#[cfg(test)]` 模块；业务函数不变
+- 全仓复查无 `#[test]` / `*.test.*` / `*.spec.*`（保留产品页 ChannelTest）
+
+## 2026-08-03 — 输入图免费张数可配置（Seedream / 视频秒价+输入图）
+
+- `volc_seedream_pro`：新增 `extended_config.free_image_count`（新建表单默认 2）；未配置的旧规则结算仍按首张免费，避免改价
+- `minimax_h3`：展示名改为通用「视频秒价+输入图」（`billing_rule` 键不变）
+- 模型广场 / RateDisplay：按 `free_image_count` 动态显示「第 N 张起」，与结算一致；免费张数解析抽到 `billingFreeImages` 共用
+
+## 2026-08-03 — 可灵视频 3.0 推荐协议（kling_video）
+
+- 新增 `target_type=kling_video`，与旧 `kling`（`/v1/videos/*`）解耦；旧规则与映射零改动
+- 系统规则仅 2 条：文/图 `/text-to-video/${model}`（body 含非空 `contents`→`/image-to-video/${model}`）、Omni `/omni-video/${model}`；`poll_path=/tasks?task_ids=${task_id}`
+- Body 组装为官方 `contents`/`settings`/`options`（文生顶层 `prompt`，图生/Omni 才把 prompt 放入 `contents`）；不兼容旧可灵扁平 `image`/`image_tail`/`mode`- 路径占位与现有规则一致用 `${model}`；`resolution`/`audio` 直读新字段
+- 轮询结果不改写 body：按「按任务ID查询」解析 `data[0].id` / `status` / `outputs[].url`（旧 `data.task_result` 仍兼容）
+- 鉴权：`kling_video` 渠道密钥填官方 API Key，`Authorization: Bearer` 直传（不再签 JWT）；旧 `kling` 仍 `access_key:secret_key` → JWT
+- 计费：新协议靠 `settings.resolution` + 结算侧无 mode 时的 resolution→std/pro 兜底；`settings.audio`→sound on/off
+- 重启后端执行迁移 `kling_video_v3_forward_rules_v1`；模型绑定推荐规则并将 model_id 设为官方路径段（如 `kling-3.0` / `kling-3.0-omni`）
+
+## 2026-08-03 — 合并 origin/cgdev0802 到 chenzs
+
+- 保留本分支：HA 子渠同档权重随机、MiniMax 图片/视频转发与文档、`rule_type` 统一为 `minimax`
+- 并入 cgdev0802：兑换码单用户活动次数限制与防刷、渠道配置分类、顶栏毛玻璃与开源打包/多实例编译隔离等；双方功能并存
+
+## 2026-08-03 — HA 子渠恢复同档权重随机分流
+
+- HA 组内子渠改回：最高 `priority` 档内按 `weight` 比例随机（权重越大命中率越高），与物理渠选路一致
+- 抽共用 `pick_weighted_by`（负权重按 0），去掉确定性「weight 降序 + 绑定序」；failover / 熔断 / exclude 语义不变
+- 复查：子渠选择去掉多余 clone；补 `minimax_forward_target_type_restore_v1`，防止误把 `target_type` 写成纯 `minimax` 时转发失效；帮助文案区分 `rule_type=minimax` 与 `target_type=minimax_image|video`
+
+## 2026-08-03 — MiniMax 图片/视频调用教程
+
+- DocsApi「2.常用调用示例」新增 `minimax-image` / `minimax-video`（中英文种子文档）
+- 覆盖文生图、主体参考/图生图、`image-01-live` 画风；文生视频、首尾帧图生、多图参考、图+视频+音频参考及轮询
+- 门户 SitePortalPro 同步同名种子；管理端「重置初始化」后生效
+
+## 2026-08-03 — MiniMax 转发 rule_type 统一为 minimax
+
+- 图片/视频两条规则的 `rule_type` 统一为 `minimax`，筛选标签合并；`target_type` 仍分别为 `minimax_image` / `minimax_video`，转发逻辑不变
+- 迁移 `minimax_forward_rule_unify_v1` 回填已有规则；重启后端以执行迁移
+
+## 2026-08-03 — 清理测试残留与无用文件
+
+- 删除 `auth.rs` 中遗留的 `#[cfg(test)]` IP 黑名单单测模块（业务 `check_ip_blacklist` 路径不变）
+- 删除根目录无用 `test.txt`；全仓复查无 `#[test]` / `*.test.*` / `*.spec.*`（保留产品页 ChannelTest）
+
+## 2026-08-03 — MiniMax 图片生成转发规则
+
+- 新增系统转发规则 `MiniMax 图片生成`（`target_type=minimax_image`）：`/v1/images/generations` → `/v1/image_generation`
+- 支持 OpenAI 兼容参数与官方参数混用：`size`/`ratio`→`aspect_ratio`，`watermark`→`aigc_watermark`，`b64_json`→`base64`，`image`/`image_urls`→`subject_reference`
+- 官方字段（`aspect_ratio`/`subject_reference`/`prompt_optimizer`/`style`/`seed`/`n`/`width`/`height` 等）原样透传，官方优先
+- 响应适配：`data.image_urls` / `data.image_base64` 归一化为 OpenAI `data[]`；识别 `base_resp.status_code` 业务错误
+- 修复同步响应带 `id`+媒体时误走轮询的问题（MiniMax 等同步生图）
+- 渠道 `minimaxi.com` + 图片类别无规则时自动推断 `minimax_image`
+- `size_to_ratio` 统一为 8 档最近邻 + 解析失败回退原串，腾讯云与 MiniMax 共用，去掉重复实现
+- 成功张数优先取 `metadata.success_count`（兼容整型/数字字符串），再回退 usage / 数组计数
+
+## 2026-08-03 — 出站 HTTP 超时遗漏修补
+
+- 修复 image 流式误挂 1800s 总超时（与 chat/native 对齐，避免长 SSE 被切断）
+- 补齐渠道测试、文档翻译、数据同步、图标同步、Playground 下载、素材上游等 `http_client` 请求超时
+- 抽 `with_upstream_timeout_if` / `with_download_timeout` / `download_bytes`，下载超时统一默认 200s
+
+## 2026-08-03 — 兑换码：单用户活动参与次数限制
+
+- 生成兑换码新增独立开关「限制单用户参与本活动次数」（默认不限）；开启后可设 N 次，按活动名跨码累计
+- 与「兑换码支持多次兑换」解耦：前者约束活动参与，后者只约束单码可兑总次数
+- 兑换接口防刷加固：限流前置、避免全量读配置、无效码事务外快速失败、活动统计索引、顾问锁防并发超限
+- IP 防刷：同一 IP 1 分钟内兑换请求超过 20 次，封禁该 IP 24 小时
+- 迁移：`redemptions_per_user_activity_limit_v1`、`redemption_logs_user_id_idx_v1`（需重启后端）
+
+### 涉及文件
+- `backend/src/db/migrations.rs`、`models/redemption.rs`、`api/plugins/redemptions/mod.rs`、`middleware/rate_limit.rs`
+- `frontend/src/pages/Redemptions/Redemptions.tsx`、`types/index.ts`
+
+---
+
 ## 2026-08-02 — 控制台顶栏毛玻璃（用户端/管理端）
 
 - `DashboardLayout` 顶栏改为半透明 + `backdrop-filter`；内容区铺满顶栏下方，滚动时穿过毛玻璃（用户端与管理端共用布局一并生效）
