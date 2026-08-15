@@ -1,24 +1,31 @@
-# TokensByte—大模型API开源中转 LLM API网关
+# TkeApi — LLM API 网关
 
 Rust + React 构建的高性能大模型 API 分发与管理平台：统一接入、计费、限流、审计。
 
 计费规则+转发规则+模型转发 可以任意添加不同的模型；目前支持各种模型，开源系统核心功能开源。
 
-支持模型-全部支持原生官方接口+OpenAi标准接口
-Seedance2.0/2，5计费，
-MiniMax M3、H3（视频模型）计费
-DeepSeek分时计费、GLM、K3
-Openai-GPT/Google-Gemini/Anthropic-Claude/XAI-Grok  全线支持
+视频模型：Seedance2.5计费，MiniMax-H3，Wan3.0，Gork Video
 
-各种模型计费，按次，按张，按Token，按时段
+
+
+| ![1786781265936](images/README/1786781265936.png) | ![1786781273752](images/README/1786781273752.png) | ![1786781283575](images/README/1786781283575.png) |
+| ------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- |
+| seedance2.0/2.5                                   | wan3.0                                            | minimax-h3                                        |
+| 支持-转发、计费、审计支持-转发计费                | 支持-转发、计费、审计支持-转发计费                | 支持-转发、计费、审计                             |
+
+图片模型：全支持
+
+聊天模型计费：DeepSeek分时计费、GLM、K3、GPT、
+
+Openai-GPT/Google-Gemini/Anthropic-Claude/XAI-Grok  全线支持
 
 核心功能
 
 
-| ![1785405934199](docs/images/moxa.png) | ![1785405944507](docs/images/moxb.png) | 模型管理 |
-| ------------------------------------------------------- | ------------------------------------------------- | -------- |
-| ![1785405950685](docs/images/shangyoua.png)       | ![1785405955542](docs/images/shangyoub.png) | 上游配置 |
-| ![1785406156586](docs/images/ha.png)       | ![1785406165726](docs/images/menhu.png) | 基础插件 |
+| ![1785405934199](docs/images/moxa.png)      | ![1785405944507](docs/images/moxb.png)      | 模型管理 |
+| ------------------------------------------- | ------------------------------------------- | -------- |
+| ![1785405950685](docs/images/shangyoua.png) | ![1785405955542](docs/images/shangyoub.png) | 上游配置 |
+| ![1785406156586](docs/images/ha.png)        | ![1785406165726](docs/images/menhu.png)     | 基础插件 |
 
 ## 
 
@@ -29,8 +36,8 @@ Openai-GPT/Google-Gemini/Anthropic-Claude/XAI-Grok  全线支持
   - [功能概览](#功能概览)
   - [技术栈](#技术栈)
   - [快速部署](#快速部署)
-    - [1）一键脚本部署（推荐）](#1一键脚本部署推荐)
-    - [2）Docker Compose 标准部署](#2docker-compose-标准部署)
+    - [1）一键启动](#1一键启动)
+    - [2）交互式部署（推荐）](#2交互式部署推荐)
     - [3）自定义 / 外部数据库](#3自定义--外部数据库)
     - [模式对照](#模式对照)
   - [使用入门](#使用入门)
@@ -42,13 +49,14 @@ Openai-GPT/Google-Gemini/Anthropic-Claude/XAI-Grok  全线支持
 ## 功能概览
 
 
-| 能力       | 说明                                               |
-| ---------- | -------------------------------------------------- |
-| 统一接入   | OpenAI 兼容接口；文本 / 图像 / 视频 / 嵌入等多模态 |
-| 路由与 HA  | 渠道权重、转发规则、故障转移、限流熔断             |
-| 计费与钱包 | 规则计费、预扣结算、系统/赠送/信控钱包、充值支付   |
-| 安全       | JWT、Admin/User 双端隔离、API Key、操作审计        |
-| 运营       | 仪表盘、日志/任务、财务统计、插件扩展              |
+| 能力       | 说明                                                        |
+| ---------- | ----------------------------------------------------------- |
+| 统一接入   | OpenAI 兼容接口；文本 / 图像 / 视频 / 嵌入等多模态          |
+| 路由与 HA  | 渠道权重、转发规则、故障转移、限流熔断                      |
+| 计费与钱包 | 规则计费、预扣结算、系统/赠送/信控钱包、充值支付            |
+| 模型目录   | 安装即带系统预设模型（官方计费+转发规则已绑定），亦可自定义 |
+| 安全       | JWT、Admin/User 双端隔离、API Key、操作审计                 |
+| 运营       | 仪表盘、日志/任务、财务统计、插件扩展                       |
 
 ## 技术栈
 
@@ -66,38 +74,38 @@ Openai-GPT/Google-Gemini/Anthropic-Claude/XAI-Grok  全线支持
 
 ## 快速部署
 
-**环境**：Docker 20.10+、Compose 2.x；建议 2C / 4G / 20GB+。
+**环境**：Docker 20.10+、Compose 2.x；建议 4C / 8G / 50GB。
 
-### 1）一键脚本部署（推荐）
-
-推荐使用交互式脚本 `deploy.sh`，脚本会自动引导生成数据库强密码与 JWT 密钥，并从 CNB（`docker.cnb.cool`）镜像仓库极速拉取预编译镜像，开箱即用：
+### 1）一键启动
 
 ```bash
-git clone https://github.com/aiqachat/tokensbyte.git
+git clone <repository-url>
 cd tokensbyte
+docker compose up -d --build
+```
+
+- 前台：`http://localhost:8080`
+- 管理端：`http://localhost:8080/admin1688`
+- 首次访问管理端走网页初始化页设置管理员账号（不再用环境变量启动种子化）
+
+生产请务必修改 `.env` 中的数据库密码与 JWT 密钥；并设置 `CORS_ORIGINS`（前端来源）。若前面有 Nginx/Caddy 反代，请正确设置 `X-Forwarded-For` / `X-Real-IP`，注册与登录 IP 会优先读取这些头。
+
+### 2）交互式部署（推荐）
+
+```bash
 chmod +x deploy.sh && ./deploy.sh
 ```
 
-- 输入 `2` 选择生产环境，根据提示完成初始化即可。
-- **用户端**：`http://localhost:8080`
-- **管理后台**：`http://localhost:8080/admin1688`
-- 首次访问管理端走网页初始化页设置管理员账号。
-
-生产请务必修改 `.env` 中的数据库密码与 JWT 密钥；并设置 `CORS_ORIGINS`（前端来源）。若前面有 Nginx/Caddy 反代，请正确设置 `X-Forwarded-For` / `X-Real-IP`。
-
-### 2）Docker Compose 标准部署
-
-适用于熟悉命令行调用的开发者：
-
-```bash
-cp .env.example .env   # 按注释修改密码与密钥
-docker compose pull    # 检查并拉取 CNB 预编译镜像
-docker compose up -d   # 启动服务（自动复用预编译镜像）
-```
+引导生成 DB 密码、JWT，并可选开发/生产模式。
 
 ### 3）自定义 / 外部数据库
 
-使用外部 PostgreSQL（如阿里云/腾讯云 RDS）：在 `.env` 中修改 `DATABASE_URL`，并在 `docker-compose.yml` 中注释掉 `postgres` 服务段落及其依赖。
+```bash
+cp .env.example .env   # 按注释修改
+docker compose up -d
+```
+
+使用外部 PostgreSQL：改 `DATABASE_URL`，并在 `docker-compose.yml` 中停用内置 `postgres` 服务。
 
 ### 模式对照
 
@@ -122,7 +130,7 @@ docker compose up -d   # 启动服务（自动复用预编译镜像）
 
 ## 使用入门
 
-1. 登录管理端 → 配置渠道与模型
+1. 登录管理端 → 配置渠道；模型列表已含系统预设（Seedance / Kling 等，已绑定官方计费与转发规则），也可自行添加自定义模型
 2. 用户端创建 API 令牌并设置额度
 3. 业务侧将 Base URL 指向网关 `/v1`，使用令牌调用
 
@@ -147,7 +155,6 @@ curl http://localhost:8080/v1/chat/completions \
 .\dev.ps1 1 fg        # Windows 前台看日志
 ```
 
-可选环境变量：`BACKEND_PORT` / `FRONTEND_PORT` / `POSTGRES_PORT` / `DEV_WAIT_MAX` / `DEV_ATTACH=1` / `TOKENSBYTE_FAST_LINK=0` / `TOKENSBYTE_LOCAL_TARGET=0` / `TOKENSBYTE_SCCACHE=0` / `TOKENSBYTE_AUTO_BREW=0` / `RUST_LOG`（本地 `dev.sh`/`dev.ps1` 默认 `info`；要 debug：`RUST_LOG=debug ./dev.sh`；部署/`docker-compose` 亦默认 `info`）。仓库在 `/Volumes/...` 外置盘时，`dev.sh` 会把 `CARGO_TARGET_DIR` 迁到 `~/Library/Caches/tokensbyte-dev/target/...`（本机 SSD）以加速编译；macOS 默认会自动 `brew install sccache`（不自动装巨型 `llvm`；若本机已有 `ld64.lld` 仍会启用链接加速）。`[profile.dev]` 开启增量并减小调试信息；Windows（`dev.ps1`）默认 `rust-lld`（中文路径会重定向 `CARGO_TARGET_DIR` 到 `%LOCALAPPDATA%\tokensbyte-dev\target\...`）；Linux 可选 mold/lld。**勿随意删除 `backend/target` 或本机 `CARGO_TARGET_DIR`（Windows 含上述重定向目录）**，否则下次启动会冷编译；链接加速仅影响本机开发耗时，不改变运行行为。
 
 原生方式：
 
@@ -196,7 +203,7 @@ tokensbyte/
 2. Rust：`fmt` + `clippy -D warnings` + `test`；前端遵循 ESLint
 3. 提交信息建议：`type(scope): description`
 
-许可证：[GNU AGPLv3](LICENSE)
+许可证：[AGPL-3.0 license](https://github.com/aiqachat/tkeapi?tab=AGPL-3.0-1-ov-file#)](LICENSE)
 
 问题反馈：GitHub Issues
 
