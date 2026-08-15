@@ -4,6 +4,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.dev
+      args:
+        DOCKER_IMAGE_PREFIX: ${DOCKER_IMAGE_PREFIX:-}
     # 开发模式总是重新构建，避免镜像过期问题
     pull_policy: missing
     container_name: ${PROJECT_NAME:-tokensbyte}-backend-dev
@@ -59,10 +61,10 @@ services:
   postgres:
     # 开发模式暴露数据库端口，方便 Navicat 等工具连接
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
 
   postgres-os:
-    image: postgres:18.4-alpine
+    image: ${DOCKER_IMAGE_PREFIX:-}postgres:18.4-alpine
     container_name: ${PROJECT_NAME:-tokensbyte}-postgres-os
     command: postgres -c shared_buffers=128MB
     environment:
@@ -70,7 +72,7 @@ services:
       - POSTGRES_PASSWORD=tokensapi
       - POSTGRES_DB=tokensapi
     ports:
-      - "5433:5432"
+      - "${OS_POSTGRES_PORT:-5434}:5432"
     volumes:
       - postgres-data-os:/var/lib/postgresql
     networks:
@@ -86,6 +88,8 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile.dev
+      args:
+        DOCKER_IMAGE_PREFIX: ${DOCKER_IMAGE_PREFIX:-}
     # 开发模式总是重新构建，避免镜像过期问题
     pull_policy: missing
     container_name: ${PROJECT_NAME:-tokensbyte}-frontend-dev

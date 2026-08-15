@@ -1,3 +1,4 @@
+7ebd17958138a3190f9e4088417e493d996959fb7ebd179cgm5pm2026-08-15 15:00:54update
 3dbe5cb4d8f553930311eba65c7122feba7c67c23dbe5cbaqachatm5pm2026-08-10 09:01:03uodate
 ee5aedb2e3bba5f7909ac3d6c01cccb69b3e10beee5aedbcgm5pm2026-08-02 16:02:11update
 f1228ef49846b3c3c31893f432134578208c5e19f1228efcgm5pm2026-08-02 15:50:59update，更新开源版本的稳定性和新增加 minimax 的视频模型 h3 的计费
@@ -7,4 +8,3 @@ f1228ef49846b3c3c31893f432134578208c5e19f1228efcgm5pm2026-08-02 15:50:59upda
 62243d7e0e8517e7d59c09936a8156c137c29a2662243d7SAMDO-WORK-2025\samdo2026-07-31 11:57:52feat(deploy): update default image registry to CNB (docker.cnb.cool) for fast mainland China access
 f61275ed2128bd74f558f444899fa4c6c0fbbc3af61275eArtsmcp2026-07-31 11:54:09build(deps): 添加 OpenSSL 静态编译依赖并更新 gitignore 离线构建忽略项
 f9feddc966811d429d548e01f440269d23ac5396f9feddcSAMDO-WORK-2025\samdo2026-07-31 11:51:17ci: remove automatic push triggers, keep manual workflow_dispatch only
-84d3e7f7f5d84d23d1c91a05491058af74695ef784d3e7fSAMDO-WORK-2025\samdo2026-07-31 09:48:06feat(deploy): optimize docker-compose for GHCR prebuilt images & add CI/CD workflow with Dockerfile.thin

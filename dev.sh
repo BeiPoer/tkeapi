@@ -13,7 +13,11 @@
 # 可选环境变量：
 #   PROJECT_NAME / BACKEND_PORT / FRONTEND_PORT / POSTGRES_PORT
 #   DATABASE_URL / DEV_MODE(1|2) / RUST_LOG / DEV_WAIT_MAX / DEV_ATTACH
-#   TOKENSBYTE_FAST_LINK=0  关闭 Rust 链接加速（Linux mold/lld；Windows 见 .\dev.ps1）
+#   TOKENSBYTE_FAST_LINK=0     关闭 Rust 链接加速（Linux mold/lld；macOS 可选 lld）
+#   TOKENSBYTE_LOCAL_TARGET=0  强制不把 target 迁到本机盘（默认：仓库在 /Volumes 时自动迁移）
+#   TOKENSBYTE_SCCACHE=0       关闭 sccache（默认：检测到 sccache 则启用）
+#   TOKENSBYTE_AUTO_BREW=0     关闭自动 brew 安装 sccache（默认 macOS 缺则安装；不装巨型 llvm）
+# 编译缓存：勿随意删除 backend/target 或本机 CARGO_TARGET_DIR，否则下次冷编译
 # 用法：./dev.sh [1|2] [bg|fg]   1=本地(默认后台)  2=Docker 全容器
 # ──────────────────────────────────────────────────
 set -e
@@ -21,12 +25,26 @@ set -e
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 cd "${ROOT_DIR}"
 
+if ! command -v docker >/dev/null 2>&1 || ! docker --version >/dev/null 2>&1; then
+    if [ -d "/Applications/Docker.app/Contents/Resources/bin" ]; then
+        export PATH="/Applications/Docker.app/Contents/Resources/bin:${PATH}"
+    fi
+fi
+
+if [ -f "${ROOT_DIR}/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "${ROOT_DIR}/.env"
+    set +a
+fi
+
 PROJECT_NAME=${PROJECT_NAME:-$(basename "$ROOT_DIR")}
 POSTGRES_PORT=${POSTGRES_PORT:-5432}
 POSTGRES_USER=${POSTGRES_USER:-tokensapi}
 PREFERRED_BACKEND_PORT=${BACKEND_PORT:-3000}
 PREFERRED_FRONTEND_PORT=${FRONTEND_PORT:-5173}
 DEV_ATTACH="${DEV_ATTACH:-0}"
+
 
 choice=""
 for arg in "$@"; do
@@ -40,6 +58,12 @@ for arg in "$@"; do
             echo "  2         Docker 全容器"
             echo "  fg        前台输出日志，Ctrl+C 停止本实例"
             echo "  bg        后台运行（默认）"
+            echo ""
+            echo "加速相关环境变量："
+            echo "  TOKENSBYTE_FAST_LINK=0     关闭链接加速"
+            echo "  TOKENSBYTE_LOCAL_TARGET=0  禁止将 target 迁到本机 SSD 缓存"
+            echo "  TOKENSBYTE_SCCACHE=0       禁用 sccache（有则默认启用）"
+            echo "  TOKENSBYTE_AUTO_BREW=0     禁用自动 brew install sccache"
             exit 0
             ;;
         *)
@@ -112,6 +136,39 @@ free_listen_port() {
     done
 }
 
+# 双 fork 守护启动（macOS 无 setsid；避免脚本/Agent 会话退出后子进程被带走）
+# 用法: daemonize_run <workdir> <logfile> -- <cmd> [args...]
+daemonize_run() {
+    local workdir="$1" logfile="$2"
+    shift 2
+    if [ "$1" != "--" ]; then
+        echo "❌ daemonize_run 用法错误" >&2
+        return 1
+    fi
+    shift
+    python3 - "${workdir}" "${logfile}" "$@" <<'PY'
+import os, sys
+workdir, logfile = sys.argv[1], sys.argv[2]
+cmd = sys.argv[3:]
+if not cmd:
+    raise SystemExit("empty command")
+log = open(logfile, "ab", buffering=0)
+if os.fork() > 0:
+    raise SystemExit(0)
+os.setsid()
+if os.fork() > 0:
+    raise SystemExit(0)
+os.chdir(workdir)
+os.dup2(log.fileno(), 1)
+os.dup2(log.fileno(), 2)
+try:
+    os.close(log.fileno())
+except Exception:
+    pass
+os.execvpe(cmd[0], cmd, os.environ)
+PY
+}
+
 state_get() {
     [ -f "${STATE_FILE}" ] || return 0
     sed -n "s/^${1}=//p" "${STATE_FILE}" | head -n1
@@ -133,26 +190,153 @@ kill_if_cwd() {
     hard_kill_pid "${pid}"
 }
 
-# Linux 可选链接加速（有 mold/lld 才用）；macOS 保持默认 ld64（mold -run 不支持）
+# Linux：mold / lld；macOS：若已安装 Homebrew llvm 的 ld64.lld 则启用
+# macOS 缺依赖时可由 ensure_dev_brew_tooling 先 brew install
+find_mac_lld() {
+    local cand
+    for cand in \
+        /opt/homebrew/opt/llvm/bin/ld64.lld \
+        /usr/local/opt/llvm/bin/ld64.lld \
+        "$(command -v ld64.lld 2>/dev/null || true)"; do
+        if [ -n "${cand}" ] && [ -x "${cand}" ]; then
+            printf '%s\n' "${cand}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# macOS：缺 sccache 时自动 brew 安装（TOKENSBYTE_AUTO_BREW=0 可关）
+# 不自动装 llvm：整包约 GB 级，收益有限；若已手动 brew install llvm/lld 则仍启用链接加速
+ensure_dev_brew_tooling() {
+    [ "$(uname -s)" = "Darwin" ] || return 0
+    [ "${TOKENSBYTE_AUTO_BREW:-1}" = "0" ] && return 0
+    command -v brew >/dev/null 2>&1 || {
+        echo "ℹ️  未找到 Homebrew，跳过自动安装 sccache"
+        return 0
+    }
+
+    if [ "${TOKENSBYTE_SCCACHE:-1}" != "0" ] && ! command -v sccache >/dev/null 2>&1; then
+        echo "📦 未找到 sccache，正在 brew install sccache ..."
+        if brew install sccache; then
+            # 刷新当前 shell 的 PATH（Apple Silicon 默认 /opt/homebrew/bin）
+            if [ -x /opt/homebrew/bin/sccache ]; then
+                export PATH="/opt/homebrew/bin:${PATH}"
+            elif [ -x /usr/local/bin/sccache ]; then
+                export PATH="/usr/local/bin:${PATH}"
+            fi
+            hash -r 2>/dev/null || true
+            echo "✅ sccache 已安装: $(command -v sccache 2>/dev/null || echo 未在 PATH)"
+        else
+            echo "⚠️  brew install sccache 失败，将继续用不带缓存的编译"
+        fi
+    fi
+}
+
 apply_dev_rust_link_accel() {
     DEV_CARGO_WRAPPER=""
     if [ "${TOKENSBYTE_FAST_LINK:-1}" = "0" ]; then
         echo "ℹ️  已关闭 Rust 链接加速 (TOKENSBYTE_FAST_LINK=0)"
         return 0
     fi
-    [ "$(uname -s)" = "Linux" ] || return 0
-    if command -v mold >/dev/null 2>&1; then
-        DEV_CARGO_WRAPPER="mold -run"
-        echo "ℹ️  Rust 链接加速: mold"
-    elif command -v clang >/dev/null 2>&1 && command -v ld.lld >/dev/null 2>&1; then
-        case " ${RUSTFLAGS:-} " in
-            *" -fuse-ld="*) ;;
+    local os
+    os="$(uname -s)"
+    if [ "${os}" = "Linux" ]; then
+        if command -v mold >/dev/null 2>&1; then
+            DEV_CARGO_WRAPPER="mold -run"
+            echo "ℹ️  Rust 链接加速: mold"
+            return 0
+        fi
+        if command -v clang >/dev/null 2>&1 && command -v ld.lld >/dev/null 2>&1; then
+            case " ${RUSTFLAGS:-} " in
+                *" -fuse-ld="*) ;;
+                *)
+                    export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-C linker=clang -C link-arg=-fuse-ld=lld"
+                    echo "ℹ️  Rust 链接加速: lld"
+                    ;;
+            esac
+            return 0
+        fi
+        return 0
+    fi
+
+    if [ "${os}" = "Darwin" ]; then
+        local lld_bin=""
+        lld_bin="$(find_mac_lld || true)"
+        if [ -n "${lld_bin}" ] && command -v clang >/dev/null 2>&1; then
+            case " ${RUSTFLAGS:-} " in
+                *" -fuse-ld="*) ;;
+                *)
+                    export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-C linker=clang -C link-arg=-fuse-ld=${lld_bin}"
+                    echo "ℹ️  Rust 链接加速: ${lld_bin}"
+                    ;;
+            esac
+        fi
+    fi
+}
+
+# 本机编译加速：增量、外置盘 target 迁移、sccache（不交叉编译、不碰 zigbuild）
+apply_dev_rust_compile_accel() {
+    ensure_dev_brew_tooling
+
+    # Cursor/沙箱可能注入临时 CARGO_TARGET_DIR；对本地开发应忽略，避免编到 /var/folders/.../cursor-sandbox-cache
+    case "${CARGO_TARGET_DIR:-}" in
+        *cursor-sandbox-cache*|*Cursor-sandbox*|"")
+            unset CARGO_TARGET_DIR
+            ;;
+    esac
+
+    # 仓库在 /Volumes（外置/网络盘）时，把 target 放到本机 SSD 缓存，避免 IO 拖慢冷/热编译
+    # 可用 TOKENSBYTE_LOCAL_TARGET=0 关闭；=1 强制开启
+    local want_local_target=0
+    case "${TOKENSBYTE_LOCAL_TARGET:-auto}" in
+        0|false|no|off) want_local_target=0 ;;
+        1|true|yes|on) want_local_target=1 ;;
+        *)
+            case "${ROOT_DIR}" in
+                /Volumes/*) want_local_target=1 ;;
+            esac
+            ;;
+    esac
+    if [ "${want_local_target}" -eq 1 ] && [ -z "${CARGO_TARGET_DIR:-}" ]; then
+        local cache_root="${HOME}/Library/Caches/tokensbyte-dev/target"
+        mkdir -p "${cache_root}"
+        export CARGO_TARGET_DIR="${cache_root}/${STATE_ID}"
+        mkdir -p "${CARGO_TARGET_DIR}"
+        echo "ℹ️  检测到外置盘路径，CARGO_TARGET_DIR -> ${CARGO_TARGET_DIR}"
+        echo "   （勿删此目录；删掉会触发整包冷编译）"
+    elif [ -n "${CARGO_TARGET_DIR:-}" ]; then
+        mkdir -p "${CARGO_TARGET_DIR}"
+        echo "ℹ️  使用已设置的 CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+    fi
+
+    if [ "${TOKENSBYTE_SCCACHE:-1}" = "0" ]; then
+        echo "ℹ️  已关闭 sccache (TOKENSBYTE_SCCACHE=0)"
+        export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-1}"
+    elif [ -n "${RUSTC_WRAPPER:-}" ]; then
+        echo "ℹ️  使用已设置的 RUSTC_WRAPPER=${RUSTC_WRAPPER}"
+        # sccache 禁止增量编译；非 sccache wrapper 则保留增量
+        case "${RUSTC_WRAPPER}" in
+            *sccache*)
+                unset CARGO_INCREMENTAL
+                echo "ℹ️  sccache 已启用，已关闭 CARGO_INCREMENTAL（二者不兼容）"
+                ;;
             *)
-                export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-C linker=clang -C link-arg=-fuse-ld=lld"
-                echo "ℹ️  Rust 链接加速: lld"
+                export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-1}"
                 ;;
         esac
+    elif command -v sccache >/dev/null 2>&1 && [ "${TOKENSBYTE_SCCACHE:-0}" = "1" ]; then
+        export RUSTC_WRAPPER="$(command -v sccache)"
+        unset CARGO_INCREMENTAL
+        echo "ℹ️  Rust 编译缓存: sccache（已关闭 CARGO_INCREMENTAL，与 sccache 不兼容）"
+    else
+        unset RUSTC_WRAPPER
+        export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-1}"
+        echo "ℹ️  Rust 增量加速: Cargo 原生 incremental"
     fi
+
+
+    apply_dev_rust_link_accel
 }
 
 # 回收本仓库残留前后端（不影响其它目录实例 / 共享 Postgres）
@@ -169,15 +353,21 @@ reclaim_repo_services() {
     fi
 
     while read -r pid cmd; do
-        [ -n "${pid}" ] || continue
+        [ -n "${pid}" ] && [ "${pid}" != "$$" ] || continue
         case "${cmd}" in
             *"${ROOT_DIR}/frontend"*|*"${ROOT_DIR}/backend"*) hard_kill_pid "${pid}" ;;
-            *tokensbyte-server*) kill_if_cwd "${pid}" "${ROOT_DIR}/backend" ;;
-            *cargo-watch*) kill_if_cwd "${pid}" "${ROOT_DIR}/backend" ;;
+            *tokensbyte-server*|*cargo-watch*|*"cargo run"*)
+                local pcwd
+                pcwd="$(proc_cwd "${pid}")"
+                case "${pcwd}" in
+                    *"${ROOT_DIR}"*) hard_kill_pid "${pid}" ;;
+                esac
+                ;;
         esac
     done <<EOF
 $(ps -axo pid= -o command= 2>/dev/null || true)
 EOF
+
 }
 
 docker_pg_ready() {
@@ -188,9 +378,12 @@ docker_pg_ready() {
 
 # 多套开发环境共用同一 Postgres（优先已在跑的实例）
 shared_pg_ready() {
+    # 端口已监听即视为可用（本机 Postgres / 外部库 / 已起的容器）
+    port_in_use "${POSTGRES_PORT}" && return 0
     if command -v pg_isready >/dev/null 2>&1; then
         pg_isready -h 127.0.0.1 -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" >/dev/null 2>&1 && return 0
     fi
+    command -v docker >/dev/null 2>&1 || return 1
     local cname
     for cname in "tokensbyte-ws-postgres" "${PROJECT_NAME}-postgres" "tokensbyte-postgres"; do
         docker_pg_ready "${cname}" && return 0
@@ -201,7 +394,7 @@ shared_pg_ready() {
 wait_project_postgres() {
     local i
     for i in $(seq 1 30); do
-        if docker_pg_ready "${PROJECT_NAME}-postgres"; then
+        if docker_pg_ready "${PROJECT_NAME}-postgres" || port_in_use "${POSTGRES_PORT}"; then
             echo "✅ 数据库已就绪"
             return 0
         fi
@@ -218,6 +411,11 @@ ensure_postgres() {
     if shared_pg_ready; then
         echo "✅ 复用本机 Postgres (port ${POSTGRES_PORT})"
         return 0
+    fi
+
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "❌ 未检测到 Postgres (port ${POSTGRES_PORT})，且未安装 Docker，请先启动本机数据库"
+        exit 1
     fi
 
     echo "🐘 启动 Docker Postgres (${PROJECT_NAME}-postgres)..."
@@ -263,40 +461,55 @@ case "${choice}" in
         (cd frontend && npm install --registry=https://registry.npmmirror.com)
     fi
 
-    BACKEND_PORT="$(pick_free_port "${PREFERRED_BACKEND_PORT}" "后端")"
-    FRONTEND_PORT="$(pick_free_port "${PREFERRED_FRONTEND_PORT}" "前端")"
+    # 固定默认端口：先关掉占用 3000/5173 的进程，再原端口启动（不顺延改端口）
+    BACKEND_PORT="${PREFERRED_BACKEND_PORT}"
+    FRONTEND_PORT="${PREFERRED_FRONTEND_PORT}"
+    echo "🧹 释放默认端口 :${BACKEND_PORT} / :${FRONTEND_PORT} ..."
+    free_listen_port "${BACKEND_PORT}"
+    free_listen_port "${FRONTEND_PORT}"
     export BACKEND_PORT FRONTEND_PORT
     export PORT="${BACKEND_PORT}"
     export HOST="${HOST:-0.0.0.0}"
-    export DATABASE_URL="${DATABASE_URL:-postgres://tokensapi:tokensapi@localhost:${POSTGRES_PORT}/tokensapi}"
+    DATABASE_URL="${DATABASE_URL:-postgres://tokensapi:tokensapi@127.0.0.1:${POSTGRES_PORT}/tokensapi}"
+    case "${DATABASE_URL}" in
+        *@postgres:*)
+            DATABASE_URL=$(echo "${DATABASE_URL}" | sed 's/@postgres:/@127.0.0.1:/')
+            ;;
+    esac
+    export DATABASE_URL
     export RUST_LOG="${RUST_LOG:-info}"
     export BASE_URL="${BASE_URL:-http://localhost:${BACKEND_PORT}}"
     export VITE_API_TARGET="http://127.0.0.1:${BACKEND_PORT}"
-    export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-1}"
-    apply_dev_rust_link_accel
+    apply_dev_rust_compile_accel
 
     echo "⚙️ 启动 Rust 服务 (watch, :${BACKEND_PORT})..."
     : > backend_dev.log
-    BACKEND_ENV=(
-        "PORT=${PORT}" "HOST=${HOST}" "DATABASE_URL=${DATABASE_URL}"
-        "RUST_LOG=${RUST_LOG}" "BASE_URL=${BASE_URL}" "CARGO_INCREMENTAL=${CARGO_INCREMENTAL}"
-    )
-    [ -n "${CARGO_TARGET_DIR:-}" ] && BACKEND_ENV+=("CARGO_TARGET_DIR=${CARGO_TARGET_DIR}")
-    [ -n "${RUSTFLAGS:-}" ] && BACKEND_ENV+=("RUSTFLAGS=${RUSTFLAGS}")
-    # shellcheck disable=SC2086 # DEV_CARGO_WRAPPER 有意为可选前缀（mold -run）
-    nohup env "${BACKEND_ENV[@]}" \
-        sh -c "cd backend && exec ${DEV_CARGO_WRAPPER} cargo watch -w src -w Cargo.toml -w Cargo.lock -w build.rs -x run" \
-        > backend_dev.log 2>&1 &
-    BACKEND_PID=$!
-    disown "${BACKEND_PID}" 2>/dev/null || true
+    export PORT HOST DATABASE_URL RUST_LOG BASE_URL
+    unset CARGO_INCREMENTAL
+    [ -n "${CARGO_TARGET_DIR:-}" ] && export CARGO_TARGET_DIR
+    [ -n "${RUSTFLAGS:-}" ] && export RUSTFLAGS
+    [ -n "${RUSTC_WRAPPER:-}" ] && export RUSTC_WRAPPER
+    # shellcheck disable=SC2086
+    if [ -n "${DEV_CARGO_WRAPPER}" ]; then
+        daemonize_run "${ROOT_DIR}/backend" "${ROOT_DIR}/backend_dev.log" -- \
+            sh -c "exec ${DEV_CARGO_WRAPPER} cargo watch -w src -w Cargo.toml -w Cargo.lock -w build.rs -x run"
+    else
+        daemonize_run "${ROOT_DIR}/backend" "${ROOT_DIR}/backend_dev.log" -- \
+            sh -c "exec cargo watch -w src -w Cargo.toml -w Cargo.lock -w build.rs -x run"
+    fi
+
+
+    BACKEND_PID="$(lsof -nP -tiTCP:"${BACKEND_PORT}" -sTCP:LISTEN 2>/dev/null | head -n1 || true)"
 
     echo "⚙️ 启动 Vite 服务 (:${FRONTEND_PORT})..."
     : > frontend_dev.log
-    nohup env VITE_API_TARGET="${VITE_API_TARGET}" FRONTEND_PORT="${FRONTEND_PORT}" \
-        sh -c "cd frontend && exec npm run dev -- --port ${FRONTEND_PORT} --strictPort --host 0.0.0.0" \
-        > frontend_dev.log 2>&1 &
-    FRONTEND_PID=$!
-    disown "${FRONTEND_PID}" 2>/dev/null || true
+    export VITE_API_TARGET FRONTEND_PORT
+    daemonize_run "${ROOT_DIR}/frontend" "${ROOT_DIR}/frontend_dev.log" -- \
+        npm run dev -- --port "${FRONTEND_PORT}" --strictPort --host 0.0.0.0
+    # 双 fork 后父进程立刻退出，用端口探测拿真实 PID
+    sleep 0.5
+    FRONTEND_PID="$(lsof -nP -tiTCP:"${FRONTEND_PORT}" -sTCP:LISTEN 2>/dev/null | head -n1 || true)"
+    BACKEND_PID="$(lsof -nP -tiTCP:"${BACKEND_PORT}" -sTCP:LISTEN 2>/dev/null | head -n1 || true)"
 
     write_run_state
 

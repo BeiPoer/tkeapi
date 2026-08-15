@@ -111,7 +111,7 @@ EOF
     echo "📋 配置摘要:"
     echo "   - 数据库密码: [已自动生成 16 位强密码]"
     echo "   - JWT_SECRET: [已自动生成 64 位随机密钥]"
-    echo "   - 管理员账号: [首次访问网页初始化页设置]"
+    echo "   - 管理员: 首次打开管理端网页初始化页设置"
     echo "   - 用户注册: $([ "$REGISTER_ENABLED" = "true" ] && echo "允许" || echo "禁止")"
     echo ""
     
@@ -135,11 +135,11 @@ else
     if grep -q "JWT_SECRET" .env; then
         echo "   - JWT_SECRET: [已配置]"
     fi
+    echo "   - 管理员: 网页初始化页设置（不再使用 ADMIN_PASSWORD 启动种子化）"
     if grep -q "REGISTER_ENABLED" .env; then
         REG=$(grep "REGISTER_ENABLED" .env | head -1 | cut -d'=' -f2)
         echo "   - 用户注册: $([ "$REG" = "true" ] && echo "允许" || echo "禁止")"
     fi
-    echo "   - 管理员账号: [首次访问网页初始化页设置]"
     echo ""
     
     # 询问是否重新配置
@@ -187,9 +187,7 @@ case $mode in
         echo "🚀 启动生产环境..."
         # 导出项目名环境变量
         export PROJECT_NAME="${PROJECT_NAME}"
-        echo "📥 正在检查并从 CNB 镜像仓库拉取最新镜像 (docker.cnb.cool)..."
-        docker compose pull || echo "⚠️ 镜像拉取跳过/不需要更新，将直接启动容器..."
-        docker compose up -d --no-build
+        docker compose up -d
         echo ""
         echo "✅ 生产环境部署完成！"
         echo ""
@@ -198,8 +196,9 @@ case $mode in
         echo "   - 管理后台: http://localhost:8080/admin1688"
         echo "   - API: http://localhost:3000/v1"
         echo ""
-        echo "👤 管理员账号设置:"
-        echo "   - 首次访问管理后台界面 (http://localhost:8080/admin1688) 即可手动设置管理员账号与密码"
+        echo "👤 默认管理员账号:"
+        echo "   - 用户名: admin"
+        echo "   - 密码: admin (请通过管理后台修改)"
         echo ""
         echo "📊 服务状态:"
         docker compose ps
