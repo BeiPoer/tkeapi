@@ -15,6 +15,8 @@ use axum::{
     extract::{Path, State},
     Json,
 };
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub async fn list_users(
@@ -527,7 +529,7 @@ pub async fn delete_user(
     .unwrap_or_default();
 
     let pg2026_assets: Vec<String> = sqlx::query_scalar::<_, String>(
-        &state.db.format_query("SELECT tos_object_key FROM playground_2026_assets WHERE user_id = ? AND tos_object_key IS NOT NULL AND tos_object_key != ''")
+        &state.db.format_query("SELECT tos_object_key FROM playground_2026_project_assets WHERE user_id = ? AND tos_object_key IS NOT NULL AND tos_object_key != ''")
     )
     .bind(&id)
     .fetch_all(&state.db.pool)
@@ -608,7 +610,7 @@ pub async fn delete_user(
             }
         }
 
-        // 2b. 处理 playground_2026_assets (创作中心2026) 关联的 TOS 文件删除
+        // 2b. 处理 playground_2026_project_assets (创作中心2026) 关联的 TOS 文件删除
         if !pg2026_assets.is_empty() {
             if let Some(tos_config) =
                 crate::api::plugins::get_tos_config(&state, "playground_2026").await
@@ -619,13 +621,13 @@ pub async fn delete_user(
                         match crate::services::tos::delete_file(&tos_config, &tos_key).await {
                             Ok(()) => {
                                 tracing::info!(
-                                    "同步清理用户数据: playground_2026_assets TOS 文件删除成功: {}",
+                                    "同步清理用户数据: playground_2026_project_assets TOS 文件删除成功: {}",
                                     tos_key
                                 );
                             }
                             Err(e) => {
                                 tracing::warn!(
-                                    "同步清理用户数据: playground_2026_assets TOS 文件删除失败: {} - {}",
+                                    "同步清理用户数据: playground_2026_project_assets TOS 文件删除失败: {} - {}",
                                     tos_key,
                                     e
                                 );
@@ -946,4 +948,121 @@ pub async fn get_user_level_logs(
     Ok(Json(
         serde_json::json!({ "data": data, "total": data.len() }),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConsumptionStatsBatchRequest {
+    pub user_ids: Vec<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
+
+#[derive(Debug, Serialize, Default, Clone)]
+pub struct ConsumptionStatsBatchItem {
+    pub system_cost: f64,
+    pub gift_cost: f64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ConsumptionStatsBatchRawRow {
+    user_id: String,
+    system_cost: f64,
+    gift_cost: f64,
+}
+
+/// 批量查询用户消费合计（系统钱包 / 赠送钱包）。
+/// 历史天走 usage_daily_stats，今日及碎片段走 logs，与财务/明细口径一致。
+pub async fn query_consumption_stats_batch(
+    state: &AppState,
+    user_ids: &[String],
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+) -> AppResult<HashMap<String, ConsumptionStatsBatchItem>> {
+    if user_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let site_tz = crate::relay::relay_settings::get_cached_site_timezone(&state.db).await;
+    let tz: chrono_tz::Tz = site_tz.parse().unwrap_or(chrono_tz::Asia::Shanghai);
+    let slices =
+        crate::api::date_helper::calculate_query_slices(start_date, end_date, tz);
+
+    let placeholders = user_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let mut result: HashMap<String, ConsumptionStatsBatchItem> = HashMap::new();
+    let merge_row =
+        |map: &mut HashMap<String, ConsumptionStatsBatchItem>, row: ConsumptionStatsBatchRawRow| {
+            let entry = map.entry(row.user_id).or_default();
+            entry.system_cost += row.system_cost;
+            entry.gift_cost += row.gift_cost;
+        };
+
+    if slices.has_history_days {
+        let sql = format!(
+            "SELECT user_id, \
+                COALESCE(SUM(GREATEST(total_cost - total_pre_deduct_gift, 0.0)), 0.0) as system_cost, \
+                COALESCE(SUM(total_pre_deduct_gift), 0.0) as gift_cost \
+             FROM usage_daily_stats \
+             WHERE user_id IN ({}) AND {} \
+             GROUP BY user_id",
+            placeholders,
+            slices.history_cond("stat_date")
+        );
+        let formatted_sql = state.db.format_query(&sql);
+        let mut query = sqlx::query_as::<_, ConsumptionStatsBatchRawRow>(&formatted_sql);
+        for id in user_ids {
+            query = query.bind(id);
+        }
+        query = query
+            .bind(slices.hist_start_date)
+            .bind(slices.hist_end_date);
+        let rows = query.fetch_all(&state.db.pool).await?;
+        for row in rows {
+            merge_row(&mut result, row);
+        }
+    }
+
+    for r_slice in slices.realtime_slices() {
+        let sql = format!(
+            "SELECT user_id, \
+                COALESCE(SUM(GREATEST(cost - pre_deduct_gift, 0.0)), 0.0) as system_cost, \
+                COALESCE(SUM(pre_deduct_gift), 0.0) as gift_cost \
+             FROM logs \
+             WHERE user_id IN ({}) AND {} \
+             GROUP BY user_id",
+            placeholders,
+            r_slice.sql_cond("created_at")
+        );
+        let formatted_sql = state.db.format_query(&sql);
+        let mut query = sqlx::query_as::<_, ConsumptionStatsBatchRawRow>(&formatted_sql);
+        for id in user_ids {
+            query = query.bind(id);
+        }
+        query = query.bind(&r_slice.start).bind(&r_slice.end);
+        let rows = query.fetch_all(&state.db.pool).await?;
+        for row in rows {
+            merge_row(&mut result, row);
+        }
+    }
+
+    Ok(result)
+}
+
+/// 管理后台：批量查询用户消费合计。
+pub async fn get_consumption_stats_batch(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ConsumptionStatsBatchRequest>,
+) -> AppResult<Json<HashMap<String, ConsumptionStatsBatchItem>>> {
+    let result = query_consumption_stats_batch(
+        &state,
+        &req.user_ids,
+        req.start_date.as_deref(),
+        req.end_date.as_deref(),
+    )
+    .await?;
+    Ok(Json(result))
 }

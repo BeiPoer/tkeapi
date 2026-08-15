@@ -388,9 +388,9 @@ pub async fn get_daily_stats(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     // 财务聚合与 usage_daily_stats 归档一致：默认站点时区；header 可覆盖预览
-    let (site_tz_name, _) = crate::relay::get_cached_config(&state).await;
+    let site_tz_name = crate::relay::relay_settings::get_cached_site_timezone(&state.db).await;
     let tz_src = if header_tz.trim().is_empty() {
-        site_tz_name.as_str()
+        site_tz_name.as_ref()
     } else {
         header_tz
     };
@@ -505,7 +505,7 @@ async fn calculate_finance_stats(
             "
             SELECT 
                 COUNT(*),
-                COALESCE(SUM(prompt_tokens + completion_tokens), 0),
+                (COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0))::bigint,
                 COALESCE(SUM(cost), 0.0),
                 COUNT(DISTINCT token_id),
                 COUNT(DISTINCT user_id),
@@ -901,10 +901,12 @@ pub async fn get_wallet_stats_batch(
         .map(|_| "?")
         .collect::<Vec<_>>()
         .join(",");
+    // 排除方舟监控扣费/退款流水，避免把 ark_video_* 算进「充值」
     let mut sql = format!(
         "SELECT user_id, wallet_type, COALESCE(SUM(amount), 0.0) as amount \
          FROM recharge_records \
-         WHERE user_id IN ({})",
+         WHERE user_id IN ({}) \
+         AND COALESCE(recharge_type, '') NOT IN ('ark_video_consume', 'ark_video_refund')",
         placeholders
     );
     let mut binds: Vec<String> = req.user_ids.clone();

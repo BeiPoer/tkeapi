@@ -199,13 +199,18 @@ pub async fn video_generations(
         };
         // 根据渠道 base_url 修正 target_type（如 APIMart 需从 "openai" 覆盖为 "apimart"）
         forward::refine_target_type(&mut resolved, &channel.base_url);
+        forward::apply_channel_provider(&mut resolved, &channel);
 
-        // 模型映射：渠道内部映射 + 模型表别名映射
+        // 模型映射：视频走分辨率档（resolve_model_body）
         let resolved_model_query = hh_intercept
             .as_ref()
             .map_or(channel_model_query, |r| r.actual_model.as_str());
-        let (final_resolved_model, mapping_source) =
-            router::resolve_model(&channel, resolved_model_query, db_model.as_ref());
+        let (final_resolved_model, mapping_source) = router::resolve_model_body(
+            &channel,
+            resolved_model_query,
+            db_model.as_ref(),
+            Some(&body),
+        );
 
         // 查询模型计费规则（复用 db_model 避免重查 models 表）
         let db_rule =
@@ -317,7 +322,7 @@ pub async fn video_generations(
                 )
             });
             let (volc_final_model, _) =
-                router::resolve_model(&volc_channel, volc_model_id, Some(&volc_db_model));
+                router::resolve_model(&volc_channel, volc_model_id, Some(&volc_db_model), None);
 
             // cascade：阶段二渠道信息；version/resolution 供预扣费写入 billing_features（不改用户入参）
             let mut cascade_val = serde_json::json!({
@@ -380,7 +385,9 @@ pub async fn video_generations(
                 .replace("${model}", &final_resolved_model)
         );
 
-        // plugin_tag：快乐小马分发标记 / 级联阶段二配置（MediaKit 归属靠关联表，不写根 mid）
+        // plugin_tag：快乐小马 / 级联 / 客户端 callback（上游体根级 callback_url；与入口是否 OpenAI 无关）
+        // 火山等官方参数可经 OpenAI 路由透传到 upstream_body
+        let client_cb = super::vendor_callback::extract_client_callback_url(&upstream_body);
         let plugin_tag: Option<String> = {
             let mut tag_json = serde_json::json!({});
             #[cfg(feature = "plugin_happyhorse")]
@@ -393,6 +400,9 @@ pub async fn video_generations(
             if let Some(cascade_val) = cascade_tag_json {
                 tag_json["cascade"] = cascade_val;
             }
+            if let Some(ref u) = client_cb {
+                super::vendor_callback::stash_cb_in_plugin_tag(&mut tag_json, u);
+            }
             let s = tag_json.to_string();
             if s == "{}" || s == "null" {
                 None
@@ -401,27 +411,27 @@ pub async fn video_generations(
             }
         };
 
+        let mut pending_pk: Option<i64> = ha.pending_log_id;
         if ha.pending_log_id.is_none() {
-            ha.set_pending(
-                proxy::record_pending_log(proxy::PendingLog {
-                    state: &state,
-                    user_id: &token.user_id,
-                    token_id: token.id,
-                    model: model,
-                    endpoint: &ep,
-                    is_stream: 0,
-                    request_content: Some(&request_content_str),
-                    upstream_url: Some(&url),
-                    channel: &channel,
-                    billing_model_hint: Some(billing_model),
-                    plugin_tag: plugin_tag.as_deref(),
-                    category: Some(resolved_cat.as_str()),
-                    db_model: db_model.as_ref(),
-                    forward_eid: Some(&resolved.eid),
-                    requested_log_id: x_log_id.as_deref(),
-                })
-                .await,
-            );
+            pending_pk = proxy::record_pending_log(proxy::PendingLog {
+                state: &state,
+                user_id: &token.user_id,
+                token_id: token.id,
+                model: model,
+                endpoint: &ep,
+                is_stream: 0,
+                request_content: Some(&request_content_str),
+                upstream_url: Some(&url),
+                channel: &channel,
+                billing_model_hint: Some(billing_model),
+                plugin_tag: plugin_tag.as_deref(),
+                category: Some(resolved_cat.as_str()),
+                db_model: db_model.as_ref(),
+                forward_eid: Some(&resolved.eid),
+                requested_log_id: x_log_id.as_deref(),
+            })
+            .await;
+            ha.set_pending(pending_pk);
             #[cfg(feature = "plugin_volcengine_enhance")]
             if resolved.target_type == "volcengine_media_enhance" {
                 if let Some(pk) = ha.pending_log_id {
@@ -540,6 +550,12 @@ pub async fn video_generations(
             }
         }
 
+        // 上游体根级有 callback_url：改写为系统地址（logs 主键 id）；原地址已存 plugin_tag.cb
+        if let (Some(_), Some(pk)) = (&client_cb, pending_pk.or(ha.pending_log_id)) {
+            let sys = super::vendor_callback::system_callback_url(pk, &headers);
+            super::vendor_callback::rewrite_upstream_callback(&mut upstream_body, &sys);
+        }
+
         // 【连接保护】上游请求+预扣+落库放独立 task，客户端断开后仍能完成
         let pending_log_id = ha.pending_log_id;
         let mapping_detail: Option<String> = mapping_source.map(|src| {
@@ -568,82 +584,186 @@ pub async fn video_generations(
             let dm = db_model.clone();
             let resolved = resolved.clone();
             async move {
-                let builder = state
-                    .http_client
-                    .post(&url)
-                    .header("Content-Type", "application/json");
-                let builder = crate::services::http_client::with_timeout(
-                    forward::apply_request_auth(
-                        builder,
-                        &resolved,
-                        &channel.api_key,
-                        &mut upstream_body,
-                        &channel.base_url,
-                    ),
-                    timeout_ctx.resolve(),
-                );
-                let resp = match builder.send().await {
-                    Ok(resp) => resp,
-                    Err(e) => {
-                        let err_msg = e.to_string();
+                #[cfg(feature = "plugin_comfyui")]
+                let mut comfy_prompt_json: Option<String> = None;
+                let (mut response_content_str, upstream_hdrs) =
+                    if resolved.target_type == "comfyui" {
+                    #[cfg(feature = "plugin_comfyui")]
+                    {
+                        let (wf_id, server_id) =
+                            match crate::api::plugins::comfyui_bridge::resolve_submit_target(
+                                &state,
+                                resolved.comfyui_workflow_id,
+                                resolved.comfyui_server_id,
+                                &resolved.comfyui_server_ids,
+                                resolved.comfyui_dispatch.as_deref(),
+                            )
+                            .await
+                            {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    let msg = e.to_string();
+                                    let bill = crate::relay::ha::FailBill::biz(
+                                        start_time.elapsed().as_millis() as u32,
+                                        msg.clone(),
+                                        msg,
+                                        request_content_str.clone(),
+                                        String::new(),
+                                    );
+                                    return Err(crate::relay::ha::HaAttempt::park(
+                                        &fail_buf, bill, None,
+                                    ));
+                                }
+                            };
+                        match crate::api::plugins::comfyui_bridge::submit_video(
+                            &state,
+                            wf_id,
+                            &upstream_body,
+                            server_id,
+                        )
+                        .await
+                        {
+                            Ok(ack) => {
+                                if let Some(pk) = pending_log_id {
+                                    crate::api::plugins::comfyui_bridge::link_job(
+                                        &state, pk, &ack,
+                                    )
+                                    .await
+                                    .map_err(|e| {
+                                        let msg = format!("关联 ComfyUI 任务失败: {e}");
+                                        let bill = crate::relay::ha::FailBill::biz(
+                                            start_time.elapsed().as_millis() as u32,
+                                            msg.clone(),
+                                            msg,
+                                            request_content_str.clone(),
+                                            ack.prompt_json.clone(),
+                                        );
+                                        crate::relay::ha::HaAttempt::park(&fail_buf, bill, None)
+                                    })?;
+                                }
+                                comfy_prompt_json = Some(ack.prompt_json);
+                                (
+                                    serde_json::json!({
+                                        "id": ack.prompt_id,
+                                        "prompt_id": ack.prompt_id,
+                                        "status": "pending"
+                                    })
+                                    .to_string(),
+                                    axum::http::HeaderMap::new(),
+                                )
+                            }
+                            Err(e) => {
+                                let msg = e.to_string();
+                                let latency_ms = start_time.elapsed().as_millis() as u32;
+                                let bill = crate::relay::ha::FailBill::biz(
+                                    latency_ms,
+                                    msg.clone(),
+                                    msg,
+                                    request_content_str.clone(),
+                                    upstream_body.to_string(),
+                                );
+                                return Err(crate::relay::ha::HaAttempt::park(
+                                    &fail_buf, bill, None,
+                                ));
+                            }
+                        }
+                    }
+                    #[cfg(not(feature = "plugin_comfyui"))]
+                    {
+                        let bill = crate::relay::ha::FailBill::biz(
+                            start_time.elapsed().as_millis() as u32,
+                            "ComfyUI 接入插件未编译",
+                            "ComfyUI 接入插件未编译",
+                            request_content_str.clone(),
+                            String::new(),
+                        );
+                        return Err(crate::relay::ha::HaAttempt::park(&fail_buf, bill, None));
+                    }
+                } else {
+                    let builder = state
+                        .http_client
+                        .post(&url)
+                        .header("Content-Type", "application/json");
+                    let builder = crate::services::http_client::with_timeout(
+                        forward::apply_request_auth(
+                            builder,
+                            &resolved,
+                            &channel.api_key,
+                            &mut upstream_body,
+                            &channel.base_url,
+                        ),
+                        timeout_ctx.resolve(),
+                    );
+                    let resp = match builder.send().await {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            let err_msg = e.to_string();
+                            let latency_ms = start_time.elapsed().as_millis() as u32;
+                            let bill = crate::relay::ha::FailBill::transport(
+                                latency_ms,
+                                err_msg,
+                                &request_content_str,
+                                upstream_body.to_string(),
+                            )
+                            .detail_opt(asset_convert_log.clone());
+                            return Err(crate::relay::ha::HaAttempt::park(&fail_buf, bill, None));
+                        }
+                    };
+
+                    let status = resp.status().as_u16();
+                    if !resp.status().is_success() {
+                        let upstream_hdrs = resp.headers().clone();
+                        let err = resp.text().await.unwrap_or_default();
                         let latency_ms = start_time.elapsed().as_millis() as u32;
-                        let bill = crate::relay::ha::FailBill::transport(
+                        let bill = crate::relay::ha::FailBill::http(
                             latency_ms,
-                            err_msg,
+                            status,
+                            err,
                             &request_content_str,
                             upstream_body.to_string(),
                         )
                         .detail_opt(asset_convert_log.clone());
-                        return Err(crate::relay::ha::HaAttempt::park(&fail_buf, bill, None));
+                        return Err(crate::relay::ha::HaAttempt::park(
+                            &fail_buf,
+                            bill,
+                            Some(upstream_hdrs),
+                        ));
                     }
+
+                    let upstream_hdrs = resp.headers().clone();
+                    let data = resp.bytes().await.unwrap_or_default();
+                    let mut body_str = String::from_utf8_lossy(&data).to_string();
+                    let (converted, post_err) = forward::check_upstream_post_error(
+                        &resolved.target_type,
+                        &body_str,
+                        resolved_cat.as_str(),
+                        crate::relay::response_formatter::is_openai_compatible_path(&raw_path),
+                    );
+                    body_str = converted;
+                    if let Some(err_response) = post_err {
+                        let latency_ms = start_time.elapsed().as_millis() as u32;
+                        let bill = crate::relay::ha::FailBill::biz(
+                            latency_ms,
+                            body_str,
+                            err_response,
+                            request_content_str,
+                            upstream_body.to_string(),
+                        )
+                        .detail("请求失败");
+                        return Err(crate::relay::ha::HaAttempt::park(
+                            &fail_buf,
+                            bill,
+                            Some(upstream_hdrs),
+                        ));
+                    }
+                    (body_str, upstream_hdrs)
                 };
 
-                let status = resp.status().as_u16();
-                if !resp.status().is_success() {
-                    let upstream_hdrs = resp.headers().clone();
-                    let err = resp.text().await.unwrap_or_default();
-                    let latency_ms = start_time.elapsed().as_millis() as u32;
-                    let bill = crate::relay::ha::FailBill::http(
-                        latency_ms,
-                        status,
-                        err,
-                        &request_content_str,
-                        upstream_body.to_string(),
-                    )
-                    .detail_opt(asset_convert_log.clone());
-                    return Err(crate::relay::ha::HaAttempt::park(
-                        &fail_buf,
-                        bill,
-                        Some(upstream_hdrs),
-                    ));
-                }
-
-                let upstream_hdrs = resp.headers().clone();
-                let data = resp.bytes().await.unwrap_or_default();
-                let mut response_content_str = String::from_utf8_lossy(&data).to_string();
-                let (converted, post_err) = forward::check_upstream_post_error(
-                    &resolved.target_type,
-                    &response_content_str,
-                    resolved_cat.as_str(),
-                    crate::relay::response_formatter::is_openai_compatible_path(&raw_path),
-                );
-                response_content_str = converted;
-                if let Some(err_response) = post_err {
-                    let latency_ms = start_time.elapsed().as_millis() as u32;
-                    let bill = crate::relay::ha::FailBill::biz(
-                        latency_ms,
-                        response_content_str,
-                        err_response,
-                        request_content_str,
-                        upstream_body.to_string(),
-                    )
-                    .detail("请求失败");
-                    return Err(crate::relay::ha::HaAttempt::park(
-                        &fail_buf,
-                        bill,
-                        Some(upstream_hdrs),
-                    ));
-                }
+                #[cfg(feature = "plugin_comfyui")]
+                let upstream_req = comfy_prompt_json
+                    .unwrap_or_else(|| upstream_body.to_string());
+                #[cfg(not(feature = "plugin_comfyui"))]
+                let upstream_req = upstream_body.to_string();
 
                 let pre_deduct_gift = proxy::pre_deduct_or_intercept(
                     &state,
@@ -655,7 +775,7 @@ pub async fn video_generations(
                     start_time,
                     0,
                     &request_content_str,
-                    &upstream_body.to_string(),
+                    &upstream_req,
                     None,
                     pending_log_id,
                     dm.as_ref(),
@@ -708,7 +828,7 @@ pub async fn video_generations(
                     is_stream: 0,
                     request_content: Some(request_content_str),
                     response_content: Some(response_content_str.clone()),
-                    upstream_req_content: Some(upstream_body.to_string()),
+                    upstream_req_content: Some(upstream_req),
                     billing_detail: Some(billing_detail),
                     hint_category: Some(resolved_cat.as_str()),
                     pending_log_id: pending_log_id,

@@ -6,11 +6,8 @@
  */
 
 import React, { useEffect, useState } from 'react';
+import { useOutletContext } from 'react-router-dom';
 import { getAnnouncementLabel } from '../../utils/announcement';
-import {
-  parseNotificationPreferences,
-  shouldShowWebNotifications,
-} from '../../utils/notificationPrefs';
 import { Row, Col, Card, Typography, Table, Space, List, Progress, Alert, Grid, Spin, Modal, Button, Statistic, Divider, Tooltip as AntTooltip, DatePicker, Radio, Tag } from 'antd';
 import MobileCardList, { MobileCard, CardRow } from '../../components/MobileCardList';
 import {
@@ -60,7 +57,8 @@ const Dashboard: React.FC = () => {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [liveMetrics, setLiveMetrics] = useState<LiveMetricsSnapshot | null>(null);
-  const [pinnedAnnouncement, setPinnedAnnouncement] = useState<Announcement | null>(null);
+  const outletContext = useOutletContext<{ announcements: Announcement[] } | null>();
+  const pinnedAnnouncement = outletContext?.announcements.find((a) => a.is_pinned === 1) || null;
   const { RangePicker } = DatePicker;
   const isAdmin = user?.role === 'admin';
   const [dateRange, setDateRange] = useState<[any, any] | null>(() => [
@@ -271,38 +269,13 @@ const Dashboard: React.FC = () => {
     }
   };
 
-  const fetchAnnouncement = async () => {
-    const prefs = parseNotificationPreferences(
-      user?.notification_preferences,
-      settings?.notification?.low_balance_threshold ?? 100.0,
-    );
-    if (!shouldShowWebNotifications(prefs, settings?.notification)) {
-      setPinnedAnnouncement(null);
-      return;
-    }
-    try {
-      const response = await (request.get('/announcements/public') as any);
-      if (response.data && response.data.length > 0) {
-        const pinned = response.data.find((a: Announcement) => a.is_pinned === 1);
-        if (pinned) {
-          setPinnedAnnouncement(pinned);
-        } else {
-          setPinnedAnnouncement(null);
-        }
-      } else {
-        setPinnedAnnouncement(null);
-      }
-    } catch (e) {}
-  };
-
   useEffect(() => {
     setLoading(true);
     fetchStats();
-    fetchAnnouncement();
     // 与后端 dashboard SWR 缓存 TTL（180s）对齐，减轻 logs 大表聚合压力
     const timer = setInterval(fetchStats, 180000);
     return () => clearInterval(timer);
-  }, [dateRange, user?.notification_preferences]);
+  }, [dateRange]);
 
   useEffect(() => {
     fetchLiveMetrics();

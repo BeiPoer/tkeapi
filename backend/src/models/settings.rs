@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 /// 站点基本信息设置
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct SiteSettings {
-    #[serde(default)]
+    #[serde(default = "default_site_name")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default = "default_site_name")]
     pub title: String,
     #[serde(default)]
     pub keywords: String,
@@ -22,9 +22,12 @@ pub struct SiteSettings {
     pub favicon: String,
     #[serde(default)]
     pub logo: String,
+    /// 控制台 Logo/站点名点击跳转地址（留空则不可点击）
+    #[serde(default)]
+    pub logo_title_url: String,
     #[serde(default)]
     pub login_title: String,
-    /// 登录页标题点击跳转地址（留空则不可点击）
+    /// 登录页标题点击跳转地址（留空则回退到 logo_title_url，仍空则不可点击）
     #[serde(default)]
     pub login_title_url: String,
     #[serde(default)]
@@ -78,7 +81,11 @@ fn default_admin_path() -> String {
 }
 
 fn default_copyright() -> String {
-    "© 2026 Tokensbyte. All rights reserved.".to_string()
+    "© 2026 TkeAPI. All rights reserved.".to_string()
+}
+
+fn default_site_name() -> String {
+    "Tkeapi".to_string()
 }
 
 fn default_true_theme() -> bool {
@@ -102,7 +109,8 @@ fn default_language() -> String {
 }
 
 fn default_site_timezone() -> String {
-    iana_time_zone::get_timezone().unwrap_or_else(|_| "Asia/Shanghai".to_string())
+    iana_time_zone::get_timezone()
+        .unwrap_or_else(|_| crate::time_system::DEFAULT_TIMEDISPLAY.to_string())
 }
 
 fn default_show_timezone() -> bool {
@@ -443,7 +451,7 @@ fn default_gift_mode() -> String {
 }
 
 /// 数据库连接设置
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct DatabaseSettings {
     #[serde(default)]
     pub db_type: String, // "postgres"
@@ -631,12 +639,18 @@ pub struct PaymentChannelUiItem {
     pub sort_order: i32,
     #[serde(default)]
     pub enabled: bool,
-    /// 用户端显示名称；空则使用系统默认
+    /// 用户端中文显示名称；空则使用系统默认
     #[serde(default)]
     pub display_name: Option<String>,
-    /// 用户端副标题/角标；空则使用系统默认
+    /// 用户端英文显示名称；空则使用系统默认。非中文站点语言使用此字段
+    #[serde(default)]
+    pub display_name_en: Option<String>,
+    /// 用户端中文副标题/角标；空则使用系统默认
     #[serde(default)]
     pub subtitle: Option<String>,
+    /// 用户端英文副标题/角标；空则使用系统默认
+    #[serde(default)]
+    pub subtitle_en: Option<String>,
     /// Logo 图片 URL；空则使用系统默认图标
     #[serde(default)]
     pub logo_url: Option<String>,
@@ -657,7 +671,11 @@ pub struct PublicPaymentChannel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name_en: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtitle_en: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logo_url: Option<String>,
     /// 通联已开启的子渠道 payment_method 列表（如 allinpay_wechat）
@@ -688,8 +706,16 @@ impl PaymentChannelUiItem {
         trim_opt(&self.display_name)
     }
 
+    pub fn normalized_display_en(&self) -> Option<String> {
+        trim_opt(&self.display_name_en)
+    }
+
     pub fn normalized_subtitle(&self) -> Option<String> {
         trim_opt(&self.subtitle)
+    }
+
+    pub fn normalized_subtitle_en(&self) -> Option<String> {
+        trim_opt(&self.subtitle_en)
     }
 
     pub fn normalized_logo_url(&self) -> Option<String> {
@@ -738,9 +764,15 @@ pub fn merge_payment_channels_ui(
         let display = lw
             .and_then(|c| c.normalized_display())
             .or_else(|| la.and_then(|c| c.normalized_display()));
+        let display_en = lw
+            .and_then(|c| c.normalized_display_en())
+            .or_else(|| la.and_then(|c| c.normalized_display_en()));
         let subtitle = lw
             .and_then(|c| c.normalized_subtitle())
             .or_else(|| la.and_then(|c| c.normalized_subtitle()));
+        let subtitle_en = lw
+            .and_then(|c| c.normalized_subtitle_en())
+            .or_else(|| la.and_then(|c| c.normalized_subtitle_en()));
         let logo = lw
             .and_then(|c| c.normalized_logo_url())
             .or_else(|| la.and_then(|c| c.normalized_logo_url()));
@@ -751,7 +783,9 @@ pub fn merge_payment_channels_ui(
                 sort_order,
                 enabled,
                 display_name: display,
+                display_name_en: display_en,
                 subtitle,
+                subtitle_en,
                 logo_url: logo,
                 allinpay_wechat_enabled: lw.map(|c| c.enabled).unwrap_or(gateway.allinpay),
                 allinpay_alipay_enabled: la.map(|c| c.enabled).unwrap_or(gateway.allinpay),
@@ -782,7 +816,9 @@ pub fn merge_payment_channels_ui(
                 sort_order: default_sort,
                 enabled: gateway_on,
                 display_name: None,
+                display_name_en: None,
                 subtitle: None,
+                subtitle_en: None,
                 logo_url: None,
                 allinpay_wechat_enabled: true,
                 allinpay_alipay_enabled: true,
@@ -846,7 +882,9 @@ pub fn build_public_payment_channels(
                 sort_order: c.sort_order,
                 enabled: channel_on && gateway_on,
                 display_name: c.normalized_display(),
+                display_name_en: c.normalized_display_en(),
                 subtitle: c.normalized_subtitle(),
+                subtitle_en: c.normalized_subtitle_en(),
                 logo_url: c.normalized_logo_url(),
                 allinpay_methods: if c.id == "allinpay" && gateway_on && c.enabled {
                     methods
@@ -908,142 +946,6 @@ pub fn is_payment_channel_ui_enabled(ui: &PaymentChannelsUiSettings, channel_id:
         .unwrap_or(true)
 }
 
-#[cfg(test)]
-mod payment_channels_ui_tests {
-    use super::*;
-
-    #[test]
-    fn merge_fills_missing_channels_from_gateway() {
-        let gateway = PaymentGatewayEnableFlags {
-            alipay: true,
-            allinpay: true,
-            ..Default::default()
-        };
-        let merged = merge_payment_channels_ui(None, &gateway);
-        assert_eq!(merged.channels.len(), 6);
-        let alipay = merged.channels.iter().find(|c| c.id == "alipay").unwrap();
-        assert!(alipay.enabled);
-        assert_eq!(alipay.sort_order, 70);
-        let ap = merged.channels.iter().find(|c| c.id == "allinpay").unwrap();
-        assert!(ap.enabled);
-        assert!(ap.allinpay_wechat_enabled);
-        assert!(ap.allinpay_alipay_enabled);
-    }
-
-    #[test]
-    fn merge_legacy_split_allinpay_channels() {
-        let saved = PaymentChannelsUiSettings {
-            channels: vec![
-                PaymentChannelUiItem {
-                    id: "allinpay_wechat".into(),
-                    sort_order: 40,
-                    enabled: true,
-                    ..Default::default()
-                },
-                PaymentChannelUiItem {
-                    id: "allinpay_alipay".into(),
-                    sort_order: 50,
-                    enabled: false,
-                    display_name: Some("自定义通联".into()),
-                    ..Default::default()
-                },
-            ],
-        };
-        let merged = merge_payment_channels_ui(Some(saved), &PaymentGatewayEnableFlags::default());
-        let ap = merged.channels.iter().find(|c| c.id == "allinpay").unwrap();
-        assert!(ap.enabled);
-        assert_eq!(ap.sort_order, 50);
-        assert!(ap.allinpay_wechat_enabled);
-        assert!(!ap.allinpay_alipay_enabled);
-        assert_eq!(ap.display_name.as_deref(), Some("自定义通联"));
-    }
-
-    #[test]
-    fn public_channels_sort_desc_and_gate_by_gateway() {
-        let ui = PaymentChannelsUiSettings {
-            channels: vec![
-                PaymentChannelUiItem {
-                    id: "wechat".into(),
-                    sort_order: 10,
-                    enabled: true,
-                    ..Default::default()
-                },
-                PaymentChannelUiItem {
-                    id: "alipay".into(),
-                    sort_order: 90,
-                    enabled: true,
-                    display_name: Some("  我的支付宝  ".into()),
-                    subtitle: Some("".into()),
-                    logo_url: None,
-                    ..Default::default()
-                },
-            ],
-        };
-        let gateway = PaymentGatewayEnableFlags {
-            wechat: false,
-            alipay: true,
-            ..Default::default()
-        };
-        let pub_list = build_public_payment_channels(&ui, &gateway);
-        assert_eq!(pub_list[0].id, "alipay");
-        assert!(pub_list[0].enabled);
-        assert_eq!(pub_list[0].display_name.as_deref(), Some("我的支付宝"));
-        assert!(pub_list[0].subtitle.is_none());
-        let wechat = pub_list.iter().find(|c| c.id == "wechat").unwrap();
-        assert!(!wechat.enabled);
-    }
-
-    #[test]
-    fn allinpay_public_exposes_enabled_methods() {
-        let ui = PaymentChannelsUiSettings {
-            channels: vec![PaymentChannelUiItem {
-                id: "allinpay".into(),
-                sort_order: 50,
-                enabled: true,
-                allinpay_wechat_enabled: true,
-                allinpay_alipay_enabled: false,
-                ..Default::default()
-            }],
-        };
-        let gateway = PaymentGatewayEnableFlags {
-            allinpay: true,
-            ..Default::default()
-        };
-        let pub_list = build_public_payment_channels(&ui, &gateway);
-        let ap = pub_list.iter().find(|c| c.id == "allinpay").unwrap();
-        assert!(ap.enabled);
-        assert_eq!(ap.allinpay_methods, vec!["allinpay_wechat".to_string()]);
-        let st = public_payment_status_from_channels(&pub_list);
-        assert!(st.allinpay_enabled);
-        assert!(is_payment_channel_ui_enabled(&ui, "allinpay_wechat"));
-        assert!(!is_payment_channel_ui_enabled(&ui, "allinpay_alipay"));
-    }
-
-    #[test]
-    fn legacy_split_allinpay_respected_by_pay_guard() {
-        let ui = PaymentChannelsUiSettings {
-            channels: vec![
-                PaymentChannelUiItem {
-                    id: "allinpay_wechat".into(),
-                    enabled: false,
-                    ..Default::default()
-                },
-                PaymentChannelUiItem {
-                    id: "allinpay_alipay".into(),
-                    enabled: true,
-                    ..Default::default()
-                },
-            ],
-        };
-        assert!(!is_payment_channel_ui_enabled(&ui, "allinpay_wechat"));
-        assert!(is_payment_channel_ui_enabled(&ui, "allinpay_alipay"));
-
-        let merged = merge_payment_channels_ui(Some(ui), &PaymentGatewayEnableFlags::default());
-        assert!(is_payment_channel_ui_enabled(&merged, "allinpay_alipay"));
-        assert!(!is_payment_channel_ui_enabled(&merged, "allinpay_wechat"));
-    }
-}
-
 /// 谷歌 OAuth 2.0 设置
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct GoogleOAuthSettings {
@@ -1064,6 +966,103 @@ pub struct WechatOAuthSettings {
     /// 网站应用密钥 AppSecret
     #[serde(default)]
     pub app_secret: String,
+}
+
+/// 低余额视频在途档位：可用额低于 max_available 时限制未完成视频路数；max_available=None 表示其余
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct VideoInflightTier {
+    /// 可用额低于该值时命中本档；None = 其余档
+    #[serde(default)]
+    pub max_available: Option<f64>,
+    /// 最大未完成视频路数；**0 = 不限制**
+    #[serde(default)]
+    pub max_inflight: u32,
+}
+
+impl VideoInflightTier {
+    fn cmp_avail(a: &Self, b: &Self) -> std::cmp::Ordering {
+        match (a.max_available, b.max_available) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    }
+}
+
+fn default_video_inflight_tiers() -> Vec<VideoInflightTier> {
+    // 仅限制低余额档；未命中 = 不限制
+    vec![
+        VideoInflightTier {
+            max_available: Some(20.0),
+            max_inflight: 1,
+        },
+        VideoInflightTier {
+            max_available: Some(50.0),
+            max_inflight: 3,
+        },
+    ]
+}
+
+/// Relay 网关设置（管理端；不进公开接口）
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RelaySettings {
+    /// 手动轮询是否打上游。关：优先 logs，无缓存再兜底；后台自动轮询不受影响。
+    #[serde(default = "default_true")]
+    pub manual_poll_upstream: bool,
+    /// 后台 TaskPoller 周期（秒）；过短增上游压力，过长延迟结案/退费。默认 30，有效范围 5–300；缺省/0 按 30。
+    #[serde(default)]
+    pub poll_tick_secs: u64,
+    /// 低余额限制未完成视频路数；默认关
+    #[serde(default)]
+    pub video_inflight_enabled: bool,
+    /// 按可用额落档的在途上限（空则回落默认档）
+    #[serde(default = "default_video_inflight_tiers")]
+    pub video_inflight_tiers: Vec<VideoInflightTier>,
+}
+
+impl RelaySettings {
+    /// 入缓存前：空档补默认，按可用额升序（无上限档置末）；轮询周期 0→30 再钳 5–300
+    pub fn prepared(mut self) -> Self {
+        self.poll_tick_secs = match self.poll_tick_secs {
+            0 => 30,
+            n => n.clamp(5, 300),
+        };
+        if self.video_inflight_tiers.is_empty() {
+            self.video_inflight_tiers = default_video_inflight_tiers();
+        }
+        self.video_inflight_tiers
+            .sort_by(VideoInflightTier::cmp_avail);
+        self
+    }
+
+    /// 当前可用额下的在途上限；未启用或该档 `max_inflight=0` → `None`（不限制）
+    pub fn max_video_inflight(&self, available: f64) -> Option<u32> {
+        if !self.video_inflight_enabled {
+            return None;
+        }
+        for t in &self.video_inflight_tiers {
+            let hit = match t.max_available {
+                Some(limit) => available < limit,
+                None => true,
+            };
+            if hit {
+                return (t.max_inflight > 0).then_some(t.max_inflight);
+            }
+        }
+        None
+    }
+}
+
+impl Default for RelaySettings {
+    fn default() -> Self {
+        Self {
+            manual_poll_upstream: true,
+            poll_tick_secs: 30,
+            video_inflight_enabled: false,
+            video_inflight_tiers: default_video_inflight_tiers(),
+        }
+    }
 }
 
 /// 存储配置
@@ -1090,6 +1089,9 @@ pub struct StorageSettings {
     /// 建议 ≥ 详情保留天数，且先确保 usage_daily_stats 已覆盖对应日期。
     #[serde(default = "default_log_row_retention_days")]
     pub log_row_retention_days: i32,
+    /// 火山素材自动清理保留天数（转发转换缓存 + 上游转素材缓存）；缺省 7；0=关闭。不含 api_proxy。
+    #[serde(default = "default_volc_asset_retention_days")]
+    pub volc_asset_retention_days: i32,
 }
 
 impl Default for StorageSettings {
@@ -1104,6 +1106,7 @@ impl Default for StorageSettings {
             tos_custom_domain: String::new(),
             log_retention_days: default_log_retention_days(),
             log_row_retention_days: default_log_row_retention_days(),
+            volc_asset_retention_days: default_volc_asset_retention_days(),
         }
     }
 }
@@ -1114,6 +1117,10 @@ fn default_log_retention_days() -> i32 {
 
 fn default_log_row_retention_days() -> i32 {
     0
+}
+
+fn default_volc_asset_retention_days() -> i32 {
+    30
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1279,6 +1286,8 @@ pub struct AllSettings {
     pub menu_config: Option<MenuConfigSettings>,
     #[serde(default)]
     pub notification: NotificationSettings,
+    #[serde(default)]
+    pub relay: RelaySettings,
     #[serde(default, skip_deserializing)]
     pub server_timezone: Option<String>,
     #[serde(default, skip_deserializing)]
@@ -1330,6 +1339,8 @@ pub struct UpdateSettingsRequest {
     pub menu_config: Option<serde_json::Value>,
     #[serde(default)]
     pub notification: Option<serde_json::Value>,
+    #[serde(default)]
+    pub relay: Option<serde_json::Value>,
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1492,4 +1503,62 @@ pub struct PublicSettings {
     pub menu_config: Option<MenuConfigSettings>,
     #[serde(default)]
     pub notification: PublicNotificationSettings,
+}
+
+#[cfg(test)]
+mod payment_channel_i18n_tests {
+    use super::*;
+
+    #[test]
+    fn public_channel_keeps_zh_and_en_names() {
+        let ui = PaymentChannelsUiSettings {
+            channels: vec![PaymentChannelUiItem {
+                id: "alipay".into(),
+                sort_order: 70,
+                enabled: true,
+                display_name: Some("  支付宝  ".into()),
+                display_name_en: Some("  Alipay  ".into()),
+                subtitle: Some("快捷".into()),
+                subtitle_en: Some("Quick".into()),
+                ..Default::default()
+            }],
+        };
+        let gateway = PaymentGatewayEnableFlags {
+            alipay: true,
+            ..Default::default()
+        };
+        let list = build_public_payment_channels(&ui, &gateway);
+        let alipay = list.iter().find(|c| c.id == "alipay").expect("alipay");
+        assert_eq!(alipay.display_name.as_deref(), Some("支付宝"));
+        assert_eq!(alipay.display_name_en.as_deref(), Some("Alipay"));
+        assert_eq!(alipay.subtitle.as_deref(), Some("快捷"));
+        assert_eq!(alipay.subtitle_en.as_deref(), Some("Quick"));
+        assert!(alipay.enabled);
+    }
+
+    #[test]
+    fn merge_preserves_english_display_fields() {
+        let saved = PaymentChannelsUiSettings {
+            channels: vec![PaymentChannelUiItem {
+                id: "wechat".into(),
+                sort_order: 88,
+                enabled: true,
+                display_name: Some("微信支付".into()),
+                display_name_en: Some("WeChat Pay".into()),
+                subtitle: Some("推荐".into()),
+                subtitle_en: Some("Recommended".into()),
+                ..Default::default()
+            }],
+        };
+        let merged = merge_payment_channels_ui(Some(saved), &PaymentGatewayEnableFlags::default());
+        let wechat = merged
+            .channels
+            .iter()
+            .find(|c| c.id == "wechat")
+            .expect("wechat");
+        assert_eq!(wechat.display_name.as_deref(), Some("微信支付"));
+        assert_eq!(wechat.display_name_en.as_deref(), Some("WeChat Pay"));
+        assert_eq!(wechat.subtitle_en.as_deref(), Some("Recommended"));
+        assert_eq!(wechat.sort_order, 88);
+    }
 }

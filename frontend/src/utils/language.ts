@@ -5,6 +5,44 @@
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
+/** 语言代码 → 显示名称；新增语言时与设置页 ALL_LANGUAGES、i18n resources 同步 */
+export const LANG_NAME_MAP: Record<string, string> = {
+  zh: '简体中文',
+  'zh-TW': '繁體中文',
+  en: 'English',
+  ja: '日本語',
+  ko: '한국어',
+  vi: 'Tiếng Việt',
+  fr: 'Français',
+  de: 'Deutsch',
+  es: 'Español',
+  pt: 'Português',
+  ru: 'Русский',
+  ar: 'العربية',
+};
+
+/** 内容/文档语言：保留 zh-TW，其余区域码收成主语言（zh-CN → zh） */
+export function resolveContentLang(lang?: string): string {
+  const raw = (lang || 'zh').trim();
+  const lower = raw.toLowerCase().replace('_', '-');
+  if (lower === 'zh-tw' || lower.startsWith('zh-hant') || lower === 'zh-hk' || lower === 'zh-mo') {
+    return 'zh-TW';
+  }
+  return raw.split('-')[0] || 'zh';
+}
+
+/** Intl/Date 用的 BCP 47 locale */
+export function toDisplayLocale(lang?: string): string {
+  const raw = (lang || 'zh').toLowerCase().replace('_', '-');
+  if (raw === 'zh-tw' || raw.startsWith('zh-hant') || raw === 'zh-hk' || raw === 'zh-mo') return 'zh-TW';
+  if (raw.startsWith('zh')) return 'zh-CN';
+  if (raw.startsWith('en')) return 'en-US';
+  if (raw.startsWith('ja')) return 'ja-JP';
+  if (raw.startsWith('ko')) return 'ko-KR';
+  if (raw.startsWith('vi')) return 'vi-VN';
+  return lang || 'zh-CN';
+}
+
 /** 仅在用户手动切换语言时写入；未设置则跟随站点 default_language */
 const USER_LANGUAGE_KEY = 'tokensbyte_user_language';
 

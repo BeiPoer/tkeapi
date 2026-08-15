@@ -18,6 +18,7 @@ import type { WalletStats, RechargeRecord } from '../../types';
 import dayjs from 'dayjs';
 
 import RechargeModal from './RechargeModal';
+import { rechargeTypeColor, rechargeTypeFilters, rechargeTypeLabel } from '../../utils/rechargeType';
 
 const { Title, Text } = Typography;
 const { useBreakpoint } = Grid;
@@ -212,58 +213,14 @@ const Wallet: React.FC = () => {
       dataIndex: 'recharge_type',
       key: 'recharge_type',
       align: 'center' as const,
-      filters: [
-        { text: isEn ? 'Manual' : '手动操作', value: 'manual' },
-        { text: isEn ? 'Gift' : '赠送金', value: 'gift' },
-        { text: isEn ? 'Registration' : '注册赠送', value: 'registration' },
-        { text: isEn ? 'Commission' : '邀请返佣', value: 'commission' },
-        { text: isEn ? 'Alipay' : '支付宝', value: 'alipay' },
-        { text: isEn ? 'WeChat' : '微信', value: 'wechat' },
-        { text: isEn ? 'Redemption' : '兑换码', value: 'redemption' },
-      ],
-      onFilter: (value: string | number | boolean, record: RechargeRecord) => record.recharge_type === value,
-      render: (type: string, record: RechargeRecord) => {
-        let manualText = isEn ? 'Manual' : '手动';
-        if (type === 'manual' && record.wallet_type === 'credit') {
-          manualText = isEn ? 'Credit Manual' : '信控手动';
-        }
-        
-        const textMap: Record<string, string> = {
-          manual: manualText,
-          gift: isEn ? 'Gift' : '赠送',
-          registration: isEn ? 'Registration' : '注册',
-          commission: isEn ? 'Commission' : '返佣',
-          alipay: isEn ? 'Alipay' : '支付宝',
-          wechat: isEn ? 'WeChat' : '微信',
-          allinpay_wechat: isEn ? 'Allinpay WeChat' : '通联微信',
-          'allinpay wechat': isEn ? 'Allinpay WeChat' : '通联微信',
-          allinpay_alipay: isEn ? 'Allinpay Alipay' : '通联支付宝',
-          'allinpay alipay': isEn ? 'Allinpay Alipay' : '通联支付宝',
-          stripe: 'Stripe',
-          bonuspay: 'BonusPay',
-          hyperbc: 'HyperBC',
-          redemption: isEn ? 'Redemption' : '兑换码',
-          other: isEn ? 'Other' : '其它'
-        };
-        const colorMap: Record<string, string> = {
-          manual: 'blue',
-          gift: 'cyan',
-          registration: 'purple',
-          commission: 'gold',
-          alipay: 'blue',
-          wechat: 'green',
-          allinpay_wechat: 'green',
-          'allinpay wechat': 'green',
-          allinpay_alipay: 'blue',
-          'allinpay alipay': 'blue',
-          stripe: 'purple',
-          bonuspay: 'geekblue',
-          hyperbc: 'purple',
-          redemption: 'orange',
-          other: 'default'
-        };
-        return <Tag color={colorMap[type] || 'default'} bordered={false} style={{ margin: 0 }}>{textMap[type] || type}</Tag>;
-      }
+      filters: rechargeTypeFilters(),
+      onFilter: (value: string | number | boolean, record: RechargeRecord) =>
+        record.recharge_type === value,
+      render: (type: string, record: RechargeRecord) => (
+        <Tag color={rechargeTypeColor(type)} bordered={false} style={{ margin: 0 }}>
+          {rechargeTypeLabel(type, record.wallet_type)}
+        </Tag>
+      ),
     },
     {
       title: t('wallet.remark'),

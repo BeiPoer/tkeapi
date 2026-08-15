@@ -155,7 +155,7 @@ pub async fn get_model_billing_rule(
     .unwrap_or(None)?;
 
     // 请求开始时刻锁定峰谷倍率到 applied_multiplier（结算时不再按当前时钟重算）
-    let (default_site_tz, _) = super::get_cached_config(state).await;
+    let default_site_tz = super::relay_settings::get_cached_site_timezone(&state.db).await;
     rule.lock_time_multiplier(&default_site_tz);
 
     Some(rule)
@@ -422,6 +422,33 @@ pub async fn check_access_with_model(
         )
         .await;
         return Err(AppError::PaymentRequired(msg));
+    }
+
+    // 低余额：限制未完成视频路数（金额门禁已过；不二次扣在途预扣）
+    // 入口类别或模型真实类型任含「视频」即生效（含视频增强）
+    let is_video = category.is_some_and(|c| c.contains("视频")) || resolved_cat.contains("视频");
+    if is_video {
+        if let Err(e) =
+            super::relay_settings::enforce_video_inflight_gate(&state.db, &token.user_id, avail)
+                .await
+        {
+            if let AppError::TooManyRequests(msg) = &e {
+                record_error_log(
+                    state,
+                    &token.user_id,
+                    ch_id,
+                    Some(token.id),
+                    model,
+                    429,
+                    ep,
+                    msg,
+                    up_url,
+                    Some(&resolved_cat),
+                )
+                .await;
+            }
+            return Err(e);
+        }
     }
 
     Ok((pre_deduction, db_model, resolved_cat))
@@ -691,7 +718,7 @@ pub struct PendingLog<'a> {
     pub requested_log_id: Option<&'a str>,
 }
 
-/// 在上游请求发送前预记录一条"处理中"日志（status_code=0），返回 log_id。
+/// 在上游请求发送前预记录一条"处理中"日志（status_code=0），返回 logs 主键 id。
 /// 使用户能立即在日志页面看到请求记录，而不必等待上游响应。
 /// 存入的信息包括：用户信息、渠道、模型、请求参数、端点、流式标志等。
 /// 预记录阶段不存储 upstream_req_content（上游请求参数），因为此时请求尚未真正发送给上游，
@@ -1211,7 +1238,7 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
 
         let (settled_cost, apply_balance) = crate::money::settlement_delta(cost, pre_deducted);
         if settled_cost > 0.0 || pre_deducted > 0.0 {
-            let (site_tz, _) = crate::relay::get_cached_config(state).await;
+            let site_tz = crate::relay::relay_settings::get_cached_site_timezone(&state.db).await;
             let tz = crate::api::date_helper::resolve_user_timedisplay_name(
                 &state.db,
                 &token.user_id,
@@ -1307,8 +1334,9 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
 
         // 【一条日志原则】有 pending_log_id 时 UPDATE 预记录行，否则 INSERT 新行
         // 成功写成功子渠；HA 全失败由 ha.fail 按首败一次落库
+        // CAS status_code=0：避免孤儿清理/启动恢复已关单后退款后又被结算扣费覆盖
         if let Some(log_id) = pending_log_id {
-            sqlx::query(&state.db.format_query(
+            let touched = sqlx::query(&state.db.format_query(
                 "UPDATE logs SET channel_id = ?, model = ?, \
                  prompt_tokens = ?, completion_tokens = ?, cached_tokens = ?, \
                  cost = ?, status_code = ?, endpoint = ?, error_message = ?, latency_ms = ?, \
@@ -1319,7 +1347,7 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
                  billing_features = ?, pre_deduct_gift = ?, is_completed = ?, \
                  channel_config_id = ?, is_ha = ?, \
                  plugin_tag = CASE WHEN ? = '' THEN plugin_tag ELSE ? END \
-                 WHERE id = ?",
+                 WHERE id = ? AND status_code = 0",
             ))
             .bind(channel_id)
             .bind(model_name)
@@ -1349,7 +1377,12 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
             .bind(plugin_tag.unwrap_or(""))
             .bind(log_id)
             .execute(&mut *tx)
-            .await?;
+            .await?
+            .rows_affected();
+            if touched == 0 {
+                // 已被孤儿清理/启动恢复/并发结案；勿与预扣余额不足的 RowNotFound 混淆
+                return Err(sqlx::Error::Protocol("pending_cas_miss".into()));
+            }
         } else {
             let fb_prefix = if !final_action_type.is_empty() && final_action_type != "聊天" { "tsk_" } else { "log_" };
             let fallback_log_id = format!("{}{}", fb_prefix, ulid::Ulid::new().to_string().to_lowercase());
@@ -1397,20 +1430,12 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
     if let Err(e) = res {
         tracing::error!("[RelayUsage] 记录使用日志失败: {:?}", e);
         // 结算事务失败：若已预扣且日志仍为处理中，立即 CAS 退款（不必等孤儿任务）
-        if pre_deducted > 0.0 {
+        // CAS 未命中说明他处已关单/退款，禁止再补偿
+        let cas_miss = matches!(&e, sqlx::Error::Protocol(m) if m == "pending_cas_miss");
+        if pre_deducted > 0.0 && !cas_miss {
             const DETAIL: &str = "计费落库失败，预扣费已退回";
             if let Some(log_id) = pending_log_id {
-                let _ = close_pending_and_refund(
-                    state,
-                    log_id,
-                    &token.user_id,
-                    pre_deducted,
-                    pre_deduct_gift,
-                    500,
-                    DETAIL,
-                    DETAIL,
-                )
-                .await;
+                let _ = close_pending_and_refund(state, log_id, 500, DETAIL, DETAIL).await;
             } else if let Err(e) = refund_wallet_sql(
                 &state.db,
                 &state.db.pool,
@@ -1437,53 +1462,88 @@ pub async fn record_and_bill_inner(p: BillRecord<'_>) {
     }
 }
 
-/// CAS 关闭 status_code=0 的 pending 日志，并按 cost/pre_deduct_gift 退回双钱包。
-/// 返回 true 表示本调用抢到 CAS 并已提交。
-async fn close_pending_and_refund(
+/// 锁定仍为 pending 的日志预扣凭证；无行则 Ok(None)。
+async fn lock_pending_prepay(
+    db: &crate::db::Database,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    log_id: i64,
+) -> Result<Option<(String, f64, f64)>, sqlx::Error> {
+    sqlx::query_as(&db.format_query(
+        "SELECT user_id, cost, pre_deduct_gift FROM logs \
+         WHERE id = ? AND status_code = 0 FOR UPDATE",
+    ))
+    .bind(log_id)
+    .fetch_optional(&mut **tx)
+    .await
+}
+
+/// `close=None`：仅退预扣并清零 cost，保持 pending；`close=Some`：关单并退预扣。
+async fn settle_pending_prepay(
     state: &Arc<AppState>,
     log_id: i64,
-    user_id: &str,
-    cost: f64,
-    pre_deduct_gift: f64,
-    status_code: i32,
-    error_message: &str,
-    billing_detail: &str,
+    close: Option<(i32, &str, &str)>,
 ) -> bool {
+    let tag = if close.is_some() {
+        "PendingClose"
+    } else {
+        "HA"
+    };
     let mut tx = match state.db.pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
-            tracing::error!("[PendingClose] 开启事务失败 日志ID={}: {:?}", log_id, e);
+            tracing::error!("[{tag}] 开启事务失败 日志ID={}: {:?}", log_id, e);
             return false;
         }
     };
 
-    let touched = match sqlx::query(&state.db.format_query(
-        "UPDATE logs SET status_code = ?, cost = 0.0, pre_deduct_gift = 0.0, \
-         error_message = ?, billing_detail = ?, is_completed = 1 \
-         WHERE id = ? AND status_code = 0",
-    ))
-    .bind(status_code)
-    .bind(error_message)
-    .bind(billing_detail)
-    .bind(log_id)
-    .execute(&mut *tx)
-    .await
-    {
-        Ok(r) => r.rows_affected(),
+    let row = match lock_pending_prepay(&state.db, &mut tx, log_id).await {
+        Ok(r) => r,
         Err(e) => {
-            tracing::error!("[PendingClose] 更新日志失败 日志ID={}: {:?}", log_id, e);
+            tracing::error!("[{tag}] 锁定日志失败 日志ID={}: {:?}", log_id, e);
             let _ = tx.rollback().await;
             return false;
         }
     };
-    if touched == 0 {
+    let Some((user_id, cost, pre_deduct_gift)) = row else {
+        let _ = tx.rollback().await;
+        return false;
+    };
+    let cost = crate::money::round_money(cost);
+    let pre_deduct_gift = crate::money::round_money(pre_deduct_gift);
+
+    if close.is_none() && cost <= 0.0 && pre_deduct_gift <= 0.0 {
         let _ = tx.rollback().await;
         return false;
     }
 
-    if let Err(e) = refund_wallet_sql(&state.db, &mut *tx, user_id, cost, pre_deduct_gift).await {
+    let upd = match close {
+        Some((status_code, error_message, billing_detail)) => sqlx::query(&state.db.format_query(
+            "UPDATE logs SET status_code = ?, cost = 0.0, pre_deduct_gift = 0.0, \
+             error_message = ?, billing_detail = ?, is_completed = 1 \
+             WHERE id = ? AND status_code = 0",
+        ))
+        .bind(status_code)
+        .bind(error_message)
+        .bind(billing_detail)
+        .bind(log_id)
+        .execute(&mut *tx)
+        .await,
+        None => sqlx::query(&state.db.format_query(
+            "UPDATE logs SET cost = 0.0, pre_deduct_gift = 0.0 WHERE id = ? AND status_code = 0",
+        ))
+        .bind(log_id)
+        .execute(&mut *tx)
+        .await,
+    };
+    if let Err(e) = upd {
+        tracing::error!("[{tag}] 更新日志失败 日志ID={}: {:?}", log_id, e);
+        let _ = tx.rollback().await;
+        return false;
+    }
+
+    if let Err(e) = refund_wallet_sql(&state.db, &mut *tx, &user_id, cost, pre_deduct_gift).await {
         tracing::error!(
-            "[PendingClose] 退款失败 用户ID={} 日志ID={}: {:?}",
+            "[{tag}] 退款失败 用户ID={} 日志ID={}: {:?}",
             user_id,
             log_id,
             e
@@ -1493,12 +1553,13 @@ async fn close_pending_and_refund(
     }
 
     if let Err(e) = tx.commit().await {
-        tracing::error!("[PendingClose] 提交事务失败 日志ID={}: {:?}", log_id, e);
+        tracing::error!("[{tag}] 提交事务失败 日志ID={}: {:?}", log_id, e);
         return false;
     }
-    if cost > 0.0 || pre_deduct_gift > 0.0 {
+
+    if let Some((status_code, _, _)) = close {
         tracing::info!(
-            "[PendingClose] 已关闭并退款 日志ID={} 状态码={} 用户ID={} 金额={:.6} 赠送={:.6}",
+            "[PendingClose] 已关闭 日志ID={} 状态码={} 用户ID={} 金额={:.6} 赠送={:.6}",
             log_id,
             status_code,
             user_id,
@@ -1507,12 +1568,29 @@ async fn close_pending_and_refund(
         );
     } else {
         tracing::info!(
-            "[PendingClose] 已关闭 日志ID={} 状态码={} (无预扣费)",
+            "[HA] 续试退预扣 日志ID={} 金额={:.6} 赠送={:.6}",
             log_id,
-            status_code
+            cost,
+            pre_deduct_gift
         );
     }
     true
+}
+
+/// CAS 关闭 status_code=0 的 pending：同行锁读 cost/pre_deduct_gift 后退双钱包。
+async fn close_pending_and_refund(
+    state: &Arc<AppState>,
+    log_id: i64,
+    status_code: i32,
+    error_message: &str,
+    billing_detail: &str,
+) -> bool {
+    settle_pending_prepay(
+        state,
+        log_id,
+        Some((status_code, error_message, billing_detail)),
+    )
+    .await
 }
 
 async fn refund_wallet_sql<'e, E>(
@@ -1544,10 +1622,10 @@ where
     Ok(())
 }
 
-/// 清理孤儿预记录日志（status_code=0 且超过指定时间）
+/// 清理孤儿预记录日志（status_code=0 且超过 30 分钟）
 pub async fn cleanup_orphan_pending_logs(state: &Arc<AppState>) {
-    let orphans: Vec<(i64, String, f64, f64)> = match sqlx::query_as(&state.db.format_query(
-        "SELECT id, user_id, cost, pre_deduct_gift FROM logs \
+    let orphans: Vec<i64> = match sqlx::query_scalar(&state.db.format_query(
+        "SELECT id FROM logs \
              WHERE is_completed = 0 AND status_code = 0 \
              AND created_at < CURRENT_TIMESTAMP - INTERVAL '30 minutes'",
     ))
@@ -1567,32 +1645,22 @@ pub async fn cleanup_orphan_pending_logs(state: &Arc<AppState>) {
         "[OrphanCleanup] 发现 {} 条孤儿日志，开始清理",
         orphans.len()
     );
-    for (log_id, user_id, cost, pre_deduct_gift) in &orphans {
-        let detail = if *cost > 0.0 || *pre_deduct_gift > 0.0 {
-            "孤儿日志清理，预扣费已退回"
-        } else {
-            "孤儿日志清理"
-        };
+    for log_id in orphans {
         let _ = close_pending_and_refund(
             state,
-            *log_id,
-            user_id,
-            *cost,
-            *pre_deduct_gift,
+            log_id,
             408,
             "请求处理超时或连接中断",
-            detail,
+            "孤儿日志清理，预扣费已退回",
         )
         .await;
     }
 }
 
-/// 服务启动时恢复上次中断遗留的"处理中"日志（不含异步冻结 status=200）
+/// 启动时恢复中断遗留的处理中日志（异步冻结为 status=200，不会命中）
 pub async fn recover_interrupted_logs(state: &Arc<AppState>) {
-    let orphans: Vec<(i64, String, f64, f64)> = match sqlx::query_as(&state.db.format_query(
-        "SELECT id, user_id, cost, pre_deduct_gift FROM logs \
-             WHERE is_completed = 0 AND status_code = 0 \
-             AND billing_detail NOT LIKE '%冻结%'",
+    let orphans: Vec<i64> = match sqlx::query_scalar(&state.db.format_query(
+        "SELECT id FROM logs WHERE is_completed = 0 AND status_code = 0",
     ))
     .fetch_all(&state.db.pool)
     .await
@@ -1610,21 +1678,13 @@ pub async fn recover_interrupted_logs(state: &Arc<AppState>) {
         "[StartupRecover] 发现 {} 条上次中断遗留的处理中日志",
         orphans.len()
     );
-    for (log_id, user_id, cost, pre_deduct_gift) in &orphans {
-        let detail = if *cost > 0.0 || *pre_deduct_gift > 0.0 {
-            "服务升级中断，预扣费已退回"
-        } else {
-            "服务升级中断"
-        };
+    for log_id in orphans {
         let _ = close_pending_and_refund(
             state,
-            *log_id,
-            user_id,
-            *cost,
-            *pre_deduct_gift,
+            log_id,
             503,
             "服务升级重启，请求被中断",
-            detail,
+            "服务升级中断，预扣费已退回",
         )
         .await;
     }
@@ -1743,68 +1803,9 @@ pub async fn record_zero_cost_fail(p: ZeroCostUpstreamFail<'_>) -> (u16, String)
     (status_code, client_owned)
 }
 
-/// HA 续试：退预扣但保持 pending（status_code=0），供下一子渠成功后再结算
-pub async fn refund_pending(
-    state: &Arc<AppState>,
-    log_id: i64,
-    user_id: &str,
-    cost: f64,
-    pre_deduct_gift: f64,
-) {
-    let cost = crate::money::round_money(cost);
-    let pre_deduct_gift = crate::money::round_money(pre_deduct_gift);
-    if cost <= 0.0 && pre_deduct_gift <= 0.0 {
-        return;
-    }
-    let mut tx = match state.db.pool.begin().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::error!("[HA] refund_pending 开事务失败 日志ID={}: {:?}", log_id, e);
-            return;
-        }
-    };
-    let touched = match sqlx::query(&state.db.format_query(
-        "UPDATE logs SET cost = 0.0, pre_deduct_gift = 0.0 WHERE id = ? AND status_code = 0",
-    ))
-    .bind(log_id)
-    .execute(&mut *tx)
-    .await
-    {
-        Ok(r) => r.rows_affected(),
-        Err(e) => {
-            tracing::error!(
-                "[HA] refund_pending 更新日志失败 日志ID={}: {:?}",
-                log_id,
-                e
-            );
-            let _ = tx.rollback().await;
-            return;
-        }
-    };
-    if touched == 0 {
-        let _ = tx.rollback().await;
-        return;
-    }
-    if let Err(e) = refund_wallet_sql(&state.db, &mut *tx, user_id, cost, pre_deduct_gift).await {
-        tracing::error!(
-            "[HA] refund_pending 退款失败 用户={} 日志ID={}: {:?}",
-            user_id,
-            log_id,
-            e
-        );
-        let _ = tx.rollback().await;
-        return;
-    }
-    if let Err(e) = tx.commit().await {
-        tracing::error!("[HA] refund_pending 提交失败 日志ID={}: {:?}", log_id, e);
-        return;
-    }
-    tracing::info!(
-        "[HA] 续试退预扣 日志ID={} 金额={:.6} 赠送={:.6}",
-        log_id,
-        cost,
-        pre_deduct_gift
-    );
+/// HA 续试：按行内预扣凭证退钱包并清零 cost，保持 pending（status_code=0）供下一子渠结算
+pub async fn refund_pending(state: &Arc<AppState>, log_id: i64) {
+    let _ = settle_pending_prepay(state, log_id, None).await;
 }
 
 /// JSON 则走统一 OpenAI 错误规范化；非 JSON 原样返回
@@ -1880,6 +1881,16 @@ fn classify_error_code(code: &str) -> Option<u16> {
         };
     }
     let c = code.to_lowercase();
+    // 402：欠费/余额不足（顺序须在 403 之前，防止 overdue 含 forbidden 被误分）
+    if c.contains("overdue")
+        || c.contains("balance")
+        || c.contains("payment")
+        || c.contains("insufficient_quota")
+        || c.contains("insufficient_fund")
+        || c.contains("billing")
+    {
+        return Some(402);
+    }
     // 403：内容安全 / 政策违规 / 权限不足（permission 须排在 auth 之前）
     if c.contains("sensitive")
         || c.contains("policy")
@@ -1933,7 +1944,21 @@ fn classify_error_code(code: &str) -> Option<u16> {
 /// message 文本关键词分类 HTTP 状态码（无结构化 error.code 时的兜底，私有辅助）
 fn classify_error_text(msg: &str) -> u16 {
     let m = msg.to_lowercase();
-    // 内容安全/政策违规
+    // 402：欠费/余额不足（须在 403 之前，防止被权限分支误拦）
+    if m.contains("overdue")
+        || m.contains("out of budget")
+        || m.contains("insufficient_balance")
+        || m.contains("insufficient fund")
+        || m.contains("payment required")
+        || m.contains("balance")
+        || m.contains("payment")
+        || m.contains("欠费")
+        || m.contains("余额不足")
+        || m.contains("余额不够")
+    {
+        return 402;
+    }
+    // 403：内容安全/政策违规/权限不足（permission 须在 auth 之前："not authorized" 含 auth 子串）
     if m.contains("safety")
         || m.contains("censor")
         || m.contains("policy")
@@ -1942,25 +1967,21 @@ fn classify_error_text(msg: &str) -> u16 {
         || m.contains("sensitive")
         || m.contains("moderation")
         || m.contains("content_filter")
+        || m.contains("permission")
+        || m.contains("forbidden")
+        || m.contains("not authorized")
+        || m.contains("access denied")
         || m.contains("敏感")
         || m.contains("违规")
         || m.contains("安全")
         || m.contains("政策")
         || m.contains("审核")
-    {
-        return 403;
-    }
-    // 权限不足（须在 auth 之前： "not authorized" 含 auth 子串）
-    if m.contains("permission")
-        || m.contains("forbidden")
-        || m.contains("not authorized")
-        || m.contains("access denied")
         || m.contains("无权限")
         || m.contains("没有权限")
     {
         return 403;
     }
-    // 鉴权/授权失败
+    // 401：鉴权/授权失败
     if m.contains("auth")
         || m.contains("unauthorized")
         || m.contains("api_key")
@@ -1975,7 +1996,7 @@ fn classify_error_text(msg: &str) -> u16 {
     {
         return 401;
     }
-    // 限流/超额/欠费（含 Too Many Requests，避免无 rate/limit 子串时误落 400）
+    // 429：限流/超额
     if m.contains("too many requests")
         || m.contains("too_many_requests")
         || m.contains("limit")
@@ -1983,9 +2004,6 @@ fn classify_error_text(msg: &str) -> u16 {
         || m.contains("exceeded")
         || m.contains("rate")
         || m.contains("insufficient")
-        || m.contains("out of budget")
-        || m.contains("payment")
-        || m.contains("欠费")
         || m.contains("额度")
         || m.contains("限流")
         || m.contains("并发")
@@ -1994,7 +2012,7 @@ fn classify_error_text(msg: &str) -> u16 {
     {
         return 429;
     }
-    // 超时/网关/连接中断
+    // 504：超时/网关/连接中断
     if m.contains("timeout")
         || m.contains("gateway")
         || m.contains("connect")
@@ -2007,7 +2025,7 @@ fn classify_error_text(msg: &str) -> u16 {
     {
         return 504;
     }
-    // 上游服务器内部故障
+    // 500：上游服务器内部故障
     if m.contains("internal")
         || m.contains("server")
         || m.contains("failed")

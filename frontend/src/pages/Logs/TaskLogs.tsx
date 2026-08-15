@@ -16,6 +16,7 @@ import utc from 'dayjs/plugin/utc';
 import { formatApiDateTime } from '../../utils/timedisplay';
 import { toDateRangeParams } from '../../utils/dateRangeParams';
 import { useLogDetailLoader } from '../../hooks/useLogDetailLoader';
+import { parsePluginTagMeta } from '../../utils/pluginTagMeta';
 dayjs.extend(utc);
 import { useTranslation } from 'react-i18next';
 import useAuthStore from '../../store/auth';
@@ -51,6 +52,7 @@ interface TaskLog {
   channel_group_aid: string | null;
   is_ha?: number;
   user_nickname: string | null;
+  user_admin_remark?: string | null;
   task_id: string | null;
   action_type: string | null;
   yid?: string | null;
@@ -87,7 +89,7 @@ const getAsyncFinalStatus = (r: TaskLog): 'pending' | 'succeeded' | 'failed' => 
     try {
       const v = JSON.parse(r.response_content);
       const status = v.status || v.data?.status || v.data?.task_status
-        || v.final_result?.status || v.output?.status || v.output?.task_status;
+        || v.output?.status || v.output?.task_status;
       if (status === 'succeeded' || status === 'succeed' || status === 'SUCCESS' || status === 'completed') return 'succeeded';
       if (status === 'failed' || status === 'FAILED') return 'failed';
       // 上游仍在跑：勿被下方「有计费明细且未冻结 → 成功」误判（如渠道测试轮询中）
@@ -237,6 +239,7 @@ const ShadcnTabs = ({ value, onChange, options, isLight, themeToken }: any) => {
 const TaskLogs: React.FC = () => {
   const { t } = useTranslation();
   const { user } = useAuthStore();
+  const isSuperAdmin = user?.role === 'admin' && !user?.admin_group_id;
   const isAdmin = user?.role === 'admin';
   const { themeMode } = useThemeStore();
   const { token: themeToken } = theme.useToken();
@@ -456,6 +459,14 @@ const TaskLogs: React.FC = () => {
             content: { background: contentBg, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace', fontSize: 12, maxHeight: 300, overflow: 'auto' }
           }}
         >
+          {isSuperAdmin && (() => {
+            const s1 = parsePluginTagMeta(merged.plugin_tag).cascadeS1TaskId;
+            return s1 ? (
+              <Descriptions.Item label={t('logs.cascade_s1_task_id', '上游任务ID')}>
+                <Text copyable={{ text: s1 }} style={{ fontFamily: 'monospace', fontSize: 12 }}>{s1}</Text>
+              </Descriptions.Item>
+            ) : null;
+          })()}
           <Descriptions.Item label={t('task_logs.token_usage', 'Token 用量')}>
             {t('logs.input', '输入')} {record.prompt_tokens} / {t('logs.output', '输出')} {record.completion_tokens}{(record.cached_tokens ?? 0) > 0 ? ` / ${t('logs.cache_read', '缓存读取')} ${record.cached_tokens}` : ''}
           </Descriptions.Item>
@@ -529,13 +540,13 @@ const TaskLogs: React.FC = () => {
       },
     },
     isAdmin ? {
-      title: t('logs.channel_aid', '渠道AID'),
+      title: t('logs.channel_aid', '渠道信息'),
       key: 'channel',
       width: 120,
       render: (_: any, r: TaskLog) => {
         return (
           <Space size={4}>
-            <Text type="secondary" style={{ fontSize: 12 }}>{r.channel_group_aid || '-'}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>{r.channel_group_aid ? `AID: ${r.channel_group_aid}` : '-'}</Text>
             {r.is_ha === 1 && <Tag color="blue" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>HA</Tag>}
           </Space>
         );
@@ -668,15 +679,22 @@ const TaskLogs: React.FC = () => {
     columns.splice(4, 0, {
       title: t('logs.user', '用户'),
       key: 'user',
-      width: 120,
-      render: (_: any, r: TaskLog) => (
-        <Space direction="vertical" size={0}>
-          <Text style={{ fontSize: 12 }}>{r.user_nickname || r.user_uid || r.user_id}</Text>
-          <Text type="secondary" style={{ fontSize: 10, fontFamily: 'monospace' }} copyable={{ text: r.user_uid || r.user_id, tooltips: [t('logs.copy', '复制'), t('logs.copy_success', '已复制')] }}>
-            {r.user_uid || r.user_id}
-          </Text>
-        </Space>
-      ),
+      width: 180,
+      render: (_: any, r: TaskLog) => {
+        const name = r.user_nickname || r.user_uid || r.user_id;
+        const remark = r.user_admin_remark?.trim();
+        return (
+          <Space direction="vertical" size={0}>
+            <Text style={{ fontSize: 12 }}>
+              {name}
+              {remark ? <Text type="secondary" style={{ fontSize: 12 }}> {remark}</Text> : null}
+            </Text>
+            <Text type="secondary" style={{ fontSize: 10, fontFamily: 'monospace' }} copyable={{ text: r.user_uid || r.user_id, tooltips: [t('logs.copy', '复制'), t('logs.copy_success', '已复制')] }}>
+              {r.user_uid || r.user_id}
+            </Text>
+          </Space>
+        );
+      },
     });
   }
 
@@ -795,14 +813,14 @@ const TaskLogs: React.FC = () => {
           </Space>
         </CardRow>
         {isAdmin && record.channel_group_aid && (
-          <CardRow label={t('logs.channel_aid', '渠道AID')}>
+          <CardRow label={t('logs.channel_aid', '渠道信息')}>
             <Space size={4}>
-              <Text type="secondary" style={{ fontSize: 12 }}>{record.channel_group_aid}</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>AID: {record.channel_group_aid}</Text>
               {record.is_ha === 1 && <Tag color="blue" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>HA</Tag>}
             </Space>
           </CardRow>
         )}
-        {isAdmin && <CardRow label={t('logs.user', '用户')}><Space direction="vertical" size={0} align="end"><Text style={{ fontSize: 12 }}>{record.user_nickname || record.user_uid || record.user_id}</Text><Text type="secondary" style={{ fontSize: 10, fontFamily: 'monospace' }} copyable={{ text: record.user_uid || record.user_id }}>{record.user_uid || record.user_id}</Text></Space></CardRow>}
+        {isAdmin && <CardRow label={t('logs.user', '用户')}><Space direction="vertical" size={0} align="end"><Text style={{ fontSize: 12 }}>{record.user_nickname || record.user_uid || record.user_id}{record.user_admin_remark?.trim() ? <Text type="secondary" style={{ fontSize: 12 }}> {record.user_admin_remark.trim()}</Text> : null}</Text><Text type="secondary" style={{ fontSize: 10, fontFamily: 'monospace' }} copyable={{ text: record.user_uid || record.user_id }}>{record.user_uid || record.user_id}</Text></Space></CardRow>}
         <CardRow label={t('logs.latency', '耗时')}><Text type="secondary" style={{ fontSize: 12 }}>🕗 {(() => {
           if (isAsyncPost(record) && status === 'pending') return t('task_logs.processing', '处理中...');
           const sec = record.latency_ms / 1000;

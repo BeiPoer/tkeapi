@@ -75,7 +75,7 @@ const NotificationSettingsForm: React.FC = () => {
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [siteName, setSiteName] = useState('TokensByte');
+  const [siteName, setSiteName] = useState('Tkeapi');
   const [previewBalance, setPreviewBalance] = useState('88.0000');
   const [previewThreshold, setPreviewThreshold] = useState('100.000000');
   const [testEmail, setTestEmail] = useState('');
@@ -93,7 +93,7 @@ const NotificationSettingsForm: React.FC = () => {
 
   const previewVars = useMemo(
     () => ({
-      site_name: siteName || 'TokensByte',
+      site_name: siteName || 'Tkeapi',
       balance: previewBalance || '88.0000',
       threshold: previewThreshold || '100.000000',
     }),
@@ -114,7 +114,7 @@ const NotificationSettingsForm: React.FC = () => {
     try {
       const response = await (request.get('/settings/full') as any);
       const n = response.notification || {};
-      const smtpName = response.smtp?.from_name || response.site?.name || 'TokensByte';
+      const smtpName = response.smtp?.from_name || response.site?.name || 'Tkeapi';
       setSiteName(smtpName);
       setHasBalanceSmsTemplate(!!response.sms?.balance_template_id?.trim());
       form.setFieldsValue({

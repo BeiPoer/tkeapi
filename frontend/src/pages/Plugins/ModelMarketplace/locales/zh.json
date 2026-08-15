@@ -95,7 +95,7 @@
   "low_latency_audio_prompt": "低延迟 (快音P)",
   "low_latency_audio_cache": "低延迟 (快音缓)",
   "extra_input_image_from_n": "输入图额外 (第{{n}}张起)",
-  "free_images_then_extra": "{{n}} 张以内免费，超出部分 {{price}}/张",
+  "free_images_then_extra": "{{n}} 张以内免费，超出部分 ",
   "specification": "规格",
   "output_total_pixels": "输出总像素",
   "ten_thousand_suffix": "万",

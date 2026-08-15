@@ -31,7 +31,7 @@ const MIN_REQ_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// 一次解析：`(failover_on, max_attempts)`，供选渠开环前调用。
 pub async fn policy(state: &AppState, token_ha: i32) -> (bool, usize) {
-    let (_, plugin_on) = super::get_cached_config(state).await;
+    let plugin_on = super::relay_settings::get_cached_ha_enabled(&state.db).await;
     let on = plugin_on && token_ha != 0;
     let attempts = if on {
         state
@@ -566,21 +566,20 @@ impl HaAttempt {
         false
     }
 
-    /// 续试：退本轮（或首败）预扣，并清零首败预扣字段防 finish 双退
+    /// 续试：有预扣时按日志行退款，并清零首败预扣字段防 finish 双退
     async fn refund_continue(&mut self, ctx: &HaBillCtx<'_>, last: Option<&FailBill>) {
-        let (pre, gift) = last
-            .map(|b| (b.pre_deducted, b.pre_deduct_gift))
+        let has_pre = last
+            .map(|b| b.pre_deducted > 0.0 || b.pre_deduct_gift > 0.0)
             .or_else(|| {
                 self.first
                     .as_ref()
                     .and_then(|f| f.bill.as_ref())
-                    .map(|b| (b.pre_deducted, b.pre_deduct_gift))
+                    .map(|b| b.pre_deducted > 0.0 || b.pre_deduct_gift > 0.0)
             })
-            .unwrap_or((0.0, 0.0));
-        if pre > 0.0 || gift > 0.0 {
+            .unwrap_or(false);
+        if has_pre {
             if let Some(log_id) = self.pending_log_id {
-                super::proxy::refund_pending(ctx.state, log_id, &ctx.token.user_id, pre, gift)
-                    .await;
+                super::proxy::refund_pending(ctx.state, log_id).await;
             }
         }
         if let Some(fb) = self.first.as_mut().and_then(|f| f.bill.as_mut()) {
@@ -600,6 +599,11 @@ impl HaAttempt {
     /// 写入 `ha_usage_logs`（仅有 HA 子渠 snap 时）
     pub async fn save(&mut self, state: &AppState) {
         if self.saved || self.snaps.is_empty() {
+            return;
+        }
+        // 精简优化：只记录包含错误/失败子渠尝试的日志。
+        // 如果全部尝试都成功（通常意味着一次调用即成功，无任何错误），则不重复记录
+        if self.snaps.iter().all(|s| s.ok == 1) {
             return;
         }
         let Some(log_id) = self.pending_log_id else {
@@ -931,18 +935,18 @@ fn group_key(channel: &Channel) -> String {
 }
 
 #[inline]
-fn resolve_config_id(channel: &Channel) -> Option<i32> {
-    if let Some(aid) = channel.group_aid.as_deref() {
-        if is_ha_aid(aid) && aid.contains("_config_") {
-            if let Some(id) = aid
-                .rfind("_config_")
-                .and_then(|pos| aid[pos + "_config_".len()..].parse().ok())
-            {
-                return Some(id);
-            }
-        }
+pub(crate) fn ha_config_id_from_aid(channel: &Channel) -> Option<i32> {
+    let aid = channel.group_aid.as_deref()?;
+    if !is_ha_aid(aid) {
+        return None;
     }
-    channel.preset_id.map(|p| p as i32)
+    let pos = aid.rfind("_config_")?;
+    aid[pos + "_config_".len()..].parse().ok()
+}
+
+#[inline]
+fn resolve_config_id(channel: &Channel) -> Option<i32> {
+    ha_config_id_from_aid(channel).or_else(|| channel.preset_id.map(|p| p as i32))
 }
 
 #[inline]

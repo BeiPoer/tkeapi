@@ -126,6 +126,7 @@ pub fn is_plugin_compiled(name: &str) -> bool {
         "asset_manager_intl" => cfg!(feature = "commercial_plugins"),
         "upstream_asset_relay" => cfg!(feature = "commercial_plugins"),
         "data_sync" => cfg!(feature = "plugin_data_sync"),
+        "comfyui_bridge" => cfg!(feature = "plugin_comfyui"),
         _ => true,
     }
 }
@@ -237,6 +238,10 @@ async fn toggle_plugin(
     .bind(&name)
     .execute(&state.db.pool)
     .await?;
+
+    if name == crate::relay::relay_settings::HA_PLUGIN_NAME {
+        crate::relay::relay_settings::put_cached_ha_enabled(payload.is_enabled == 1);
+    }
 
     Ok(Json(json!({ "message": "ok" })))
 }
@@ -1161,6 +1166,10 @@ struct HaLogQuery {
     page: Option<i64>,
     page_size: Option<i64>,
     keyword: Option<String>,
+    sort_by: Option<String>,    // attempt_count | created_at
+    sort_order: Option<String>, // asc | desc
+    date_from: Option<String>,  // YYYY-MM-DD
+    date_to: Option<String>,    // YYYY-MM-DD
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1203,27 +1212,55 @@ async fn get_ha_logs(
     let page_size = query.page_size.unwrap_or(15).clamp(1, 100);
     let keyword = query.keyword.as_deref().unwrap_or("").trim();
     let kw = (!keyword.is_empty()).then(|| format!("%{keyword}%"));
-    let where_sql = if kw.is_some() {
-        " WHERE (l.log_id LIKE ? OR l.model LIKE ? OR h.group_aid LIKE ? \
-         OR EXISTS (SELECT 1 FROM users u2 WHERE u2.id = l.user_id AND (u2.uid LIKE ? OR u2.username LIKE ?)))"
-    } else {
-        ""
+
+    // 排序字段白名单
+    let order_col = match query.sort_by.as_deref() {
+        Some("attempt_count") => "h.attempt_count",
+        _ => "h.created_at",
+    };
+    let order_dir = match query.sort_order.as_deref() {
+        Some("asc") => "ASC",
+        _ => "DESC",
     };
 
-    let total: i64 = if let Some(ref k) = kw {
-        let sql = state.db.format_query(&format!(
-            "SELECT COUNT(*) FROM ha_usage_logs h INNER JOIN logs l ON l.id = h.log_id{where_sql}"
-        ));
-        let mut q = sqlx::query_scalar::<_, i64>(&sql);
-        for _ in 0..5 {
-            q = q.bind(k);
-        }
-        q.fetch_one(&state.db.pool).await?
-    } else {
-        sqlx::query_scalar("SELECT COUNT(*) FROM ha_usage_logs")
-            .fetch_one(&state.db.pool)
-            .await?
-    };
+    // 日期范围条件（复用带时区解析，避免 UTC 偏移问题）
+    let df_val = query.date_from.as_deref().filter(|s| !s.is_empty()).map(|s| {
+        crate::api::date_helper::parse_timestamptz_bind(s, false, crate::api::date_helper::default_timedisplay_tz())
+    });
+    let dt_val = query.date_to.as_deref().filter(|s| !s.is_empty()).map(|s| {
+        crate::api::date_helper::parse_timestamptz_bind(s, true, crate::api::date_helper::default_timedisplay_tz())
+    });
+    let has_date = df_val.is_some() || dt_val.is_some();
+
+    // 构造 WHERE 条件
+    let mut conds = Vec::new();
+    if kw.is_some() {
+        conds.push("(l.log_id LIKE ? OR l.model LIKE ? OR h.group_aid LIKE ? \
+                    OR EXISTS (SELECT 1 FROM users u2 WHERE u2.id = l.user_id AND (u2.uid LIKE ? OR u2.username LIKE ?)))");
+    }
+    if df_val.is_some() { conds.push("h.created_at >= ?::timestamptz"); }
+    // `is_end = true` 会将日期解析为次日的 0点，所以这里改为 `<` 半开区间
+    if dt_val.is_some() { conds.push("h.created_at < ?::timestamptz"); }
+    let where_sql = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
+
+    macro_rules! bind_where {
+        ($q:expr) => {{
+            let mut q = $q;
+            if let Some(ref k) = kw { for _ in 0..5 { q = q.bind(k); } }
+            if let Some(ref df) = df_val { q = q.bind(df); }
+            if let Some(ref dt) = dt_val { q = q.bind(dt); }
+            q
+        }};
+    }
+
+    let join = if kw.is_some() || has_date { "INNER JOIN" } else { "LEFT JOIN" };
+    let count_sql = state.db.format_query(&format!(
+        "SELECT COUNT(*) FROM ha_usage_logs h {join} logs l ON l.id = h.log_id{where_sql}"
+    ));
+    let total: i64 = bind_where!(sqlx::query_scalar::<_, i64>(&count_sql))
+        .fetch_one(&state.db.pool)
+        .await?;
+
     if total == 0 {
         return Ok(Json(json!({
             "logs": [],
@@ -1236,11 +1273,7 @@ async fn get_ha_logs(
     let max_page = (total + page_size - 1) / page_size;
     let page = query.page.unwrap_or(1).max(1).min(max_page);
     let offset = (page - 1) * page_size;
-    let join = if kw.is_some() {
-        "INNER JOIN"
-    } else {
-        "LEFT JOIN"
-    };
+
     let list_sql = state.db.format_query(&format!(
         "SELECT h.log_id, h.group_aid, h.attempt_count, h.final_ok, h.final_status_code, \
                 h.attempts, h.created_at, l.log_id AS biz_log_id, l.model, \
@@ -1251,15 +1284,11 @@ async fn get_ha_logs(
          LEFT JOIN users u ON l.user_id = u.id \
          LEFT JOIN channels c ON l.channel_id = c.id \
          {where_sql} \
-         ORDER BY h.created_at DESC LIMIT {page_size} OFFSET {offset}"
+         ORDER BY {order_col} {order_dir} LIMIT {page_size} OFFSET {offset}"
     ));
-    let mut data_q = sqlx::query_as::<_, HaLogRow>(&list_sql);
-    if let Some(ref k) = kw {
-        for _ in 0..5 {
-            data_q = data_q.bind(k);
-        }
-    }
-    let rows = data_q.fetch_all(&state.db.pool).await?;
+    let rows = bind_where!(sqlx::query_as::<_, HaLogRow>(&list_sql))
+        .fetch_all(&state.db.pool)
+        .await?;
     let logs: Vec<serde_json::Value> = rows
         .into_iter()
         .map(|r| {

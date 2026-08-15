@@ -13,6 +13,11 @@ use chrono_tz::Tz;
 /// 底层系统时区：全局固定 UTC，不可被站点/用户配置覆盖。
 pub const TIMESYSTEM_TZ: &str = "UTC";
 
+const _: () = {
+    let b = TIMESYSTEM_TZ.as_bytes();
+    assert!(b.len() == 3 && b[0] == b'U' && b[1] == b'T' && b[2] == b'C');
+};
+
 /// 默认显示时区（仅作 timedisplay 回退，绝不作为 timesystem）。
 pub const DEFAULT_TIMEDISPLAY: &str = "Asia/Shanghai";
 
@@ -56,24 +61,36 @@ pub fn utc_naive_string() -> String {
     format_utc_naive(now_utc())
 }
 
-/// 解析 IANA timedisplay；非法时回退默认显示时区。
-pub fn parse_timedisplay(name: &str) -> Tz {
+/// 解析合法 IANA 时区（浏览器 `Intl` 返回值）；空/`local`/非法则 `None`，不回退。
+fn try_parse_iana_timezone(name: &str) -> Option<Tz> {
     let trimmed = name.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("local") {
-        return DEFAULT_TIMEDISPLAY
-            .parse()
-            .unwrap_or(chrono_tz::Asia::Shanghai);
+        return None;
     }
-    trimmed.parse::<Tz>().unwrap_or_else(|_| {
+    trimmed.parse().ok()
+}
+
+/// 合法 IANA 时区的规范名；空/`local`/非法则 `None`。
+pub fn try_iana_timezone_name(name: &str) -> Option<String> {
+    try_parse_iana_timezone(name).map(|tz| tz.name().to_string())
+}
+
+/// 解析 IANA timedisplay；非法时回退默认显示时区。
+pub fn parse_timedisplay(name: &str) -> Tz {
+    if let Some(tz) = try_parse_iana_timezone(name) {
+        return tz;
+    }
+    let trimmed = name.trim();
+    if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("local") {
         tracing::warn!(
             "[TimeSystem] invalid timedisplay '{}', fallback {}",
             trimmed,
             DEFAULT_TIMEDISPLAY
         );
-        DEFAULT_TIMEDISPLAY
-            .parse()
-            .unwrap_or(chrono_tz::Asia::Shanghai)
-    })
+    }
+    DEFAULT_TIMEDISPLAY
+        .parse()
+        .unwrap_or(chrono_tz::Asia::Shanghai)
 }
 
 /// timedisplay 优先级：请求头覆盖 > 用户个人时区 > 站点默认 > 内置默认。
@@ -92,4 +109,44 @@ pub fn resolve_timedisplay(
         return parse_timedisplay(s);
     }
     parse_timedisplay(DEFAULT_TIMEDISPLAY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timesystem_is_fixed_utc() {
+        assert_eq!(TIMESYSTEM_TZ, "UTC");
+    }
+
+    #[test]
+    fn try_iana_timezone_name_accepts_browser_zones() {
+        assert_eq!(
+            try_iana_timezone_name("Asia/Shanghai").as_deref(),
+            Some("Asia/Shanghai")
+        );
+        assert_eq!(try_iana_timezone_name("UTC").as_deref(), Some("UTC"));
+        assert_eq!(
+            try_iana_timezone_name("  America/New_York  ").as_deref(),
+            Some("America/New_York")
+        );
+    }
+
+    #[test]
+    fn try_iana_timezone_name_rejects_invalid() {
+        assert_eq!(try_iana_timezone_name(""), None);
+        assert_eq!(try_iana_timezone_name("   "), None);
+        assert_eq!(try_iana_timezone_name("local"), None);
+        assert_eq!(try_iana_timezone_name("Not/AZone"), None);
+        assert_eq!(try_iana_timezone_name("GMT+8"), None);
+    }
+
+    #[test]
+    fn parse_timedisplay_falls_back_without_accepting_invalid() {
+        assert_eq!(parse_timedisplay("Asia/Tokyo").name(), "Asia/Tokyo");
+        assert_eq!(parse_timedisplay("").name(), DEFAULT_TIMEDISPLAY);
+        assert_eq!(parse_timedisplay("local").name(), DEFAULT_TIMEDISPLAY);
+        assert_eq!(parse_timedisplay("Not/AZone").name(), DEFAULT_TIMEDISPLAY);
+    }
 }

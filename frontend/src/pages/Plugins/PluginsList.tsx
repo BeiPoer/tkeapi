@@ -23,10 +23,12 @@ import {
   RefreshCw,
   Globe,
   Share2,
-  ArrowLeftRight
+  ArrowLeftRight,
+  Video
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
+import { invalidateActivePluginsCache } from '../../utils/activePlugins';
 import type { Plugin } from '../../types';
 import { pluginLocales } from '../../i18n';
 import useSettingsStore from '../../store/settings';
@@ -36,6 +38,7 @@ import useAuthStore from '../../store/auth';
 /** 语言代码 → 显示名称 */
 const langNames: Record<string, string> = {
   zh: '中文',
+  'zh-TW': '繁體中文',
   en: 'English',
   ja: '日本語',
   ko: '한국어',
@@ -61,6 +64,7 @@ const pluginIcons: Record<string, React.ReactNode> = {
   happyhorse_router: <Zap className="w-3.5 h-3.5" />,
   volcengine_ark_monitor: <MonitorPlay className="w-3.5 h-3.5" />,
   upstream_asset_relay: <Share2 className="w-3.5 h-3.5" />,
+  comfyui_bridge: <Video className="w-3.5 h-3.5" />,
   data_sync: <ArrowLeftRight className="w-3.5 h-3.5" />,
 };
 
@@ -87,10 +91,10 @@ const categoryStyles: Record<string, {
   }
 };
 
-const categoryLabels: Record<string, { title: string; icon: React.ReactNode }> = {
-  user: { title: '用户增强插件', icon: <LayoutGrid className="w-3 h-3 mr-1" /> },
-  system: { title: '系统增强插件', icon: <Zap className="w-3 h-3 mr-1" /> },
-  system_builtin: { title: '系统内置', icon: <Globe className="w-3 h-3 mr-1" /> }
+const categoryLabels: Record<string, { titleKey: string; icon: React.ReactNode }> = {
+  user: { titleKey: 'plugins_page.cat_user', icon: <LayoutGrid className="w-3 h-3 mr-1" /> },
+  system: { titleKey: 'plugins_page.cat_system', icon: <Zap className="w-3 h-3 mr-1" /> },
+  system_builtin: { titleKey: 'plugins_page.cat_system_builtin', icon: <Globe className="w-3 h-3 mr-1" /> }
 };
 
 const PluginsList: React.FC = () => {
@@ -122,10 +126,11 @@ const PluginsList: React.FC = () => {
     e.stopPropagation();
     try {
       await request.post(`/plugins/${plugin.name}/toggle`, { is_enabled: checked ? 1 : 0 });
-      message.success(checked ? '插件已开启' : '插件已关闭');
+      invalidateActivePluginsCache();
+      message.success(checked ? t('plugins_page.enabled') : t('plugins_page.disabled'));
       fetchPlugins();
     } catch (error) {
-      message.error('操作失败');
+      message.error(t('plugins_page.action_failed'));
     }
   };
 
@@ -169,7 +174,7 @@ const PluginsList: React.FC = () => {
               </div>
               <div className="min-w-0">
                 <h3 className="font-semibold text-[11.5px] text-foreground leading-tight truncate">
-                  {t(`${plugin.name}:title`, plugin.title)}
+                  {t(`plugin_titles.${plugin.name}`, plugin.title)}
                 </h3>
                 <span className="text-[9px] text-muted-foreground/80 font-mono block mt-0.5 truncate">
                   {plugin.name}
@@ -189,7 +194,7 @@ const PluginsList: React.FC = () => {
 
           {/* 插件描述 */}
           <p className="text-[10.5px] text-muted-foreground line-clamp-2 mt-1.5 leading-relaxed min-h-[30px]">
-            {t(`${plugin.name}:subtitle`, plugin.description || '暂无描述')}
+            {t(`${plugin.name}:subtitle`, plugin.description || t('plugins_page.no_description'))}
           </p>
         </div>
 
@@ -197,11 +202,11 @@ const PluginsList: React.FC = () => {
         <div className="mt-2.5 pt-2 border-t border-border flex flex-col gap-1">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-1 min-w-0">
-              <span className="text-[9.5px] text-muted-foreground shrink-0">开放:</span>
+              <span className="text-[9.5px] text-muted-foreground shrink-0">{t('plugins_page.open_to')}</span>
               <div className="flex items-center gap-1 overflow-hidden truncate">
                 {allowed === 'all' ? (
                   <span className={`px-1 py-0.5 text-[8.5px] font-medium rounded ${style.badge}`}>
-                    {(cat === 'system' || cat === 'system_builtin') ? '全管理员' : '全等级'}
+                    {(cat === 'system' || cat === 'system_builtin') ? t('plugins_page.all_admins') : t('plugins_page.all_levels')}
                   </span>
                 ) : (
                   allowed.split(',').slice(0, 2).map(lv => (
@@ -225,7 +230,7 @@ const PluginsList: React.FC = () => {
               className="flex items-center gap-1 px-1.5 py-0.5 rounded border border-border text-[9.5px] font-medium text-muted-foreground hover:text-foreground bg-muted/30 hover:bg-muted transition-colors cursor-pointer"
             >
               <Settings className="w-2.5 h-2.5" />
-              配置
+              {t('plugins_page.configure')}
             </button>
           </div>
 
@@ -233,7 +238,7 @@ const PluginsList: React.FC = () => {
           {pluginLocales[plugin.name] && (
             <div className="flex items-center gap-1 pt-1 border-t border-dashed border-border/80">
               <Globe className="w-2.5 h-2.5 text-muted-foreground/80 shrink-0" />
-              <span className="text-[9.5px] text-muted-foreground shrink-0">语言:</span>
+              <span className="text-[9.5px] text-muted-foreground shrink-0">{t('plugins_page.languages')}</span>
               <div className="flex flex-wrap gap-1">
                 {Object.keys(pluginLocales[plugin.name]).map(lng => (
                   <span 
@@ -256,8 +261,8 @@ const PluginsList: React.FC = () => {
       {/* 页头 */}
       <div className="flex items-center justify-between pb-2 mb-3 border-b border-border">
         <div className="flex flex-col gap-0.5">
-          <div className="text-[13px] font-bold text-foreground leading-tight">站点插件</div>
-          <div className="text-[10.5px] text-muted-foreground leading-normal">管理和配置本站启用的功能及系统扩展插件</div>
+          <div className="text-[13px] font-bold text-foreground leading-tight">{t('menu.plugins')}</div>
+          <div className="text-[10.5px] text-muted-foreground leading-normal">{t('plugins_page.subtitle')}</div>
         </div>
         <button 
           onClick={fetchPlugins} 
@@ -265,23 +270,23 @@ const PluginsList: React.FC = () => {
           className="flex items-center gap-1 h-[26px] px-2.5 rounded text-[10px] font-medium border border-border bg-card hover:bg-accent text-foreground transition-colors shadow-2xs cursor-pointer disabled:opacity-50"
         >
           <RefreshCw className={`w-2.5 h-2.5 ${loading ? 'animate-spin' : ''}`} />
-          刷新
+          {t('plugins_page.refresh')}
         </button>
       </div>
 
       {loading && plugins.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 gap-2">
           <Spin size="small" />
-          <span className="text-[11px] text-muted-foreground">正在加载插件列表...</span>
+          <span className="text-[11px] text-muted-foreground">{t('plugins_page.loading')}</span>
         </div>
       ) : plugins.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20 gap-3 text-center">
           <div className="w-12 h-12 rounded-full bg-muted/50 flex items-center justify-center mb-2">
             <LayoutGrid className="w-6 h-6 text-muted-foreground/50" />
           </div>
-          <p className="text-[13px] font-medium text-foreground">暂无可用插件</p>
+          <p className="text-[13px] font-medium text-foreground">{t('plugins_page.empty_title')}</p>
           <p className="text-[11px] text-muted-foreground max-w-[250px]">
-            当前系统尚未安装或开启任何功能扩展插件
+            {t('plugins_page.empty_desc')}
           </p>
         </div>
       ) : (
@@ -301,7 +306,7 @@ const PluginsList: React.FC = () => {
                         : 'text-zinc-500 dark:text-zinc-400'
                     }`}>
                       {label.icon}
-                      {label.title}
+                      {t(label.titleKey)}
                       <span className="ml-1 text-[9px] text-muted-foreground lowercase font-normal">
                         ({groupedPlugins[cat].length})
                       </span>

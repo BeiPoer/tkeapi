@@ -14,6 +14,7 @@ import request from '../utils/request';
 import dayjs from 'dayjs';
 import { formatApiDateTime, parseApiTimeAsUtc } from '../utils/timedisplay';
 import { toDateRangeParams } from '../utils/dateRangeParams';
+import { rechargeTypeLabel } from '../utils/rechargeType';
 
 const { Text } = Typography;
 
@@ -161,9 +162,22 @@ const WalletDetailsView: React.FC<WalletDetailsViewProps> = ({
   const giftRecharges = filteredRecharges.filter((r: any) => (r.wallet_type || 'system') === 'gift');
   const creditRecharges = filteredRecharges.filter((r: any) => (r.wallet_type || 'system') === 'credit');
 
-  const totalSystemRecharge = systemRecharges.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
-  const totalGiftRecharge = giftRecharges.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+  const isArkLedger = (type: string) => type === 'ark_video_consume' || type === 'ark_video_refund';
+  // 充值合计只统计真实入金，排除方舟监控扣费/退款（退款为正会污染「充值」）
+  const totalSystemRecharge = systemRecharges
+    .filter((r: any) => !isArkLedger(r.recharge_type || ''))
+    .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+  const totalGiftRecharge = giftRecharges
+    .filter((r: any) => !isArkLedger(r.recharge_type || ''))
+    .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
   const totalCreditRecharge = creditRecharges.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+  // 方舟流水：consume 为负、refund 为正 → 净消费 = -SUM(amount)；叠加到 /logs 消费合计
+  const arkNetConsume = (rows: any[]) =>
+    rows
+      .filter((r: any) => isArkLedger(r.recharge_type || ''))
+      .reduce((sum, r) => sum - (Number(r.amount) || 0), 0);
+  const periodConsumedSystem = consumedSystem + arkNetConsume(systemRecharges);
+  const periodConsumedGift = consumedGift + arkNetConsume(giftRecharges);
   
   const systemUsed = user.used_quota || 0;
   const giftUsed = user.gift_used_quota || 0;
@@ -215,30 +229,11 @@ const WalletDetailsView: React.FC<WalletDetailsViewProps> = ({
       dataIndex: 'recharge_type',
       key: 'recharge_type',
       width: 120,
-      render: (type: string, record: any) => {
-        let manualText = t('type_manual', '手动操作');
-        if (type === 'manual' && record.wallet_type === 'credit') {
-          manualText = t('type_manual_credit', '手动信控操作');
-        }
-        
-        const typeMap: Record<string, string> = {
-          'manual': manualText,
-          'online': t('type_online', '在线支付'),
-          'transfer': t('type_transfer', '佣金结转'),
-          'gift': t('type_registration', '注册赠送'),
-          'commission': t('type_commission', '佣金奖励'),
-          'registration': t('type_registration', '注册赠送'),
-          'alipay': t('type_alipay', '支付宝'),
-          'wechat': t('type_wechat', '微信支付'),
-          'allinpay_wechat': t('type_allinpay_wechat', '通联微信'),
-          'allinpay_alipay': t('type_allinpay_alipay', '通联支付宝'),
-          'stripe': 'Stripe',
-          'hyperbc': 'HyperBC',
-          'bonuspay': 'BonusPay',
-          'redemption': t('type_redemption', '兑换码'),
-        };
-        return <Tag style={{ whiteSpace: 'nowrap' }}>{typeMap[type] || type}</Tag>;
-      },
+      render: (type: string, record: any) => (
+        <Tag style={{ whiteSpace: 'nowrap' }}>
+          {rechargeTypeLabel(type, record.wallet_type)}
+        </Tag>
+      ),
     },
     {
       title: t('remark', '备注'),
@@ -322,7 +317,7 @@ const WalletDetailsView: React.FC<WalletDetailsViewProps> = ({
                 </Col>
                 <Col span={6}>
                   <Card size="small" style={{ background: isLight ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.02)', border: 'none' }}>
-                    <Statistic title={<span style={{ color: isLight ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.45)' }}>{`${timePrefix}消费合计`}</span>} value={consumedSystem} precision={6} prefix={currencySymbol} valueStyle={statisticValueStyle} loading={consumedLoading} />
+                    <Statistic title={<span style={{ color: isLight ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.45)' }}>{`${timePrefix}消费合计`}</span>} value={periodConsumedSystem} precision={6} prefix={currencySymbol} valueStyle={statisticValueStyle} loading={consumedLoading} />
                   </Card>
                 </Col>
                 <Col span={6}>
@@ -361,7 +356,7 @@ const WalletDetailsView: React.FC<WalletDetailsViewProps> = ({
                 </Col>
                 <Col span={6}>
                   <Card size="small" style={{ background: isLight ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.02)', border: 'none' }}>
-                    <Statistic title={<span style={{ color: isLight ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.45)' }}>{`${timePrefix}使用赠送`}</span>} value={consumedGift} precision={6} prefix={currencySymbol} valueStyle={statisticValueStyle} loading={consumedLoading} />
+                    <Statistic title={<span style={{ color: isLight ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.45)' }}>{`${timePrefix}使用赠送`}</span>} value={periodConsumedGift} precision={6} prefix={currencySymbol} valueStyle={statisticValueStyle} loading={consumedLoading} />
                   </Card>
                 </Col>
                 <Col span={6}>

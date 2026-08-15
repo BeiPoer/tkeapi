@@ -372,7 +372,7 @@ pub async fn test_channel(
 
             if let Some(cfg) = sub_config {
                 // 测试指定子上游时校验其额度（站点时区，与线上扣费一致）
-                let (site_tz, _) = crate::relay::get_cached_config(&state).await;
+                let site_tz = crate::relay::relay_settings::get_cached_site_timezone(&state.db).await;
                 let (_, now_week, now_month) = crate::models::quota_period_keys(&site_tz);
                 if cfg.status != 1 {
                     return Err(crate::error::AppError::Forbidden(
@@ -386,6 +386,7 @@ pub async fn test_channel(
                 }
                 crate::relay::router::apply_ha_sub_mapped(&mut channel, &cfg);
                 crate::relay::router::apply_volcengine_credential(&state, &mut channel).await;
+                crate::relay::router::apply_comfyui_channel(&state, &mut channel).await;
                 channel_config_id = Some(sub_id);
             } else {
                 return Err(crate::error::AppError::NotFound(
@@ -395,7 +396,7 @@ pub async fn test_channel(
         }
     }
 
-    let (tz_name, _) = crate::relay::get_cached_config(&state).await;
+    let tz_name = crate::relay::relay_settings::get_cached_site_timezone(&state.db).await;
     let (now_day, now_week, now_month) = crate::models::quota_period_keys(&tz_name);
     if let Err(msg) = channel.check_quota_limits(&now_day, &now_week, &now_month) {
         return Err(crate::error::AppError::Forbidden(format!(
@@ -456,9 +457,9 @@ pub async fn test_channel(
         crate::relay::proxy::find_active_model_exact(&state, &test_model, None, Some(&channel))
             .await;
 
-    // 计算映射后的上游模型 ID
+    // 计算映射后的上游模型 ID（渠道测试无分辨率上下文）
     let (resolved_model, _) =
-        crate::relay::router::resolve_model(&channel, &test_model, db_model.as_ref());
+        crate::relay::router::resolve_model(&channel, &test_model, db_model.as_ref(), None);
 
     let start = std::time::Instant::now();
 
@@ -537,6 +538,7 @@ pub async fn test_channel(
 
     // ── 修正并校正 target_type ──
     crate::relay::forward::refine_target_type(&mut fwd, &channel.base_url);
+    crate::relay::forward::apply_channel_provider(&mut fwd, &channel);
 
     let is_image = category == "图片";
     let is_video = category == "视频" || category == "视频增强";
@@ -552,6 +554,8 @@ pub async fn test_channel(
     let mut raw_response_text = String::new();
     let mut response_res: Result<serde_json::Value, crate::error::AppError> =
         Ok(serde_json::json!({}));
+    #[cfg(feature = "plugin_comfyui")]
+    let mut comfy_ack: Option<crate::api::plugins::comfyui_bridge::ComfySubmitAck> = None;
 
     for (attempt_idx, resolution) in video_resolutions.iter().enumerate() {
         // ── 构建测试请求体（入参使用映射后的上游模型 ID：resolved_model） ──
@@ -582,6 +586,66 @@ pub async fn test_channel(
         // 可灵视频/图片动态路由路径匹配
         crate::relay::forward::resolve_kling_dynamic_path(&mut fwd, &request_data);
 
+        if fwd.target_type == "comfyui" {
+            #[cfg(feature = "plugin_comfyui")]
+            {
+                let (wf_id, server_id) =
+                    crate::api::plugins::comfyui_bridge::resolve_submit_target(
+                        &state,
+                        fwd.comfyui_workflow_id,
+                        fwd.comfyui_server_id,
+                        &fwd.comfyui_server_ids,
+                        fwd.comfyui_dispatch.as_deref(),
+                    )
+                    .await?;
+                request_json = serde_json::to_string(&openai_body).unwrap_or_default();
+                masked_endpoint = format!("{}/prompt", channel.base_url.trim_end_matches('/'));
+                curl_cmd = format!("# ComfyUI workflow_id={wf_id} server_id={server_id:?}");
+                match crate::api::plugins::comfyui_bridge::submit_video(
+                    &state,
+                    wf_id,
+                    &openai_body,
+                    server_id,
+                )
+                .await
+                {
+                    Ok(ack) => {
+                        let ack_json = serde_json::json!({
+                            "id": ack.prompt_id,
+                            "prompt_id": ack.prompt_id,
+                            "status": "pending"
+                        });
+                        raw_response_text = ack_json.to_string();
+                        response_res = Ok(ack_json);
+                        request_json = ack.prompt_json.clone();
+                        comfy_ack = Some(ack);
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        raw_response_text = msg.clone();
+                        response_res = Ok(serde_json::json!({
+                            "_upstream_status": 502,
+                            "_upstream_error": {"error": msg}
+                        }));
+                    }
+                }
+                let send_failed = match &response_res {
+                    Ok(v) => v.get("_upstream_error").is_some(),
+                    Err(_) => true,
+                };
+                if !is_video || !send_failed || attempt_idx + 1 >= video_resolutions.len() {
+                    break;
+                }
+                continue;
+            }
+            #[cfg(not(feature = "plugin_comfyui"))]
+            {
+                return Err(crate::error::AppError::BadRequest(
+                    "ComfyUI 接入插件未编译".into(),
+                ));
+            }
+        }
+
         // ── 构建 URL ──
         let endpoint = crate::relay::forward::build_upstream_url(
             &channel.base_url,
@@ -606,7 +670,7 @@ pub async fn test_channel(
         // ── 生成 cURL 命令（在 apply_request_auth 之后，确保 body 包含可能注入的 SubAppId 等字段）──
         masked_endpoint = crate::relay::forward::mask_key_in_string(&endpoint, &channel.api_key);
         let auth_headers_for_curl =
-            crate::relay::forward::build_auth_headers(&fwd, &channel.api_key);
+            crate::relay::forward::build_auth_headers(&fwd, &channel.api_key, true);
         curl_cmd = format!("curl -X POST '{}' \\\n", masked_endpoint);
         curl_cmd.push_str("  -H 'Content-Type: application/json' \\\n");
         for (k, v) in &auth_headers_for_curl {
@@ -786,6 +850,11 @@ pub async fn test_channel(
         .bind(billing_pid).bind(forward_eid).bind(channel_config_id.map(|cid| cid as i32))
         .bind(crate::relay::ha::channel_is_ha_flag(&channel))
         .fetch_optional(&state.db.pool).await.unwrap_or(None);
+
+    #[cfg(feature = "plugin_comfyui")]
+    if let (Some(lid), Some(ack)) = (db_row_id, comfy_ack.as_ref()) {
+        crate::api::plugins::comfyui_bridge::link_job(&state, lid, ack).await?;
+    }
 
     // ── 异步任务自动轮询（统一支持所有厂商：火山/腾讯云/DashScope/可灵等）──
     let mut response_res = response_res;

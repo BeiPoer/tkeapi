@@ -232,18 +232,36 @@ async fn query_aggregated_data_helper(
         active_tokens = active_tokens.max(active_toks.unwrap_or(0));
     }
 
-    // B. 实时及碎片段统计
+    // B. 实时及碎片段：COUNT/SUM/DISTINCT 一次扫过 covering 列，避免同区间二次全表聚合
     for r_slice in slices.realtime_slices() {
-        let (reqs, tokens, cost): (i64, Option<i64>, Option<f64>) = if is_admin {
-            let sql = format!("SELECT COUNT(*), SUM(prompt_tokens + completion_tokens), SUM(cost) FROM logs WHERE {}", r_slice.sql_cond("created_at"));
-            sqlx::query_as(&state.db.format_query(&sql))
+        let sql = if is_admin {
+            format!(
+                "SELECT COUNT(*)::bigint, \
+                 (COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0))::bigint, \
+                 COALESCE(SUM(cost), 0)::float8, \
+                 COUNT(DISTINCT token_id)::bigint \
+                 FROM logs WHERE {}",
+                r_slice.sql_cond("created_at")
+            )
+        } else {
+            format!(
+                "SELECT COUNT(*)::bigint, \
+                 (COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0))::bigint, \
+                 COALESCE(SUM(cost), 0)::float8, \
+                 COUNT(DISTINCT token_id)::bigint \
+                 FROM logs WHERE user_id = ? AND {}",
+                r_slice.sql_cond("created_at")
+            )
+        };
+        let formatted = state.db.format_query(&sql);
+        let (reqs, tokens, cost, distinct_toks): (i64, i64, f64, i64) = if is_admin {
+            sqlx::query_as(&formatted)
                 .bind(&r_slice.start)
                 .bind(&r_slice.end)
                 .fetch_one(&state.db.pool)
                 .await?
         } else {
-            let sql = format!("SELECT COUNT(*), SUM(prompt_tokens + completion_tokens), SUM(cost) FROM logs WHERE user_id = ? AND {}", r_slice.sql_cond("created_at"));
-            sqlx::query_as(&state.db.format_query(&sql))
+            sqlx::query_as(&formatted)
                 .bind(user_id)
                 .bind(&r_slice.start)
                 .bind(&r_slice.end)
@@ -251,29 +269,9 @@ async fn query_aggregated_data_helper(
                 .await?
         };
         total_requests += reqs;
-        total_tokens += tokens.unwrap_or(0);
-        total_cost += cost.unwrap_or(0.0);
-
-        let active_toks: i64 = if is_admin {
-            let sql = format!(
-                "SELECT COUNT(DISTINCT token_id) FROM logs WHERE {} AND token_id IS NOT NULL",
-                r_slice.sql_cond("created_at")
-            );
-            sqlx::query_scalar(&state.db.format_query(&sql))
-                .bind(&r_slice.start)
-                .bind(&r_slice.end)
-                .fetch_one(&state.db.pool)
-                .await?
-        } else {
-            let sql = format!("SELECT COUNT(DISTINCT token_id) FROM logs WHERE user_id = ? AND {} AND token_id IS NOT NULL", r_slice.sql_cond("created_at"));
-            sqlx::query_scalar(&state.db.format_query(&sql))
-                .bind(user_id)
-                .bind(&r_slice.start)
-                .bind(&r_slice.end)
-                .fetch_one(&state.db.pool)
-                .await?
-        };
-        active_tokens = active_tokens.max(active_toks);
+        total_tokens += tokens;
+        total_cost += cost;
+        active_tokens = active_tokens.max(distinct_toks);
     }
 
     Ok((total_requests, total_tokens, total_cost, active_tokens))
@@ -307,14 +305,24 @@ async fn calculate_dashboard_stats(
 
     let yesterday_date = bounds.yesterday;
 
-    // 1. 基础指标计算 (Total Stats)
+    // 1. 基础指标：今日 logs 只扫一遍，筛选合计 = 归档/碎片 + 今日
     let slices = crate::api::date_helper::calculate_query_slices(
         params.start_date.as_deref().or(Some("1970-01-01")),
         params.end_date.as_deref(),
         tz,
     );
-    let (total_requests, total_tokens, total_cost, _) =
-        query_aggregated_data_helper(&state, is_admin, user_id, &slices).await?;
+    let today_slices =
+        crate::api::date_helper::calculate_query_slices(Some(&today_str), Some(&today_str), tz);
+    let (today_requests, today_tokens, today_cost, today_active_tokens) =
+        query_aggregated_data_helper(&state, is_admin, user_id, &today_slices).await?;
+    let hist_only = slices.excluding_today();
+    let (mut total_requests, mut total_tokens, mut total_cost, _) =
+        query_aggregated_data_helper(&state, is_admin, user_id, &hist_only).await?;
+    if slices.has_today {
+        total_requests += today_requests;
+        total_tokens += today_tokens;
+        total_cost += today_cost;
+    }
 
     // 基础关系表总数（如用户、渠道、API令牌等）
     let total_users: i64 = if is_admin {
@@ -348,14 +356,7 @@ async fn calculate_dashboard_stats(
         .await?
     };
 
-    // 2. 今日数据与昨日数据 (Today vs Yesterday)
-    // 今日数据
-    let today_slices =
-        crate::api::date_helper::calculate_query_slices(Some(&today_str), Some(&today_str), tz);
-    let (today_requests, today_tokens, today_cost, today_active_tokens) =
-        query_aggregated_data_helper(&state, is_admin, user_id, &today_slices).await?;
-
-    // 昨日数据
+    // 2. 昨日数据（归档表，不含今日 logs）
     let yesterday_str = yesterday_date.format("%Y-%m-%d").to_string();
     let yesterday_slices = crate::api::date_helper::calculate_query_slices(
         Some(&yesterday_str),
@@ -389,11 +390,14 @@ async fn calculate_dashboard_stats(
         );
     }
 
-    // 最近活动：关联用户表填充昵称/UID，便于管理端区分调用方
+    // 最近活动：不选 TOAST 大字段，避免 LIMIT 10 仍读 request/response
+    const RECENT_LOG_COLS: &str = "l.id, l.user_id, l.channel_id, l.token_id, l.model, \
+         l.prompt_tokens, l.completion_tokens, l.cached_tokens, l.cost, l.latency_ms, \
+         l.status_code, l.endpoint, l.error_message, l.created_at, \
+         COALESCE(u.nickname, u.username) AS user_nickname, u.uid AS user_uid";
     let recent_logs: Vec<RequestLog> = if is_admin {
         let sql = format!(
-            "SELECT l.*, COALESCE(u.nickname, u.username) AS user_nickname, u.uid AS user_uid \
-             FROM logs l LEFT JOIN users u ON l.user_id = u.id \
+            "SELECT {RECENT_LOG_COLS} FROM logs l LEFT JOIN users u ON l.user_id = u.id \
              WHERE 1=1{} ORDER BY l.created_at DESC LIMIT 10",
             date_where
         );
@@ -405,8 +409,7 @@ async fn calculate_dashboard_stats(
         q.fetch_all(&state.db.pool).await?
     } else {
         let sql = format!(
-            "SELECT l.*, COALESCE(u.nickname, u.username) AS user_nickname, u.uid AS user_uid \
-             FROM logs l LEFT JOIN users u ON l.user_id = u.id \
+            "SELECT {RECENT_LOG_COLS} FROM logs l LEFT JOIN users u ON l.user_id = u.id \
              WHERE l.user_id = ?{} ORDER BY l.created_at DESC LIMIT 10",
             date_where
         );
@@ -418,23 +421,45 @@ async fn calculate_dashboard_stats(
         q.fetch_all(&state.db.pool).await?
     };
 
-    // 与日志列表一致：仪表盘最近活动不带回大字段；非管理员走同一套响应脱敏
     let mut recent_logs = recent_logs;
-    for log in &mut recent_logs {
-        log.request_content = None;
-        log.response_content = None;
-        log.upstream_req_content = None;
-        log.post_response = None;
-        if !is_admin {
+    if !is_admin {
+        for log in &mut recent_logs {
             crate::api::logs::redact_request_log_for_user(log);
         }
     }
 
-    // 4. 各模型统计分析 (Model Stats)
+    // 4. 各模型统计：今日 logs GROUP BY 只查一次，筛选合计与明细共用
     let user_filter = if is_admin { None } else { Some(user_id) };
-    let model_map =
-        crate::relay::usage_stats::query_model_stats_by_slices(&state.db, user_filter, &slices)
+    let detail_days = crate::api::date_helper::model_detail_days(
+        if params.end_date.is_some() {
+            Some(end_naive)
+        } else {
+            None
+        },
+        today_date,
+    );
+    let need_today_models = slices.has_today || detail_days.iter().any(|d| *d == today_date);
+    let today_model_map = if need_today_models {
+        crate::relay::usage_stats::query_model_stats_by_slices(
+            &state.db,
+            user_filter,
+            &today_slices,
+        )
+        .await?
+    } else {
+        std::collections::HashMap::new()
+    };
+    let mut model_map =
+        crate::relay::usage_stats::query_model_stats_by_slices(&state.db, user_filter, &hist_only)
             .await?;
+    if slices.has_today {
+        for (m, (cnt, c, t)) in &today_model_map {
+            let entry = model_map.entry(m.clone()).or_insert((0i64, 0.0f64, 0i64));
+            entry.0 += cnt;
+            entry.1 += c;
+            entry.2 += t;
+        }
+    }
 
     // 转换并对模型进行排序 (按总花费降序，总请求数降序)
     let mut top_models_all: Vec<(String, f64, i64, i64)> = model_map
@@ -449,17 +474,7 @@ async fn calculate_dashboard_stats(
 
     let top_10_models: Vec<(String, f64, i64, i64)> = top_models_all.into_iter().take(10).collect();
 
-    // 4.3 模型明细近几日：锚定筛选区间末日（≤ 今天）向前固定 3 个自然日（与排行区间解耦）
-    // 排行/进度条仍用上方筛选；明细标签始终给末日近 3 天对照。历史日一次归档查询，当日单独 realtime。
-    let detail_days = crate::api::date_helper::model_detail_days(
-        if params.end_date.is_some() {
-            Some(end_naive)
-        } else {
-            None
-        },
-        today_date,
-    );
-
+    // 4.3 模型明细近几日：历史日走归档；当日复用上面的 today_model_map
     let mut stats_by_date: std::collections::HashMap<
         String,
         std::collections::HashMap<String, (i64, f64, i64)>,
@@ -482,16 +497,7 @@ async fn calculate_dashboard_stats(
     }
 
     if detail_days.iter().any(|d| *d == today_date) {
-        let today_str = today_date.format("%Y-%m-%d").to_string();
-        let today_slices =
-            crate::api::date_helper::calculate_query_slices(Some(&today_str), Some(&today_str), tz);
-        let today_stats = crate::relay::usage_stats::query_model_stats_by_slices(
-            &state.db,
-            user_filter,
-            &today_slices,
-        )
-        .await?;
-        stats_by_date.insert(today_str, today_stats);
+        stats_by_date.insert(today_str.clone(), today_model_map);
     }
 
     let day_stats_list: Vec<(String, std::collections::HashMap<String, (i64, f64, i64)>)> =
@@ -723,7 +729,7 @@ pub async fn get_model_stats_30d(
             SELECT 
                 model,
                 COUNT(*) as count,
-                COALESCE(SUM(prompt_tokens + completion_tokens), 0) as total_tokens,
+                (COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0))::bigint as total_tokens,
                 COALESCE(SUM(cost), 0.0) as total_cost
             FROM logs
             WHERE created_at >= ?::timestamptz
@@ -740,7 +746,7 @@ pub async fn get_model_stats_30d(
             SELECT 
                 model,
                 COUNT(*) as count,
-                COALESCE(SUM(prompt_tokens + completion_tokens), 0) as total_tokens,
+                (COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0))::bigint as total_tokens,
                 COALESCE(SUM(cost), 0.0) as total_cost
             FROM logs
             WHERE user_id = ? AND created_at >= ?::timestamptz
@@ -770,7 +776,7 @@ pub async fn get_model_stats_30d(
         entry.total_tokens += row.total_tokens.unwrap_or(0);
         entry.total_cost += row.total_cost.unwrap_or(0.0);
     }
-    for row in today_stats {
+    for row in &today_stats {
         let entry = merge_map
             .entry(row.model.clone())
             .or_insert_with(|| ModelStat30d {
@@ -860,51 +866,16 @@ pub async fn get_model_stats_30d(
             });
         }
 
-        let today_daily_raw: Vec<ModelDailyRaw> = if is_admin {
-            sqlx::query_as(&state.db.format_query(
-                "
-                SELECT 
-                    model,
-                    COUNT(*) as count,
-                    COALESCE(SUM(cost), 0.0) as total_cost
-                FROM logs
-                WHERE created_at >= ?::timestamptz AND model = ANY(?)
-                GROUP BY model
-            ",
-            ))
-            .bind(&today_start_ts)
-            .bind(&top_model_names_vec)
-            .fetch_all(&state.db.pool)
-            .await
-            .unwrap_or_default()
-        } else {
-            sqlx::query_as(&state.db.format_query(
-                "
-                SELECT 
-                    model,
-                    COUNT(*) as count,
-                    COALESCE(SUM(cost), 0.0) as total_cost
-                FROM logs
-                WHERE user_id = ? AND created_at >= ?::timestamptz AND model = ANY(?)
-                GROUP BY model
-            ",
-            ))
-            .bind(user_id)
-            .bind(&today_start_ts)
-            .bind(&top_model_names_vec)
-            .fetch_all(&state.db.pool)
-            .await
-            .unwrap_or_default()
-        };
-
         let today_date_str = today_date.format("%Y-%m-%d").to_string();
-        for row in today_daily_raw {
-            daily_data.push(ModelDailyStat {
-                date: today_date_str.clone(),
-                model: row.model,
-                count: row.count.unwrap_or(0),
-                total_cost: row.total_cost.unwrap_or(0.0),
-            });
+        for row in &today_stats {
+            if top_model_names.contains(&row.model) {
+                daily_data.push(ModelDailyStat {
+                    date: today_date_str.clone(),
+                    model: row.model.clone(),
+                    count: row.count.unwrap_or(0),
+                    total_cost: row.total_cost.unwrap_or(0.0),
+                });
+            }
         }
     }
 

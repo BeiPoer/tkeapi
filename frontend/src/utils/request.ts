@@ -6,12 +6,30 @@
  */
 
 import axios from 'axios';
+import { createElement } from 'react';
 import { message } from 'antd';
 import i18n from '../i18n';
 import { resolveTimedisplay } from './timedisplay';
+import { isAwaitingFreshSetup } from './freshSetup';
 
 // 全局限制同时最多显示 3 条消息
 message.config({ maxCount: 3 });
+
+const bilingualNotice = (zh: string, en: string) =>
+  createElement(
+    'span',
+    {
+      style: {
+        display: 'inline-flex',
+        flexDirection: 'column',
+        alignItems: 'flex-start',
+        lineHeight: 1.55,
+        whiteSpace: 'normal',
+      },
+    },
+    createElement('span', { style: { display: 'block' } }, zh),
+    createElement('span', { style: { display: 'block', opacity: 0.75 } }, en),
+  );
 
 const request = axios.create({
   baseURL: import.meta.env.VITE_API_BASE || '/api/v1',
@@ -85,7 +103,11 @@ request.interceptors.response.use(
       if (status === 502 || status === 503 || status === 504) {
         if (import.meta.env.DEV) {
           message.destroy('dev-backend-down');
-          message.warning({ content: '后端服务正在编译或重启中...', key: 'dev-backend-down', duration: 3 });
+          message.warning({
+            content: bilingualNotice('后端服务正在编译或重启中...', 'Backend is compiling or restarting...'),
+            key: 'dev-backend-down',
+            duration: 3,
+          });
           return Promise.reject(error);
         }
       }
@@ -102,6 +124,10 @@ request.interceptors.response.use(
       }
 
       if (status === 401) {
+        // 清空数据库后正在等待全新安装：不要被残留 401 抢跳，打断重启等待
+        if (isAwaitingFreshSetup()) {
+          return Promise.reject(error);
+        }
         // 区分"业务认证失败"与"登录态过期/缺失"：
         // - 管理端受保护页 → 跳管理登录页；用户端 → /login
         // - 已在登录页：展示业务错误；忽略退出后残留请求的 Authentication required
@@ -136,7 +162,11 @@ request.interceptors.response.use(
     } else {
       if (import.meta.env.DEV) {
         message.destroy('dev-backend-down');
-        message.warning({ content: '后端服务离线或正在编译重启...', key: 'dev-backend-down', duration: 3 });
+        message.warning({
+          content: bilingualNotice('后端服务离线或正在编译重启...', 'Backend is offline or compiling/restarting...'),
+          key: 'dev-backend-down',
+          duration: 3,
+        });
       } else {
         message.error('Network error');
       }

@@ -13,6 +13,7 @@ import request from '../../utils/request';
 import useSettingsStore from '../../store/settings';
 import { formatApiDateTime } from '../../utils/timedisplay';
 import { toTimeRangeParams } from '../../utils/dateRangeParams';
+import { rechargeTypeColor, rechargeTypeLabel } from '../../utils/rechargeType';
 import dayjs from 'dayjs';
 
 const { Title, Text } = Typography;
@@ -126,15 +127,9 @@ const RechargeRecords: React.FC = () => {
       title: t('finance.recharge_type'),
       dataIndex: 'recharge_type',
       key: 'recharge_type',
-      render: (type: string) => {
-        let color = 'default';
-        if (type === 'registration') color = 'magenta';
-        if (type === 'manual') color = 'orange';
-        if (type === 'redemption') color = 'blue';
-
-        const label = t(`finance.recharge_type_${type}`) || t('finance.recharge_type_other');
-        return <Tag color={color}>{label}</Tag>;
-      },
+      render: (type: string) => (
+        <Tag color={rechargeTypeColor(type)}>{rechargeTypeLabel(type)}</Tag>
+      ),
     },
     {
       title: '用户推荐人',
@@ -193,7 +188,7 @@ const RechargeRecords: React.FC = () => {
             style={{ width: 140 }}
           >
             {rechargeTypes.map(rt => (
-              <Option key={rt} value={rt}>{t(`finance.recharge_type_${rt}`) || rt}</Option>
+              <Option key={rt} value={rt}>{rechargeTypeLabel(rt)}</Option>
             ))}
           </Select>
           <Input 
@@ -233,11 +228,8 @@ const RechargeRecords: React.FC = () => {
             size: "small"
           }}
           renderItem={(record) => {
-            let color = 'default';
-            if (record.recharge_type === 'registration') color = 'magenta';
-            if (record.recharge_type === 'manual') color = 'orange';
-            if (record.recharge_type === 'redemption') color = 'blue';
-            const label = t(`finance.recharge_type_${record.recharge_type}`) || t('finance.recharge_type_other');
+            const label = rechargeTypeLabel(record.recharge_type);
+            const color = rechargeTypeColor(record.recharge_type);
 
             return (
               <List.Item style={{ padding: '0 0 8px 0', border: 'none' }}>

@@ -304,7 +304,7 @@ const SettingsWidget: React.FC = React.memo(() => {
 
                     {currentModel.billing && (
                       <div style={{ color: _isLight ? '#5f6368' : '#9aa0a6', fontSize: 13, marginTop: 4, lineHeight: 1.5 }}>
-                        <RateDisplay rule={currentModel.billing} currencySymbol={currencySymbol} formatPrice={formatPrice} siteDiscount={currentModel.global_discount} siteDiscountEnabled={currentModel.global_discount_enabled} />
+                        <RateDisplay rule={currentModel.billing} currencySymbol={currencySymbol} formatPrice={formatPrice} siteDiscount={currentModel.global_discount} siteDiscountEnabled={currentModel.global_discount_enabled} hideRuleLabel />
                       </div>
                     )}
                   </div>

@@ -63,11 +63,21 @@ pub fn format_openai(
         return formatted;
     }
 
-    // 上游已是 OpenAI 同步成功体 → 透传
+    // 上游已是 OpenAI 同步成功体
     if v.get("created").is_some()
         && v.get("data").and_then(|d| d.as_array()).is_some()
         && v.get("code").is_none()
     {
+        // 已有 OpenAI usage → 原样；仅有根级 usageMetadata → 注入转换结果
+        if openai_usage_node(&v).is_some() {
+            return raw.to_string();
+        }
+        if let Some(meta) = v.get("usageMetadata") {
+            let usage = gemini_usage_metadata_to_openai(meta);
+            let mut out = v;
+            out["usage"] = usage;
+            return to_json(&out);
+        }
         return raw.to_string();
     }
 
@@ -232,7 +242,6 @@ pub fn extract_raw_status(v: &Value) -> String {
         .or_else(|| v.pointer("/data/task_status"))
         .or_else(|| v.pointer("/data/0/status")) // 可灵 3.0: data[].status
         .or_else(|| v.pointer("/data/task/status"))
-        .or_else(|| v.pointer("/final_result/status"))
         .or_else(|| v.pointer("/output/task_status"))
         .or_else(|| v.pointer("/Response/Status"))
         .and_then(|s| s.as_str())
@@ -331,13 +340,8 @@ pub fn find_urls(v: &Value) -> Vec<String> {
         push_unique(&mut urls, u);
     }
 
-    // 3. 火山方舟: content.video_url / final_result.video_url / video_url
-    //    MiniMax H3 v2: task.content.url
-    for path in &[
-        "/content/video_url",
-        "/final_result/video_url",
-        "/task/content/url",
-    ] {
+    // 3. 火山方舟: content.video_url；MiniMax H3 v2: task.content.url
+    for path in &["/content/video_url", "/task/content/url"] {
         if let Some(u) = v.pointer(path).and_then(|u| u.as_str()) {
             push_unique(&mut urls, u);
         }
@@ -628,35 +632,36 @@ fn openai_status(v: &Value, urls: &[String]) -> String {
     }
 }
 
-fn extract_usage(v: &Value) -> Value {
-    if let Some(u) = v
-        .get("usage")
-        .or_else(|| v.pointer("/task/usage")) // MiniMax H3
+fn openai_usage_node(v: &Value) -> Option<&Value> {
+    v.get("usage")
+        .or_else(|| v.pointer("/task/usage"))
         .or_else(|| v.pointer("/data/usage"))
-    {
-        return u.clone();
+}
+
+/// OpenAI usage 原样；否则根级 Gemini `usageMetadata` → OpenAI 字段
+fn resolve_client_usage(v: &Value) -> Option<Value> {
+    if let Some(u) = openai_usage_node(v) {
+        return Some(u.clone());
     }
-    if let Some(u) = v
-        .get("usageMetadata")
-        .or_else(|| v.pointer("/data/usageMetadata"))
-    {
-        let ct = u
-            .get("candidatesTokenCount")
-            .and_then(|t| t.as_i64())
-            .unwrap_or(0);
-        let pt = u
-            .get("promptTokenCount")
-            .and_then(|t| t.as_i64())
-            .unwrap_or_else(|| {
-                let total = u
-                    .get("totalTokenCount")
-                    .and_then(|t| t.as_i64())
-                    .unwrap_or(0);
-                (total - ct).max(0)
-            });
-        return json!({"prompt_tokens": pt, "completion_tokens": ct});
-    }
-    json!({"prompt_tokens": 0, "completion_tokens": 0})
+    v.get("usageMetadata").map(gemini_usage_metadata_to_openai)
+}
+
+fn gemini_usage_metadata_to_openai(u: &Value) -> Value {
+    let i64_field = |k: &str| u.get(k).and_then(|t| t.as_i64()).unwrap_or(0);
+    let pt = i64_field("promptTokenCount");
+    let ct_meta = i64_field("candidatesTokenCount");
+    let total_meta = i64_field("totalTokenCount");
+    let ct = if ct_meta > 0 {
+        ct_meta
+    } else {
+        (total_meta - pt).max(0)
+    };
+    let total = if total_meta > 0 { total_meta } else { pt + ct };
+    json!({
+        "prompt_tokens": pt,
+        "completion_tokens": ct,
+        "total_tokens": total,
+    })
 }
 
 // ── URL/Base64 → OpenAI data item 统一转换（build_openai_sync 和 build_openai_poll 共用）──
@@ -693,6 +698,10 @@ fn build_openai_sync(
         if !fid.is_empty() {
             resp["id"] = json!(fid);
         }
+    }
+    // OpenAI usage 原样 / Gemini usageMetadata 转换；无则不挂字段（避免无用量厂商多出零值）
+    if let Some(usage) = resolve_client_usage(v) {
+        resp["usage"] = usage;
     }
     to_json(&resp)
 }
@@ -740,7 +749,9 @@ fn build_openai_poll(category: &str, v: &Value, fallback_id: Option<&str>) -> St
                 .collect();
             resp["data"] = json!(items);
         }
-        resp["usage"] = extract_usage(v);
+        resp["usage"] = resolve_client_usage(v).unwrap_or_else(|| {
+            json!({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+        });
     }
 
     if status == "failed" {

@@ -5,8 +5,8 @@
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
-import React, { useEffect, useState } from 'react';
-import { Table, Button, Space, Tag, Modal, Form, Input, InputNumber, message, Popconfirm, Card, Typography, Grid } from 'antd';
+import React, { useEffect, useState, useMemo } from 'react';
+import { Table, Button, Space, Tag, Input, message, Popconfirm, Card, Typography, Grid } from 'antd';
 import MobileCardList, { MobileCard, CardRow, CardActions } from '../../components/MobileCardList';
 import { PlusOutlined, EditOutlined, DeleteOutlined, SyncOutlined, TrophyOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
@@ -29,6 +29,7 @@ const UserLevels: React.FC = () => {
   const adminPath = settings?.site?.admin_path || 'admin1688';
   const [levels, setLevels] = useState<UserLevel[]>([]);
   const [loading, setLoading] = useState(true);
+  const [searchKeyword, setSearchKeyword] = useState('');
 
   const fetchLevels = async () => {
     setLoading(true);
@@ -45,6 +46,20 @@ const UserLevels: React.FC = () => {
   useEffect(() => {
     fetchLevels();
   }, []);
+
+  const filteredLevels = useMemo(() => {
+    if (!searchKeyword.trim()) return levels;
+    const kw = searchKeyword.trim().toLowerCase();
+    return levels.filter((lvl) => {
+      const matchName = lvl.name?.toLowerCase().includes(kw);
+      const matchId = lvl.id?.toString().includes(kw);
+      const matchUlid = `ulid: ${lvl.id.toString().padStart(4, '0')}`.toLowerCase().includes(kw) ||
+                        lvl.id.toString().padStart(4, '0').includes(kw);
+      const matchKey = lvl.group_key?.toLowerCase().includes(kw);
+      const matchDesc = lvl.description?.toLowerCase().includes(kw);
+      return matchName || matchId || matchUlid || matchKey || matchDesc;
+    });
+  }, [levels, searchKeyword]);
 
   const handleAdd = () => {
     navigate(`/${adminPath}/user-levels/new`);
@@ -72,17 +87,18 @@ const UserLevels: React.FC = () => {
       title: t('user_levels.name'),
       dataIndex: 'name',
       key: 'name',
+      sorter: (a: UserLevel, b: UserLevel) => a.name.localeCompare(b.name, 'zh'),
       render: (text: string, record: UserLevel) => (
         <div>
-          <Space align="center" size={8}>
+          <Space align="center" size={6}>
             <TrophyOutlined style={{ color: '#faad14' }} />
-            <Text strong>{text}</Text>
-            <Tag bordered={false} style={{ margin: 0, background: 'rgba(22,119,255,0.1)', color: '#1677ff', borderRadius: 4 }}>
+            <Text strong style={{ fontSize: 13 }}>{text}</Text>
+            <Tag bordered={false} style={{ margin: 0, background: 'rgba(22,119,255,0.1)', color: '#1677ff', borderRadius: 4, fontSize: 11, lineHeight: '18px', padding: '0 5px' }}>
               ULID: {record.id.toString().padStart(4, '0')}
             </Tag>
-            {record.is_default === 1 && <Tag color="green">默认注册</Tag>}
+            {record.is_default === 1 && <Tag color="green" style={{ margin: 0, fontSize: 11, lineHeight: '18px', padding: '0 5px' }}>默认注册</Tag>}
           </Space>
-          <div style={{ marginTop: 4 }}>
+          <div style={{ marginTop: 1, lineHeight: 1.3 }}>
             <Text type="secondary" style={{ fontSize: 12 }}>标志: {record.group_key}</Text>
           </div>
         </div>
@@ -92,6 +108,7 @@ const UserLevels: React.FC = () => {
       title: '用户数',
       dataIndex: 'user_count',
       key: 'user_count',
+      sorter: (a: UserLevel, b: UserLevel) => (a.user_count || 0) - (b.user_count || 0),
       render: (val: number) => (
         <Tag color="blue">{val || 0}</Tag>
       ),
@@ -100,6 +117,7 @@ const UserLevels: React.FC = () => {
       title: t('user_levels.discount'),
       dataIndex: 'discount',
       key: 'discount',
+      sorter: (a: UserLevel, b: UserLevel) => (a.discount || 0) - (b.discount || 0),
       render: (val: number, record: UserLevel) => {
         const off = Math.round((1 - val) * 100);
         const up = Math.round((val - 1) * 100);
@@ -120,6 +138,7 @@ const UserLevels: React.FC = () => {
       title: '返利比例',
       dataIndex: 'commission_ratio',
       key: 'commission_ratio',
+      sorter: (a: UserLevel, b: UserLevel) => (a.commission_ratio || 0) - (b.commission_ratio || 0),
       render: (val: number) => {
         const percent = Math.round((val || 0) * 100);
         return <Tag color="green">{percent}%</Tag>;
@@ -129,6 +148,7 @@ const UserLevels: React.FC = () => {
       title: '等级营销推广',
       dataIndex: 'marketing_enabled',
       key: 'marketing_enabled',
+      sorter: (a: UserLevel, b: UserLevel) => (a.marketing_enabled || 0) - (b.marketing_enabled || 0),
       render: (val: number) => (
         val === 1 ? <Tag color="blue">已开启</Tag> : <Tag color="default">已关闭</Tag>
       ),
@@ -137,6 +157,7 @@ const UserLevels: React.FC = () => {
       title: '详细日志',
       dataIndex: 'allow_view_log_details',
       key: 'allow_view_log_details',
+      sorter: (a: UserLevel, b: UserLevel) => (a.allow_view_log_details || 0) - (b.allow_view_log_details || 0),
       render: (val: number) => (
         val === 0 ? <Tag color="default">已关闭</Tag> : <Tag color="blue">已开启</Tag>
       ),
@@ -150,25 +171,31 @@ const UserLevels: React.FC = () => {
       title: '排序',
       dataIndex: 'sort_order',
       key: 'sort_order',
+      sorter: (a: UserLevel, b: UserLevel) => (a.sort_order || 0) - (b.sort_order || 0),
     },
     {
       title: t('user_levels.created_at'),
       dataIndex: 'created_at',
       key: 'created_at',
+      sorter: (a: UserLevel, b: UserLevel) => {
+        const timeA = a.created_at ? new Date(a.created_at).getTime() : 0;
+        const timeB = b.created_at ? new Date(b.created_at).getTime() : 0;
+        return timeA - timeB;
+      },
       render: (text: string) => formatApiDateTime(text, 'YYYY-MM-DD'),
     },
     {
       title: t('common.actions'),
       key: 'actions',
       render: (_: any, record: UserLevel) => (
-        <Space>
-          <Button icon={<EditOutlined />} onClick={() => handleEdit(record)} />
+        <Space size={4}>
+          <Button size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)} />
           <Popconfirm 
             title={t('user_levels.delete_confirm')} 
             onConfirm={() => handleDelete(record.id)}
             disabled={record.group_key === 'default'}
           >
-            <Button icon={<DeleteOutlined />} danger disabled={record.group_key === 'default'} />
+            <Button size="small" icon={<DeleteOutlined />} danger disabled={record.group_key === 'default'} />
           </Popconfirm>
         </Space>
       ),
@@ -177,9 +204,17 @@ const UserLevels: React.FC = () => {
 
   return (
     <Card bordered={false}>
-      <div style={{ display: 'flex', flexDirection: screens.xs ? 'column' : 'row', justifyContent: 'space-between', marginBottom: 24, gap: 12 }}>
+      <div style={{ display: 'flex', flexDirection: screens.xs ? 'column' : 'row', justifyContent: 'space-between', marginBottom: 12, gap: 12 }}>
         <Title level={screens.xs ? 4 : 2} style={{ margin: 0 }}>{t('user_levels.title')}</Title>
-        <Space>
+        <Space wrap>
+          <Input.Search
+            placeholder="搜索等级名称 / 等级 ID"
+            allowClear
+            value={searchKeyword}
+            onChange={(e) => setSearchKeyword(e.target.value)}
+            onSearch={(val) => setSearchKeyword(val)}
+            style={{ width: screens.xs ? '100%' : 220 }}
+          />
           <Button icon={<SyncOutlined />} onClick={fetchLevels}>{t('common.refresh')}</Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>{t('user_levels.add_level')}</Button>
         </Space>
@@ -187,7 +222,7 @@ const UserLevels: React.FC = () => {
 
       {screens.xs ? (
         <MobileCardList
-          dataSource={levels}
+          dataSource={filteredLevels}
           loading={loading}
           rowKey="id"
           pagination={false}
@@ -217,7 +252,7 @@ const UserLevels: React.FC = () => {
                 <CardRow label="用户数">
                   <Tag color="blue">{record.user_count || 0}</Tag>
                 </CardRow>
-                <CardRow label="折扣倍率">
+                <CardRow label="等级折扣倍率">
                   <Space wrap>
                     <Text>{record.discount.toFixed(2)}x</Text>
                     {record.discount_type === 2 && <Tag color="blue">等级折扣</Tag>}
@@ -249,12 +284,14 @@ const UserLevels: React.FC = () => {
         />
       ) : (
         <Table
-          dataSource={levels}
+          dataSource={filteredLevels}
           columns={columns}
           rowKey="id"
           loading={loading}
           pagination={false}
+          size="small"
           scroll={{ x: 'max-content' }}
+          showSorterTooltip={false}
         />
       )}
 

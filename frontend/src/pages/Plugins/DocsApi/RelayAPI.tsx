@@ -35,7 +35,8 @@ import 'highlight.js/styles/github-dark.css';
 import './DocsApi.css';
 
 import request from '../../../utils/request';
-import { persistUserLanguagePreference } from '../../../utils/language';
+import { fetchActivePlugins } from '../../../utils/activePlugins';
+import { persistUserLanguagePreference, LANG_NAME_MAP } from '../../../utils/language';
 import { useThemeStore } from '../../../store/theme';
 import useSettingsStore from '../../../store/settings';
 import useAuthStore from '../../../store/auth';
@@ -353,7 +354,7 @@ const RelayAPI: React.FC<RelayAPIProps> = ({ apiPrefix, baseRoute }) => {
   const isEn = i18n.language === 'en';
   const enableThemeToggle = settings?.site?.enable_theme_toggle !== false;
   const enableMultilingual = settings?.site?.enable_multilingual !== false;
-  const siteName = settings?.site?.name || 'TokensByte';
+  const siteName = settings?.site?.name || 'Tkeapi';
   const siteLogo = settings?.site?.logo || '';
   const siteTitle = settings?.site?.title || '';
   const agreement = settings?.agreement || null;
@@ -403,9 +404,9 @@ const RelayAPI: React.FC<RelayAPIProps> = ({ apiPrefix, baseRoute }) => {
         console.error('Failed to fetch announcements:', error);
       }
     };
-    const fetchActivePlugins = async () => {
+    const loadActivePlugins = async () => {
       try {
-        const response = await (request.get('/plugins/active') as any);
+        const response = await fetchActivePlugins();
         if (response.active_plugins) {
           setActivePlugins(response.active_plugins);
         }
@@ -414,7 +415,7 @@ const RelayAPI: React.FC<RelayAPIProps> = ({ apiPrefix, baseRoute }) => {
       }
     };
     fetchAnnouncements();
-    fetchActivePlugins();
+    loadActivePlugins();
   }, [user?.notification_preferences, settings?.notification?.low_balance_threshold, i18n.language]);
 
   const isPluginVisibleForUser = (pluginName: string) => {
@@ -625,11 +626,6 @@ const RelayAPI: React.FC<RelayAPIProps> = ({ apiPrefix, baseRoute }) => {
     persistUserLanguagePreference(lng);
   };
 
-  const langNameMap: Record<string, string> = {
-    zh: '简体中文', en: 'English', ja: '日本語', ko: '한국어', vi: 'Tiếng Việt',
-    fr: 'Français', de: 'Deutsch', es: 'Español', pt: 'Português',
-    ru: 'Русский', ar: 'العربية',
-  };
   const supportedLanguages = settings?.site?.supported_languages?.length ? settings.site.supported_languages : ['zh', 'en'];
   const implementedLangs = i18n.options.resources ? Object.keys(i18n.options.resources) : ['zh', 'en'];
 
@@ -637,7 +633,7 @@ const RelayAPI: React.FC<RelayAPIProps> = ({ apiPrefix, baseRoute }) => {
     .filter(lng => implementedLangs.includes(lng))
     .map(lng => ({
       key: lng,
-      label: langNameMap[lng] || lng,
+      label: LANG_NAME_MAP[lng] || lng,
       onClick: () => changeLanguage(lng),
     }));
 

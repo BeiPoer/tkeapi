@@ -354,7 +354,7 @@ pub async fn api_key_middleware(
         axum::http::Method::GET | axum::http::Method::DELETE
     );
     if !skip_quota_check {
-        let (site_tz, _) = crate::relay::get_cached_config(&state).await;
+        let site_tz = crate::relay::relay_settings::get_cached_site_timezone(&state.db).await;
         // 计费自然日以用户 timedisplay 为准（非站点全局、非 timesystem）
         let timedisplay = crate::api::date_helper::resolve_user_timedisplay_name(
             &state.db,

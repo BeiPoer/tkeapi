@@ -22,6 +22,7 @@ import utc from 'dayjs/plugin/utc';
 import { formatApiDateTime } from '../../utils/timedisplay';
 import { toDateRangeParams } from '../../utils/dateRangeParams';
 import { useLogDetailLoader } from '../../hooks/useLogDetailLoader';
+import { parsePluginTagMeta } from '../../utils/pluginTagMeta';
 dayjs.extend(utc);
 
 const { RangePicker } = DatePicker;
@@ -44,7 +45,6 @@ type LogListFilters = {
   modelFilter?: string;
   searchKeyword?: string;
   userFilter?: string;
-  channelFilter?: string;
   statusFilter?: string;
   statusCodeFilter?: string;
   dateRange?: [any, any] | null;
@@ -64,7 +64,6 @@ function buildLogListParams(f: LogListFilters): Record<string, unknown> {
   const uid = f.userFilter?.trim();
   if (uid) params.user_id = uid;
   if (f.userGroupFilter) params.user_group = f.userGroupFilter;
-  if (f.channelFilter) params.channel_group_aid = f.channelFilter;
   if (f.statusFilter) params.status = f.statusFilter;
   const statusCode = parseStatusCodeFilter(f.statusCodeFilter);
   if (statusCode !== undefined) params.status_code = statusCode;
@@ -161,20 +160,6 @@ function billingUsageMetrics(record: RequestLog) {
   return { cacheCreation, cacheRead, webSearch, isClaude: cacheCreation > 0 || cacheRead > 0 };
 }
 
-/** 从 logs.plugin_tag 读取展示用元信息（client_ct / 插件 title） */
-function parsePluginTagMeta(pluginTag?: string | null): { title?: string; clientCt?: string } {
-  if (!pluginTag) return {};
-  try {
-    const tag = JSON.parse(pluginTag);
-    return {
-      title: typeof tag?.title === 'string' ? tag.title : undefined,
-      clientCt: typeof tag?.client_ct === 'string' && tag.client_ct ? tag.client_ct : undefined,
-    };
-  } catch {
-    return {};
-  }
-}
-
 function prettyJson(raw?: string | null): string | null | undefined {
   if (!raw) return raw;
   try {
@@ -208,17 +193,16 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
   const [searchKeyword, setSearchKeyword] = useState('');
   const [searchParams] = useSearchParams();
   const [userFilter, setUserFilter] = useState<string | undefined>(searchParams.get('user_id') || undefined);
-  const [channelFilter, setChannelFilter] = useState<string | undefined>(undefined);
   const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined);
   const [statusCodeFilter, setStatusCodeFilter] = useState<string | undefined>(undefined);
   const [userGroupFilter, setUserGroupFilter] = useState<string | undefined>(undefined);
-  const [channelsList, setChannelsList] = useState<any[]>([]);
   const [userLevels, setUserLevels] = useState<any[]>([]);
   const [allowDetails, setAllowDetails] = useState(true);
   const [dateRange, setDateRange] = useState<[any, any] | null>(() => [dayjs().startOf('day'), dayjs().endOf('day')]);
   const [exporting, setExporting] = useState(false);
   const [stats, setStats] = useState<{ total_cost: number; success_count: number; fail_count: number }>({ total_cost: 0, success_count: 0, fail_count: 0 });
   const { user } = useAuthStore();
+  const isSuperAdmin = user?.role === 'admin' && !user?.admin_group_id;
   const screens = useBreakpoint();
   const [actionTypeFilter, setActionTypeFilter] = useState<string>(localStorage.getItem('default_log_type') || '视觉');
   const [isSettingsModalVisible, setIsSettingsModalVisible] = useState(false);
@@ -247,7 +231,6 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
 
   useEffect(() => {
     if (user?.role !== 'admin') return;
-    request.get('/channels').then((res: any) => setChannelsList(res.data || [])).catch(console.error);
     request.get('/user_levels').then((res: any) => setUserLevels(res.data || [])).catch(console.error);
   }, [user]);
 
@@ -256,7 +239,6 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
       modelFilter,
       searchKeyword,
       userFilter,
-      channelFilter,
       statusFilter,
       statusCodeFilter,
       dateRange,
@@ -264,7 +246,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
       routerEp,
       userGroupFilter,
     }),
-    [modelFilter, searchKeyword, userFilter, channelFilter, statusFilter, statusCodeFilter, dateRange, actionTypeFilter, routerEp, userGroupFilter],
+    [modelFilter, searchKeyword, userFilter, statusFilter, statusCodeFilter, dateRange, actionTypeFilter, routerEp, userGroupFilter],
   );
 
   const fetchLogs = useCallback(async (overrides?: {
@@ -273,7 +255,6 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
     modelFilter?: string;
     searchKeyword?: string;
     userFilter?: string | undefined;
-    channelFilter?: string | undefined;
     statusFilter?: string | undefined;
     statusCodeFilter?: string | undefined;
     dateRange?: [any, any] | null;
@@ -291,7 +272,6 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
           modelFilter: pickFilter(o, 'modelFilter', modelFilter),
           searchKeyword: pickFilter(o, 'searchKeyword', searchKeyword),
           userFilter: pickFilter(o, 'userFilter', userFilter),
-          channelFilter: pickFilter(o, 'channelFilter', channelFilter),
           statusFilter: pickFilter(o, 'statusFilter', statusFilter),
           statusCodeFilter: pickFilter(o, 'statusCodeFilter', statusCodeFilter),
           dateRange: pickFilter(o, 'dateRange', dateRange),
@@ -322,7 +302,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
         setLoading(false);
       }
     }
-  }, [page, pageSize, modelFilter, searchKeyword, userFilter, channelFilter, statusFilter, statusCodeFilter, dateRange, routerEp, actionTypeFilter, userGroupFilter, resetDetailCache]);
+  }, [page, pageSize, modelFilter, searchKeyword, userFilter, statusFilter, statusCodeFilter, dateRange, routerEp, actionTypeFilter, userGroupFilter, resetDetailCache]);
 
 
 
@@ -374,7 +354,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
     }
     fetchLogs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, actionTypeFilter, channelFilter, statusFilter, userGroupFilter]);
+  }, [page, pageSize, actionTypeFilter, statusFilter, userGroupFilter]);
 
   const columns = ([
     {
@@ -409,18 +389,14 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
       ),
     },
     user?.role === 'admin' ? {
-      title: t('logs.channel_aid', '渠道AID'),
+      title: t('logs.channel_aid', '渠道信息'),
       dataIndex: 'channel_group_aid',
       key: 'channel_group_aid',
       width: 120,
-      filters: channelsList.map((c: any) => ({ text: `${c.group_aid || c.id} ${c.name}`, value: c.group_aid || String(c.id) })),
-      filterMultiple: false,
-      filterSearch: true,
-      filteredValue: channelFilter ? [channelFilter] : null,
       render: (text: string, record: RequestLog) => (
         <Space size={4} direction="vertical" style={{ alignItems: 'flex-start' }}>
           <Space size={4}>
-            <Text type="secondary" style={{ fontSize: 12 }}>{text || '-'}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>{text ? `AID: ${text}` : '-'}</Text>
             {record.is_ha === 1 && <Tag color="blue" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>HA</Tag>}
           </Space>
           {record.yid && (
@@ -434,12 +410,16 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
     user?.role === 'admin' ? {
       title: t('logs.user', '用户'),
       key: 'user',
-      width: 150,
+      width: 180,
       render: (_: any, record: RequestLog) => {
         const name = record.user_nickname || record.user_id?.slice(0, 8) || '-';
+        const remark = record.user_admin_remark?.trim();
         return (
           <Space direction="vertical" size={0}>
-            <Text style={{ fontSize: 12 }}>{name}</Text>
+            <Text style={{ fontSize: 12 }}>
+              {name}
+              {remark ? <Text type="secondary" style={{ fontSize: 12 }}> {remark}</Text> : null}
+            </Text>
             {record.user_uid && <Text type="secondary" style={{ fontSize: 10, fontFamily: 'monospace' }}>UID: {record.user_uid}</Text>}
           </Space>
         );
@@ -481,24 +461,18 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
       key: 'model',
       width: 180,
       ellipsis: true,
-      render: (text: string, record: RequestLog) => {
-        const { title: pluginLabel } = parsePluginTagMeta(record.plugin_tag);
-        return (
-          <Space direction="vertical" size={0}>
+      render: (text: string, record: RequestLog) => (
+        <Space direction="vertical" size={0}>
+          <Text style={{ fontSize: 12 }}>{text}</Text>
+          {user?.role === 'admin' && (record.yid || record.billing_pid || record.forward_eid) && (
             <Space size={4}>
-              <Text style={{ fontSize: 12 }}>{text}</Text>
-              {pluginLabel && <Tag color="purple" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>{pluginLabel}</Tag>}
+              {record.yid && <Text type="secondary" style={{ fontSize: 10, fontFamily: 'monospace' }}>YID:{record.yid}</Text>}
+              {record.billing_pid && <Text type="secondary" style={{ fontSize: 10, fontFamily: 'monospace' }}>PID:{record.billing_pid}</Text>}
+              {record.forward_eid && <Text type="secondary" style={{ fontSize: 10, fontFamily: 'monospace' }}>EID:{record.forward_eid}</Text>}
             </Space>
-            {user?.role === 'admin' && (record.yid || record.billing_pid || record.forward_eid) && (
-              <Space size={4}>
-                {record.yid && <Text type="secondary" style={{ fontSize: 10, fontFamily: 'monospace' }}>YID:{record.yid}</Text>}
-                {record.billing_pid && <Text type="secondary" style={{ fontSize: 10, fontFamily: 'monospace' }}>PID:{record.billing_pid}</Text>}
-                {record.forward_eid && <Text type="secondary" style={{ fontSize: 10, fontFamily: 'monospace' }}>EID:{record.forward_eid}</Text>}
-              </Space>
-            )}
-          </Space>
-        );
-      },
+          )}
+        </Space>
+      ),
     },
     {
       title: t('logs.latency'),
@@ -566,7 +540,7 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
     const upstreamReqJson = user?.role === 'admin' ? prettyJson(merged.upstream_req_content) : null;
 
     const costFormula = t('logs.cost_formula_dynamic', '由绑定的计费模板动态结算');
-    const { clientCt } = parsePluginTagMeta(record.plugin_tag);
+    const { clientCt, cascadeS1TaskId } = parsePluginTagMeta(merged.plugin_tag);
 
     // 使用 antd theme token 来适配深色/浅色主题
     const panelBg = themeToken.colorBgElevated;
@@ -588,15 +562,25 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
               <Tag color={clientCtColor(clientCt)}>{clientCt}</Tag>
             </Descriptions.Item>
           )}
+          {isSuperAdmin && cascadeS1TaskId && (
+            <Descriptions.Item label={t('logs.cascade_s1_task_id', '上游任务ID')}>
+              <Typography.Text
+                copyable={{ text: cascadeS1TaskId, tooltips: [t('logs.copy', '复制'), t('logs.copy_success', '已复制')] }}
+                style={{ fontSize: 12, fontFamily: 'monospace' }}
+              >
+                {cascadeS1TaskId}
+              </Typography.Text>
+            </Descriptions.Item>
+          )}
           {record.upstream_url && (
             <Descriptions.Item label={t('logs.upstream_url', '真实上游地址')}>
               {record.upstream_url}
             </Descriptions.Item>
           )}
           {user?.role === 'admin' && (
-            <Descriptions.Item label={t('logs.channel_aid', '渠道标识')}>
+            <Descriptions.Item label={t('logs.channel_aid', '渠道信息')}>
               <Space size={4}>
-                <span>{record.channel_group_aid || '-'}</span>
+                <span>{record.channel_group_aid ? `AID: ${record.channel_group_aid}` : '-'}</span>
                 {record.is_ha === 1 && <Tag color="blue" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>HA</Tag>}
               </Space>
             </Descriptions.Item>
@@ -637,9 +621,9 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
             <Space size={16} wrap>
               <Text type="secondary" style={{ fontSize: 12 }}>{t('logs.billing_rule', '计费规则 (PID)')}: {record.billing_pid ? <Typography.Text keyboard>{record.billing_pid}</Typography.Text> : '-'}</Text>
               <Text type="secondary" style={{ fontSize: 12 }}>{t('logs.forward_rule', '转发规则 (EID)')}: {record.forward_eid ? <Typography.Text keyboard>{record.forward_eid}</Typography.Text> : '-'}</Text>
-              {record.plugin_tag && (() => {
+              {merged.plugin_tag && (() => {
                 try {
-                  const tag = JSON.parse(record.plugin_tag);
+                  const tag = JSON.parse(merged.plugin_tag);
                   if (tag && tag.name === 'happyhorse' && (tag.custom_model || tag.actual_model)) {
                     return (
                       <Tag color="purple" style={{ fontSize: 11 }}>
@@ -938,14 +922,17 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
                 {user?.role === 'admin' && (
                   <CardRow label={t('logs.user', '用户')}>
                     <Space direction="vertical" size={0}>
-                      <Text style={{ fontSize: 12 }}>{userName}</Text>
+                      <Text style={{ fontSize: 12 }}>
+                        {userName}
+                        {record.user_admin_remark?.trim() ? <Text type="secondary" style={{ fontSize: 12 }}> {record.user_admin_remark.trim()}</Text> : null}
+                      </Text>
                       {record.user_uid && <Text type="secondary" style={{ fontSize: 10, fontFamily: 'monospace' }}>UID: {record.user_uid}</Text>}
                     </Space>
                   </CardRow>
                 )}
-                {user?.role === 'admin' && record.channel_group_aid && <CardRow label={t('logs.channel_aid', '渠道AID')}>
+                {user?.role === 'admin' && record.channel_group_aid && <CardRow label={t('logs.channel_aid', '渠道信息')}>
                   <Space size={4}>
-                    <Text type="secondary" style={{ fontSize: 12 }}>{record.channel_group_aid}</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>AID: {record.channel_group_aid}</Text>
                     {record.is_ha === 1 && <Tag color="blue" style={{ fontSize: 10, margin: 0, padding: '0 4px', lineHeight: '16px' }}>HA</Tag>}
                   </Space>
                 </CardRow>}
@@ -1025,12 +1012,6 @@ const Logs: React.FC<{ routerEp?: string }> = ({ routerEp }) => {
           }}
           onChange={(pagination, filters: any) => {
             let shouldResetPage = false;
-            
-            const chFilter = filters.channel_group_aid ? filters.channel_group_aid[0] as string : undefined;
-            if (chFilter !== channelFilter) {
-              setChannelFilter(chFilter);
-              shouldResetPage = true;
-            }
             
             const stFilter = filters.status_code ? filters.status_code[0] as string : undefined;
             if (stFilter !== statusFilter) {

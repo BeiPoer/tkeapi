@@ -10,7 +10,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{% block title %}{{ seo.meta_title | default(value="TokensByte") }}{% endblock %}</title>
+<title>{% block title %}{{ seo.meta_title | default(value="Tkeapi") }}{% endblock %}</title>
 <meta name="description" content="{% block meta_desc %}{{ seo.meta_description | default(value="统一 AI 模型 API 接入平台，一个接口调用数百个主流大模型") }}{% endblock %}">
 <meta name="keywords" content="{{ seo.meta_keywords | default(value="AI,API,大模型,GPT,Claude,DeepSeek") }}">
 <meta name="robots" content="index, follow">
@@ -346,7 +346,7 @@ body.dark .invert-dark,
 <div class="hdr-in">
   <a href="{{ nav.logo_link | default(value="/home") | safe }}" class="hdr-logo">
     {% if nav.logo_url %}<img src="{{ nav.logo_url | safe }}" alt="logo">{% endif %}
-    <span data-i18n-dynamic="{{ nav.logo_text | default(value="TokensByte") }}">{{ nav.logo_text | default(value="TokensByte") }}</span>
+    <span data-i18n-dynamic="{{ nav.logo_text | default(value="Tkeapi") }}">{{ nav.logo_text | default(value="Tkeapi") }}</span>
   </a>
   <div class="hdr-search">
     <svg viewBox="0 0 20 20"><path d="M12.9 14.32a8 8 0 1 1 1.41-1.41l5.35 5.33-1.42 1.42-5.33-5.34zM8 14A6 6 0 1 0 8 2a6 6 0 0 0 0 12z"></path></svg>
@@ -380,6 +380,7 @@ body.dark .invert-dark,
         </button>
         <div class="lang-dropdown-menu" id="lang-menu">
           <a href="javascript:void(0)" onclick="changeLang('zh')" data-lang="zh">简体中文</a>
+          <a href="javascript:void(0)" onclick="changeLang('zh-TW')" data-lang="zh-TW">繁體中文</a>
           <a href="javascript:void(0)" onclick="changeLang('en')" data-lang="en">English</a>
           <a href="javascript:void(0)" onclick="changeLang('ja')" data-lang="ja">日本語</a>
           <a href="javascript:void(0)" onclick="changeLang('ko')" data-lang="ko">한국어</a>
@@ -410,7 +411,7 @@ body.dark .invert-dark,
 <div class="ftr-in">
   <div class="ftr-top">
     <div class="ftr-brand">
-      <b data-i18n-dynamic="{{ footer.brand_name | default(value='TokensByte') }}">{{ footer.brand_name | default(value="TokensByte") }}</b>
+      <b data-i18n-dynamic="{{ footer.brand_name | default(value='Tkeapi') }}">{{ footer.brand_name | default(value="Tkeapi") }}</b>
       {% if footer.description %}
       <p data-i18n-dynamic="{{ footer.description }}">{{ footer.description }}</p>
       {% endif %}
@@ -467,7 +468,7 @@ body.dark .invert-dark,
     </div>
   </div>
   <div class="ftr-btm">
-    <span data-i18n-dynamic="{{ footer.copyright | default(value='© 2026 TokensByte. All rights reserved.') }}">{{ footer.copyright | default(value="© 2026 TokensByte. All rights reserved.") }}</span>
+    <span data-i18n-dynamic="{{ footer.copyright | default(value='© 2026 TkeAPI. All rights reserved.') }}">{{ footer.copyright | default(value="© 2026 TkeAPI. All rights reserved.") }}</span>
   </div>
 </div>
 </footer>
@@ -583,17 +584,19 @@ body.dark .invert-dark,
 
   const locales = {
     'zh': {{ portal_locales_zh | safe }},
+    'zh-TW': {{ portal_locales_zh_tw | safe }},
     'en': {{ portal_locales_en | safe }},
     'ja': {{ portal_locales_ja | safe }},
     'ko': {{ portal_locales_ko | safe }},
     'vi': {{ portal_locales_vi | safe }}
   };
 
-  const LANG_INDEXES = { 'zh': 0, 'en': 1, 'ja': 2, 'ko': 3, 'vi': 4 };
+  const LANG_INDEXES = { 'zh': 0, 'zh-TW': 0, 'en': 1, 'ja': 2, 'ko': 3, 'vi': 4 };
 
   function normalizeLang(lang) {
     if (!lang) return 'zh';
-    lang = lang.toLowerCase();
+    lang = String(lang).toLowerCase().replace('_', '-');
+    if (lang === 'zh-tw' || lang.startsWith('zh-hant') || lang === 'zh-hk' || lang === 'zh-mo') return 'zh-TW';
     if (lang.startsWith('zh')) return 'zh';
     if (lang.startsWith('en')) return 'en';
     if (lang.startsWith('ja')) return 'ja';
@@ -668,7 +671,7 @@ body.dark .invert-dark,
     // Update document title dynamically
     const currentPath = window.location.pathname;
     const logoEl = document.querySelector('.hdr-logo span[data-i18n-dynamic]');
-    const rawLogoText = logoEl ? logoEl.getAttribute('data-i18n-dynamic') || logoEl.textContent : 'TokensByte';
+    const rawLogoText = logoEl ? logoEl.getAttribute('data-i18n-dynamic') || logoEl.textContent : 'Tkeapi';
     const siteName = translateText(rawLogoText, lang);
     
     if (currentPath === '/home' || currentPath === '/home/') {
@@ -686,6 +689,7 @@ body.dark .invert-dark,
     } else if (currentPath.includes('/model/')) {
       let modelDetailTitle = '模型详情';
       if (lang === 'en') modelDetailTitle = 'Model Detail';
+      else if (lang === 'zh-TW') modelDetailTitle = '模型詳情';
       else if (lang === 'ja') modelDetailTitle = 'モデルの詳細';
       else if (lang === 'ko') modelDetailTitle = '모델 상세 정보';
       else if (lang === 'vi') modelDetailTitle = 'Chi tiết mô hình';

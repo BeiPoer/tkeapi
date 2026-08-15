@@ -95,7 +95,7 @@
   "low_latency_audio_prompt": "Low latency (fast audio P)",
   "low_latency_audio_cache": "Low latency (fast audio cache)",
   "extra_input_image_from_n": "Extra input image (from {{n}})",
-  "free_images_then_extra": "First {{n}} images free, then {{price}}/image",
+  "free_images_then_extra": "First {{n}} images free, then ",
   "specification": "Spec",
   "output_total_pixels": "Output total pixels",
   "ten_thousand_suffix": "0K",

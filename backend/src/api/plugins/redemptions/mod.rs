@@ -80,7 +80,13 @@ pub async fn list_redemption_groups(
     let page_size = query.page_size.unwrap_or(10).max(1).min(100);
     let offset = (page - 1) * page_size;
 
-    let groups: Vec<crate::models::RedemptionGroup> = sqlx::query_as(&state.db.format_query(
+    let name_filter = query
+        .name
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+
+    let mut qb = sqlx::QueryBuilder::new(
         "SELECT \
              name, \
              COUNT(id) as total_count, \
@@ -91,23 +97,30 @@ pub async fn list_redemption_groups(
              MAX(max_uses) as max_uses, \
              MAX(per_user_limit) as per_user_limit, \
              MAX(per_user_activity_limit) as per_user_activity_limit \
-             FROM redemptions \
-             GROUP BY name \
-             ORDER BY MAX(created_at) DESC \
-             LIMIT ? OFFSET ?",
-    ))
-    .bind(page_size)
-    .bind(offset)
-    .fetch_all(&state.db.pool)
-    .await?;
+             FROM redemptions WHERE 1=1 ",
+    );
+    if let Some(name) = name_filter {
+        qb.push(" AND name LIKE ");
+        qb.push_bind(format!("%{}%", name));
+    }
+    qb.push(" GROUP BY name ORDER BY MAX(created_at) DESC LIMIT ");
+    qb.push_bind(page_size);
+    qb.push(" OFFSET ");
+    qb.push_bind(offset);
 
-    let total: i64 = sqlx::query_scalar(
-        &state
-            .db
-            .format_query("SELECT COUNT(DISTINCT name) FROM redemptions"),
-    )
-    .fetch_one(&state.db.pool)
-    .await?;
+    let groups: Vec<crate::models::RedemptionGroup> =
+        qb.build_query_as().fetch_all(&state.db.pool).await?;
+
+    let mut count_qb =
+        sqlx::QueryBuilder::new("SELECT COUNT(DISTINCT name) FROM redemptions WHERE 1=1 ");
+    if let Some(name) = name_filter {
+        count_qb.push(" AND name LIKE ");
+        count_qb.push_bind(format!("%{}%", name));
+    }
+    let total: i64 = count_qb
+        .build_query_scalar()
+        .fetch_one(&state.db.pool)
+        .await?;
 
     Ok(Json(RedemptionGroupResponse {
         data: groups,
@@ -134,7 +147,7 @@ pub async fn generate_redemptions(
         return Err(AppError::BadRequest("额度必须大于 0".to_string()));
     }
 
-    let (tz_name, _) = crate::relay::get_cached_config(&state).await;
+    let tz_name = crate::relay::relay_settings::get_cached_site_timezone(&state.db).await;
     let expires_at = if request.permanent {
         None
     } else {
@@ -508,7 +521,7 @@ pub async fn redeem_code(
         return Err(AppError::BadRequest("该兑换码已作废".to_string()));
     }
 
-    let (tz_name, _) = crate::relay::get_cached_config(&state).await;
+    let tz_name = crate::relay::relay_settings::get_cached_site_timezone(&state.db).await;
     if is_expired(preview.expires_at.as_deref(), &tz_name) {
         return Err(AppError::BadRequest("兑换码已过期".to_string()));
     }

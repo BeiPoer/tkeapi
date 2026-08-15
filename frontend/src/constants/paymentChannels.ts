@@ -29,7 +29,9 @@ export interface PaymentChannelUiItem {
   sort_order: number;
   enabled: boolean;
   display_name?: string | null;
+  display_name_en?: string | null;
   subtitle?: string | null;
+  subtitle_en?: string | null;
   logo_url?: string | null;
   /** 通联子渠道：微信 */
   allinpay_wechat_enabled?: boolean;
@@ -41,10 +43,14 @@ export interface PaymentChannelUiItem {
 
 export interface PaymentChannelDefaultMeta {
   id: PaymentChannelId;
-  /** 系统默认名称（未自定义时使用） */
+  /** 系统默认中文名称（未自定义时使用） */
   defaultName: string;
-  /** 系统默认副标题/角标 */
+  /** 系统默认英文名称（非中文站点语言使用） */
+  defaultNameEn: string;
+  /** 系统默认中文副标题/角标 */
   defaultSubtitle: string;
+  /** 系统默认英文副标题/角标 */
+  defaultSubtitleEn: string;
   /** 所属网关配置 key */
   gatewayKey:
     | 'payment_wechat'
@@ -60,27 +66,41 @@ export interface PaymentChannelDefaultMeta {
 
 /** 内置渠道目录（与后端 payment_channel_catalog 保持一致） */
 const PAYMENT_CHANNEL_CATALOG: PaymentChannelDefaultMeta[] = [
-  { id: 'alipay', defaultName: '支付宝', defaultSubtitle: '快捷', gatewayKey: 'payment_alipay', defaultSort: 70, accent: '#1677ff' },
-  { id: 'wechat', defaultName: '微信支付', defaultSubtitle: '推荐', gatewayKey: 'payment_wechat', defaultSort: 60, accent: '#07c160' },
-  { id: 'allinpay', defaultName: '通联支付', defaultSubtitle: '聚合', gatewayKey: 'payment_allinpay', defaultSort: 50, accent: '#1677ff' },
-  { id: 'stripe', defaultName: 'Stripe 信用卡', defaultSubtitle: '国际外卡', gatewayKey: 'payment_stripe', defaultSort: 30, accent: '#635bff' },
-  { id: 'bonuspay', defaultName: 'BonusPay', defaultSubtitle: 'Web3', gatewayKey: 'payment_bonuspay', defaultSort: 20, accent: '#ff6a00' },
-  { id: 'hyperbc', defaultName: 'HyperBC', defaultSubtitle: '链上充值', gatewayKey: 'payment_hyperbc', defaultSort: 10, accent: '#8b5cf6' },
+  { id: 'alipay', defaultName: '支付宝', defaultNameEn: 'Alipay', defaultSubtitle: '快捷', defaultSubtitleEn: 'code pay', gatewayKey: 'payment_alipay', defaultSort: 70, accent: '#1677ff' },
+  { id: 'wechat', defaultName: '微信支付', defaultNameEn: 'WeChat Pay', defaultSubtitle: '快捷', defaultSubtitleEn: 'code pay', gatewayKey: 'payment_wechat', defaultSort: 60, accent: '#07c160' },
+  { id: 'allinpay', defaultName: '通联支付', defaultNameEn: 'Allinpay', defaultSubtitle: '微信/支付宝/信用卡', defaultSubtitleEn: 'wechat/alipay', gatewayKey: 'payment_allinpay', defaultSort: 50, accent: '#1677ff' },
+  { id: 'stripe', defaultName: 'Stripe 信用卡', defaultNameEn: 'Stripe Card', defaultSubtitle: '银行卡/支付宝', defaultSubtitleEn: 'Cards/Alipay', gatewayKey: 'payment_stripe', defaultSort: 30, accent: '#635bff' },
+  { id: 'bonuspay', defaultName: 'BonusPay', defaultNameEn: 'BonusPay', defaultSubtitle: 'Web3', defaultSubtitleEn: 'Web3', gatewayKey: 'payment_bonuspay', defaultSort: 20, accent: '#ff6a00' },
+  { id: 'hyperbc', defaultName: 'HyperBC', defaultNameEn: 'HyperBC', defaultSubtitle: 'Web3', defaultSubtitleEn: 'Web3', gatewayKey: 'payment_hyperbc', defaultSort: 10, accent: '#8b5cf6' },
 ];
 
 export const getChannelMeta = (id: string): PaymentChannelDefaultMeta | undefined =>
   PAYMENT_CHANNEL_CATALOG.find((c) => c.id === id);
 
-export const resolveChannelName = (item: PaymentChannelUiItem): string => {
-  const custom = (item.display_name || '').trim();
-  if (custom) return custom;
-  return getChannelMeta(item.id)?.defaultName || item.id;
+const isZhLocale = (lang?: string): boolean => (lang || '').toLowerCase().startsWith('zh');
+
+export const resolveChannelName = (item: PaymentChannelUiItem, lang?: string): string => {
+  const meta = getChannelMeta(item.id);
+  if (isZhLocale(lang)) {
+    const custom = (item.display_name || '').trim();
+    if (custom) return custom;
+    return meta?.defaultName || item.id;
+  }
+  const customEn = (item.display_name_en || '').trim();
+  if (customEn) return customEn;
+  return meta?.defaultNameEn || meta?.defaultName || item.id;
 };
 
-export const resolveChannelSubtitle = (item: PaymentChannelUiItem): string => {
-  const custom = (item.subtitle || '').trim();
-  if (custom) return custom;
-  return getChannelMeta(item.id)?.defaultSubtitle || '';
+export const resolveChannelSubtitle = (item: PaymentChannelUiItem, lang?: string): string => {
+  const meta = getChannelMeta(item.id);
+  if (isZhLocale(lang)) {
+    const custom = (item.subtitle || '').trim();
+    if (custom) return custom;
+    return meta?.defaultSubtitle || '';
+  }
+  const customEn = (item.subtitle_en || '').trim();
+  if (customEn) return customEn;
+  return meta?.defaultSubtitleEn || '';
 };
 
 export const getAllinpayMethods = (item: PaymentChannelUiItem): PaymentMethodId[] => {
@@ -111,7 +131,9 @@ export const mergeChannelList = (
       sort_order: Math.max(legacyWechat?.sort_order || 0, legacyAlipay?.sort_order || 0, 50),
       enabled: !!(legacyWechat?.enabled || legacyAlipay?.enabled),
       display_name: legacyWechat?.display_name || legacyAlipay?.display_name || null,
+      display_name_en: legacyWechat?.display_name_en || legacyAlipay?.display_name_en || null,
       subtitle: legacyWechat?.subtitle || legacyAlipay?.subtitle || null,
+      subtitle_en: legacyWechat?.subtitle_en || legacyAlipay?.subtitle_en || null,
       logo_url: legacyWechat?.logo_url || legacyAlipay?.logo_url || null,
       allinpay_wechat_enabled: legacyWechat ? !!legacyWechat.enabled : true,
       allinpay_alipay_enabled: legacyAlipay ? !!legacyAlipay.enabled : true,
@@ -128,7 +150,9 @@ export const mergeChannelList = (
         sort_order: existing.sort_order ?? meta.defaultSort,
         enabled: !!existing.enabled,
         display_name: existing.display_name ?? null,
+        display_name_en: existing.display_name_en ?? null,
         subtitle: existing.subtitle ?? null,
+        subtitle_en: existing.subtitle_en ?? null,
         logo_url: existing.logo_url ?? null,
         allinpay_wechat_enabled: meta.id === 'allinpay' ? wechatOn : undefined,
         allinpay_alipay_enabled: meta.id === 'allinpay' ? alipayOn : undefined,
@@ -139,7 +163,9 @@ export const mergeChannelList = (
       sort_order: meta.defaultSort,
       enabled: false,
       display_name: null,
+      display_name_en: null,
       subtitle: null,
+      subtitle_en: null,
       logo_url: null,
       ...(meta.id === 'allinpay'
         ? { allinpay_wechat_enabled: true, allinpay_alipay_enabled: true }
@@ -147,5 +173,3 @@ export const mergeChannelList = (
     };
   }).sort((a, b) => (b.sort_order || 0) - (a.sort_order || 0) || a.id.localeCompare(b.id));
 };
-
-const isAllinpayChannel = (id: string) => id === 'allinpay';

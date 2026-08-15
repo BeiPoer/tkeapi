@@ -145,7 +145,7 @@ const Login: React.FC = () => {
     }
   }, [searchParams, setToken, setUser, navigate]);
 
-  const baseTitle = settings?.site?.login_title || settings?.site?.name || 'TokensByte';
+  const baseTitle = settings?.site?.login_title || settings?.site?.name || 'Tkeapi';
   const loginTitle = `${baseTitle} ${t('login.title')}`;
   const loginTitleUrl = settings?.site?.login_title_url || '';
   const loginSubtitle = settings?.site?.login_subtitle || 'Next-gen LLM API Gateway';

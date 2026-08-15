@@ -154,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
         })
     });
 
-    // 3. 启动后台异步任务轮询器（按 POLL_TICK_INTERVAL_SECS 检查未结算的视频/图片生成任务）
+    // 3. 启动后台异步任务轮询器（周期见 RelaySettings.poll_tick_secs，缓存；检查未结算视频/图片任务）
     bg_handles.push(relay::task::start(state.clone(), shutdown_rx.clone()));
 
     // 4. 实时指标冷用户清理（每 5 分钟，空闲 >1h 剔除）
@@ -165,6 +165,16 @@ async fn main() -> anyhow::Result<()> {
     // 4b. 看板缓存 TTL 清理（每 5 分钟，条目 >30min 剔除）
     bg_handles.push(tokio::spawn(
         api::dashboard::run_dashboard_cache_cleanup_loop(state.clone(), shutdown_rx.clone()),
+    ));
+
+    bg_handles.push(spawn_cron_task(
+        state.clone(),
+        shutdown_rx.clone(),
+        60,
+        "UpstreamRateSync",
+        |s| async move {
+            api::channel_configs::run_upstream_rate_sync_tick(s).await;
+        },
     ));
 
     // 5. 启动孤儿日志清理定时任务（每 5 分钟检查 status_code=0 超过 30 分钟的日志）
@@ -178,36 +188,20 @@ async fn main() -> anyhow::Result<()> {
         },
     ));
 
-    // 5. TOS 渠道存储过期文件清理（每 10 分钟）
-    bg_handles.push(spawn_cron_task(
-        state.clone(),
-        shutdown_rx.clone(),
-        600,
-        "TosExpiredCleanup",
-        |s| async move {
-            relay::tos_persist::cleanup_expired_files(&s).await;
-        },
-    ));
-
-    // 6. 使用日志大字段定期清理（每天凌晨 3:00 执行）
+    // 6. 每日维护（下一次 UTC 03:00）：日志大字段清理/归档 + TOS 过期 + 火山素材保留清理
     bg_handles.push({
         let state_clone = state.clone();
         let mut rx = shutdown_rx.clone();
         tokio::spawn(async move {
             loop {
-                let now = chrono::Utc::now();
-                let tomorrow_3am = (now + chrono::Duration::days(1))
-                    .date_naive()
-                    .and_hms_opt(3, 0, 0)
-                    .unwrap();
-                let tomorrow_3am = tomorrow_3am.and_utc();
-                let wait = (tomorrow_3am - now)
-                    .to_std()
-                    .unwrap_or(std::time::Duration::from_secs(86400));
+                let wait = duration_until_next_utc_hms(3, 0, 0);
                 tokio::select! {
                     _ = tokio::time::sleep(wait) => {
                         cleanup_log_content(&state_clone).await;
                         archive_old_logs(&state_clone).await;
+                        relay::tos_persist::cleanup_expired_files(&state_clone).await;
+                        #[cfg(feature = "commercial_plugins")]
+                        api::plugins::assets::cleanup_expired_volc_assets(&state_clone).await;
                     }
                     _ = rx.changed() => return,
                 }
@@ -215,7 +209,7 @@ async fn main() -> anyhow::Result<()> {
         })
     });
 
-    // 7. 创作中心画布中断节点自动恢复（每 5 分钟）
+    // 7. 创作中心画布中断节点自动恢复（每 5 分钟；两版画布同 tick）
     #[cfg(feature = "commercial_plugins")]
     bg_handles.push(spawn_cron_task(
         state.clone(),
@@ -224,17 +218,6 @@ async fn main() -> anyhow::Result<()> {
         "PlaygroundNodesCleanup",
         |s| async move {
             api::plugins::playground::cleanup_stale_playground_nodes(&s).await;
-        },
-    ));
-
-    // 7b. 创作中心2026画布中断节点自动恢复
-    #[cfg(feature = "commercial_plugins")]
-    bg_handles.push(spawn_cron_task(
-        state.clone(),
-        shutdown_rx.clone(),
-        300,
-        "Playground2026NodesCleanup",
-        |s| async move {
             api::plugins::playground_2026::cleanup_stale_playground_2026_nodes(&s).await;
         },
     ));
@@ -264,21 +247,11 @@ async fn main() -> anyhow::Result<()> {
         })
     });
 
-    // 10. 每日日志增量统计任务（每 5 分钟唤醒，仅在凌晨 00:00 - 01:00 起作用）
-    bg_handles.push(spawn_cron_task(
+    // 10. 每日日志增量统计（睡到站点时区次日 00:00，避免每 5 分钟空转）
+    bg_handles.push(tokio::spawn(relay::usage_stats::run_daily_stats_loop(
         state.clone(),
         shutdown_rx.clone(),
-        300,
-        "DailyStatsSync",
-        |s| async move {
-            if let Err(e) = relay::usage_stats::sync_daily_stats(&s).await {
-                tracing::error!(
-                    "❌ [CronDailyStats] 定时增量更新使用量每日统计表失败: {:?}",
-                    e
-                );
-            }
-        },
-    ));
+    )));
 
     // 11. 火山方舟视频监控：同步视频列表 + 分账账单 + 超额熔断（每 1 分钟）
     #[cfg(feature = "commercial_plugins")]
@@ -519,7 +492,7 @@ async fn archive_old_logs(state: &AppState) {
 }
 
 /// 将 REGISTER_ENABLED 环境变量同步到数据库的 registration_settings
-async fn sync_registration_settings(db: &Database, register_enabled: bool) -> anyhow::Result<()> {
+pub(crate) async fn sync_registration_settings(db: &Database, register_enabled: bool) -> anyhow::Result<()> {
     use crate::api::settings::default_registration_settings;
 
     let existing: Option<String> = sqlx::query_scalar(
@@ -617,6 +590,59 @@ impl AppState {
         tracing::info!("高可用插件配置加载成功");
         Ok(())
     }
+
+    /// 清空数据库后：丢掉旧业务内存态，不杀进程，前端可立刻进入全新安装
+    pub async fn reset_runtime_after_db_wipe(&self) {
+        self.login_codes.clear();
+        self.dashboard_cache.clear();
+        self.failed_channels.clear();
+        self.cascade_s2_inflight.clear();
+        self.quota_memory.clear_all();
+        crate::relay::relay_settings::invalidate_all();
+        self.ha_max_retries
+            .store(3, std::sync::atomic::Ordering::Relaxed);
+        self.ha_cooldown_429
+            .store(60, std::sync::atomic::Ordering::Relaxed);
+        self.ha_cooldown_network
+            .store(300, std::sync::atomic::Ordering::Relaxed);
+        self.ha_cooldown_auth
+            .store(1800, std::sync::atomic::Ordering::Relaxed);
+        self.ha_cooldown_404
+            .store(3, std::sync::atomic::Ordering::Relaxed);
+        self.ha_total_timeout_secs
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut g) = self.ha_meltdown_whitelist.write() {
+            g.clear();
+        }
+        if let Ok(mut g) = self.ha_meltdown_blacklist.write() {
+            g.clear();
+        }
+        if let Err(e) = self.load_ha_configs().await {
+            tracing::warn!("清空数据库后重新加载高可用配置失败: {e}");
+        }
+    }
+}
+
+/// 距下一次 UTC 整点时刻的等待时长（至少 1 秒）。
+fn duration_until_next_utc_hms(hour: u32, min: u32, sec: u32) -> std::time::Duration {
+    let now = chrono::Utc::now();
+    let today = now
+        .date_naive()
+        .and_hms_opt(hour, min, sec)
+        .unwrap()
+        .and_utc();
+    let next = if now < today {
+        today
+    } else {
+        (now.date_naive() + chrono::Duration::days(1))
+            .and_hms_opt(hour, min, sec)
+            .unwrap()
+            .and_utc()
+    };
+    (next - now)
+        .to_std()
+        .unwrap_or(std::time::Duration::from_secs(60))
+        .max(std::time::Duration::from_secs(1))
 }
 
 /// 抽象的高可用定时任务派发器，统一接管定时休眠、异常捕捉以及优雅退出监听

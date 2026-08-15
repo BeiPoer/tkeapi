@@ -62,16 +62,18 @@ const Redemptions: React.FC = () => {
   const [toggleLoading, setToggleLoading] = useState(false);
   const [enabled, setEnabled] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [searchKeyword, setSearchKeyword] = useState('');
   const [form] = Form.useForm();
 
   const permanent = Form.useWatch('permanent', form);
   const allowMultiple = Form.useWatch('allow_multiple', form);
   const limitPerUserActivity = Form.useWatch('limit_per_user_activity', form);
 
-  const fetchGroups = async (page = currentPage, size = pageSize) => {
+  const fetchGroups = async (page = currentPage, size = pageSize, search = searchKeyword) => {
     setLoading(true);
     try {
-      const resp = await (request.get(`/redemptions/groups?page=${page}&page_size=${size}`) as unknown as Promise<{ data: RedemptionGroup[], total: number }>);
+      const queryParam = search.trim() ? `&name=${encodeURIComponent(search.trim())}` : '';
+      const resp = await (request.get(`/redemptions/groups?page=${page}&page_size=${size}${queryParam}`) as unknown as Promise<{ data: RedemptionGroup[], total: number }>);
       setGroups(resp.data);
       setTotal(resp.total);
     } catch (e) {
@@ -79,6 +81,12 @@ const Redemptions: React.FC = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSearch = (keyword: string) => {
+    setSearchKeyword(keyword);
+    setCurrentPage(1);
+    fetchGroups(1, pageSize, keyword);
   };
 
   const fetchDrawerCodes = async (name: string, page = drawerCurrentPage, size = drawerPageSize) => {
@@ -283,7 +291,7 @@ const Redemptions: React.FC = () => {
     try {
       await request.delete(`/redemptions/groups?name=${encodeURIComponent(name)}`);
       msgApi.success(t('common.success'));
-      fetchGroups(currentPage, pageSize);
+      fetchGroups(currentPage, pageSize, searchKeyword);
     } catch (e) {
       console.error(e);
     }
@@ -295,7 +303,7 @@ const Redemptions: React.FC = () => {
       msgApi.success(t('common.success'));
       if (selectedGroup) {
         fetchDrawerCodes(selectedGroup, drawerCurrentPage, drawerPageSize);
-        fetchGroups(currentPage, pageSize); // Update group stats quietly
+        fetchGroups(currentPage, pageSize, searchKeyword); // Update group stats quietly
       }
     } catch (e) {
       console.error(e);
@@ -536,8 +544,21 @@ const Redemptions: React.FC = () => {
     <Card variant="borderless">
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
         <Title level={2} style={{ margin: 0 }}>{t('redemptions.title')}</Title>
-        <Space>
-          <Button icon={<SyncOutlined />} onClick={() => fetchGroups(currentPage, pageSize)}>{t('common.refresh')}</Button>
+        <Space wrap>
+          <Input.Search
+            placeholder={isZh ? '搜索活动名称' : 'Search activity name'}
+            allowClear
+            value={searchKeyword}
+            onChange={(e) => {
+              setSearchKeyword(e.target.value);
+              if (!e.target.value) {
+                handleSearch('');
+              }
+            }}
+            onSearch={handleSearch}
+            style={{ width: 220 }}
+          />
+          <Button icon={<SyncOutlined />} onClick={() => fetchGroups(currentPage, pageSize, searchKeyword)}>{t('common.refresh')}</Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsModalOpen(true)}>
             {t('redemptions.add')}
           </Button>
@@ -590,7 +611,7 @@ const Redemptions: React.FC = () => {
           onChange: (page, size) => {
             setCurrentPage(page);
             setPageSize(size);
-            fetchGroups(page, size);
+            fetchGroups(page, size, searchKeyword);
           },
         }}
       />

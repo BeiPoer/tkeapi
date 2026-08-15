@@ -26,6 +26,14 @@ fn started_at() -> DateTime<Utc> {
     *PROCESS_STARTED_AT.get_or_init(Utc::now)
 }
 
+pub fn process_started_at_utc() -> String {
+    started_at().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+pub fn process_uptime_secs() -> i64 {
+    (Utc::now() - started_at()).num_seconds().max(0)
+}
+
 fn instance_name() -> String {
     std::env::var("INSTANCE_NAME")
         .ok()

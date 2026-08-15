@@ -12,7 +12,7 @@ import { PlusOutlined, EditOutlined, DeleteOutlined, SyncOutlined, ClearOutlined
 import { useTranslation } from 'react-i18next';
 import dayjs from 'dayjs';
 import request from '../../utils/request';
-import { timedisplayOffsetSuffix } from '../../utils/timedisplay';
+import { formatApiDateTime, timedisplayOffsetSuffix } from '../../utils/timedisplay';
 import useSettingsStore from '../../store/settings';
 import { useThemeStore } from '../../store/theme';
 import type { ChannelConfig, ChannelCategory, Upstream } from '../../types';
@@ -28,7 +28,53 @@ import {
 const { Title, Text } = Typography;
 const { useBreakpoint } = Grid;
 
-function formatDailyResetSummary(
+const UPSTREAM_SYSTEM_OPTIONS = [
+  { value: '兼容', label: '兼容' },
+  { value: '官方', label: '官方' },
+  { value: 'newapi', label: 'newapi' },
+  { value: 'akeapi', label: 'akeapi' },
+  { value: '火山引擎', label: '火山引擎' },
+  { value: '阿里云', label: '阿里云' },
+];
+
+type UpstreamGroupOption = { name: string; ratio: number; label: string };
+
+function appliedChannelRate(groupRatio: number, add: number) {
+  const extra = Number(add);
+  return Math.max(0, Number(groupRatio) + (Number.isFinite(extra) && extra > 0 ? extra : 0));
+}
+
+function renderUpstreamSyncInline(record: ChannelConfig) {
+  const system = (record.upstream_system || '').trim();
+  const group = (record.upstream_group || '').trim();
+  if (!system || !group) return null;
+  const interval = Number(record.upstream_sync_interval_minutes) || 0;
+  const add = Number(record.upstream_sync_rate_add) || 0;
+  const rate = record.rate ?? 1;
+  const tip = [
+    `上游 ${system}`,
+    `分组 ${group}（渠道倍率 ${rate}x）`,
+    interval > 0 ? `每 ${interval} 分钟同步` : '不自动同步',
+    add > 0 ? `同步增量 +${add}` : null,
+    record.upstream_synced_at ? `上次同步 ${formatApiDateTime(record.upstream_synced_at)}` : null,
+  ].filter(Boolean).join('\n');
+  const tagStyle: React.CSSProperties = { margin: 0, padding: '0 5px', fontSize: 11, height: 19, lineHeight: '17px', borderRadius: 4 };
+  return (
+    <Tooltip title={<span style={{ whiteSpace: 'pre-line' }}>{tip}</span>}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 1, minWidth: 0 }}>
+        <Tag color="blue" style={tagStyle}>{system}</Tag>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+          <Tag style={tagStyle}>{group} {rate}x</Tag>
+          {interval > 0 ? <Tag color="cyan" style={tagStyle}>每{interval}分</Tag> : null}
+          {add > 0 ? <Tag color="orange" style={tagStyle}>+{add}</Tag> : null}
+        </div>
+      </div>
+    </Tooltip>
+  );
+}
+
+/** 紧凑展示在「日额度」标签后：01:00 (UTC+8) · 冷30分 */
+function formatDailyResetInline(
   hour: number,
   minute: number,
   cooldown: number,
@@ -37,8 +83,8 @@ function formatDailyResetSummary(
   const hh = String(Math.min(23, Math.max(0, hour))).padStart(2, '0');
   const mm = String(Math.min(59, Math.max(0, minute))).padStart(2, '0');
   const cool = Math.max(0, cooldown);
-  const timeText = `刷新 ${hh}:${mm}${tzSuffix}`;
-  return cool > 0 ? `${timeText} · 冷却 ${cool} 分钟` : timeText;
+  const timeText = `${hh}:${mm}${tzSuffix}`;
+  return cool > 0 ? `${timeText} · 冷${cool}分` : timeText;
 }
 
 const ChannelConfigs: React.FC = () => {
@@ -62,7 +108,11 @@ const ChannelConfigs: React.FC = () => {
   const [isCategoryManagerVisible, setIsCategoryManagerVisible] = useState(false);
   const [dailyResetModalOpen, setDailyResetModalOpen] = useState(false);
   const [dailyResetDraft, setDailyResetDraft] = useState({ hour: 0, minute: 0, cooldown: 0 });
+  const [upstreamGroups, setUpstreamGroups] = useState<UpstreamGroupOption[]>([]);
+  const [fetchingGroups, setFetchingGroups] = useState(false);
+  const [syncAddEnabled, setSyncAddEnabled] = useState(false);
   const [form] = Form.useForm();
+  const upstreamSystem = Form.useWatch('upstream_system', form);
 
   const fetchConfigs = async () => {
     setLoading(true);
@@ -125,7 +175,13 @@ const ChannelConfigs: React.FC = () => {
       daily_reset_hour: 0,
       daily_reset_minute: 0,
       daily_reset_cooldown_minutes: 0,
+      upstream_system: undefined,
+      upstream_group: undefined,
+      upstream_sync_interval_minutes: 0,
+      upstream_sync_rate_add: 0,
     });
+    setUpstreamGroups([]);
+    setSyncAddEnabled(false);
     setIsModalVisible(true);
   };
 
@@ -148,7 +204,13 @@ const ChannelConfigs: React.FC = () => {
       daily_reset_hour: record.daily_reset_hour ?? 0,
       daily_reset_minute: record.daily_reset_minute ?? 0,
       daily_reset_cooldown_minutes: record.daily_reset_cooldown_minutes ?? 0,
+      upstream_system: record.upstream_system || undefined,
+      upstream_group: record.upstream_group || undefined,
+      upstream_sync_interval_minutes: record.upstream_sync_interval_minutes ?? 0,
+      upstream_sync_rate_add: record.upstream_sync_rate_add ?? 0,
     });
+    setUpstreamGroups([]);
+    setSyncAddEnabled((record.upstream_sync_rate_add ?? 0) > 0);
     setIsModalVisible(true);
   };
 
@@ -206,6 +268,56 @@ const ChannelConfigs: React.FC = () => {
   const closeConfigModal = () => {
     setDailyResetModalOpen(false);
     setIsModalVisible(false);
+    setUpstreamGroups([]);
+    setFetchingGroups(false);
+  };
+
+  const applyGroupToRate = (groupName?: string, addValue?: number) => {
+    const name = groupName !== undefined ? groupName : form.getFieldValue('upstream_group');
+    if (!name) return;
+    const hit = upstreamGroups.find(g => g.name === name);
+    if (!hit) return;
+    const add = addValue !== undefined ? addValue : (syncAddEnabled ? Number(form.getFieldValue('upstream_sync_rate_add') || 0) : 0);
+    form.setFieldsValue({ rate: appliedChannelRate(hit.ratio, add) });
+  };
+
+  const loadUpstreamGroups = async () => {
+    const baseUrl = String(form.getFieldValue('base_url') || '').trim();
+    const apiKey = String(form.getFieldValue('api_key') || '');
+    if (!baseUrl) {
+      message.warning('请先填写端点基础地址');
+      return;
+    }
+    if (!apiKey && !editingConfig?.id) {
+      message.warning('请先填写请求鉴权密钥');
+      return;
+    }
+    setFetchingGroups(true);
+    try {
+      const resp = await (request.post('/channel-configs/upstream-groups', {
+        config_id: editingConfig?.id,
+        base_url: baseUrl,
+        api_key: apiKey,
+        upstream_system: 'newapi',
+      }) as Promise<{ data?: UpstreamGroupOption[] }>);
+      const list = resp.data || [];
+      setUpstreamGroups(list);
+      const current = form.getFieldValue('upstream_group');
+      if (current && list.some(g => g.name === current)) {
+        const add = syncAddEnabled ? Number(form.getFieldValue('upstream_sync_rate_add') || 0) : 0;
+        const hit = list.find(g => g.name === current);
+        if (hit) form.setFieldsValue({ rate: appliedChannelRate(hit.ratio, add) });
+      }
+      if (list.length === 0) {
+        message.info('上游未返回分组倍率');
+      } else {
+        message.success(`已拉取 ${list.length} 个分组`);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setFetchingGroups(false);
+    }
   };
 
   const handleSave = async (values: any) => {
@@ -228,6 +340,14 @@ const ChannelConfigs: React.FC = () => {
         daily_reset_hour: Math.min(23, Math.max(0, Number(values.daily_reset_hour) || 0)),
         daily_reset_minute: Math.min(59, Math.max(0, Number(values.daily_reset_minute) || 0)),
         daily_reset_cooldown_minutes: Math.max(0, Number(values.daily_reset_cooldown_minutes) || 0),
+        upstream_system: values.upstream_system || '',
+        upstream_group: values.upstream_system === 'newapi' ? (values.upstream_group || '') : '',
+        upstream_sync_interval_minutes: values.upstream_system === 'newapi'
+          ? Math.max(0, Number(values.upstream_sync_interval_minutes) || 0)
+          : 0,
+        upstream_sync_rate_add: values.upstream_system === 'newapi' && syncAddEnabled
+          ? Math.max(0, Number(values.upstream_sync_rate_add) || 0)
+          : 0,
       };
       if (enableQuota) {
         const hierarchyErr = validateQuotaHierarchy(payload);
@@ -294,29 +414,34 @@ const ChannelConfigs: React.FC = () => {
     ];
     const hasAnyConfigured = items.some((item) => item.limit >= 0);
 
+    const slotWidth = 28;
+    const ringSize = 24;
+    const ringStroke = 5;
+
     const slotStyle: React.CSSProperties = {
-      width: 40,
+      width: slotWidth,
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'center',
-      gap: 2,
+      gap: 1,
       cursor: 'default',
     };
     const labelStyle: React.CSSProperties = {
-      fontSize: 10,
+      fontSize: 9,
       color: isLight ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.45)',
       lineHeight: 1,
+      transform: 'scale(0.92)',
     };
 
     return (
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(4, 40px)',
-          gap: 4,
+          gridTemplateColumns: `repeat(4, ${slotWidth}px)`,
+          gap: 3,
           alignItems: 'center',
           justifyContent: 'start',
-          width: 172,
+          width: 122,
         }}
       >
         {items.map((item, index) => {
@@ -328,7 +453,7 @@ const ChannelConfigs: React.FC = () => {
           if (!showRing) {
             return (
               <div key={item.key} style={{ ...slotStyle, visibility: 'hidden' }} aria-hidden>
-                <div style={{ width: 36, height: 36 }} />
+                <div style={{ width: ringSize, height: ringSize }} />
                 <span style={labelStyle}>{item.label}</span>
               </div>
             );
@@ -348,14 +473,14 @@ const ChannelConfigs: React.FC = () => {
                 <Progress
                   type="circle"
                   percent={showUnlimited ? 100 : pct}
-                  size={36}
-                  strokeWidth={10}
+                  size={ringSize}
+                  strokeWidth={ringStroke}
                   strokeColor={stroke}
                   trailColor={isLight ? '#e4e4e7' : 'rgba(255,255,255,0.12)'}
                   format={() => (
                     <span
                       style={{
-                        fontSize: showUnlimited ? 11 : 10,
+                        fontSize: showUnlimited ? 9 : 8,
                         fontWeight: 600,
                         color: isLight ? 'rgba(0,0,0,0.72)' : 'rgba(255,255,255,0.88)',
                         lineHeight: 1,
@@ -377,9 +502,9 @@ const ChannelConfigs: React.FC = () => {
   const renderStatusBadge = (status?: number) => {
     const active = (status ?? 1) === 1;
     return (
-      <Space size={6} style={{ color: active ? '#52c41a' : '#ff4d4f' }}>
+      <Space size={5} style={{ color: active ? '#52c41a' : '#ff4d4f' }}>
         <div style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: active ? '#52c41a' : '#ff4d4f' }} />
-        <span style={{ fontSize: 13 }}>{active ? t('common.active') : t('common.disabled')}</span>
+        <span style={{ fontSize: 12 }}>{active ? t('common.active') : t('common.disabled')}</span>
       </Space>
     );
   };
@@ -407,70 +532,119 @@ const ChannelConfigs: React.FC = () => {
     {
       title: '配置',
       key: 'name',
-      width: 180,
-      ellipsis: true,
-      render: (_: unknown, record: ChannelConfig) => (
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{record.name}</div>
-          <Typography.Text keyboard style={{ color: '#1677ff', fontSize: 11 }}>
-            YID {record.yid || '-'}
-          </Typography.Text>
-        </div>
-      ),
+      width: 280,
+      ellipsis: false,
+      onCell: () => ({ style: { overflow: 'visible', whiteSpace: 'normal' } }),
+      sorter: (a: ChannelConfig, b: ChannelConfig) => (a.name || '').localeCompare(b.name || '', 'zh'),
+      render: (_: unknown, record: ChannelConfig) => {
+        const sync = renderUpstreamSyncInline(record);
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+            <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, lineHeight: 1.25, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{record.name}</div>
+              <Typography.Text keyboard style={{ color: '#1677ff', fontSize: 11, lineHeight: 1.2, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', width: 'fit-content' }}>
+                YID {record.yid || '-'}
+              </Typography.Text>
+            </div>
+            {sync}
+          </div>
+        );
+      },
     },
     {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
-      width: 90,
+      width: 75,
+      sorter: (a: ChannelConfig, b: ChannelConfig) => (a.status ?? 1) - (b.status ?? 1),
       render: (status: number) => renderStatusBadge(status),
     },
     {
       title: '上游分类',
       dataIndex: 'category_id',
       key: 'category_id',
-      width: 100,
+      width: 95,
       ellipsis: true,
+      sorter: (a: ChannelConfig, b: ChannelConfig) => {
+        const nameA = resolveCategoryName(a.category_id);
+        const nameB = resolveCategoryName(b.category_id);
+        return nameA.localeCompare(nameB, 'zh');
+      },
       render: (categoryId: number | null | undefined) => {
         const name = resolveCategoryName(categoryId);
-        return name ? <Tag style={{ margin: 0 }}>{name}</Tag> : <Text type="secondary">未分类</Text>;
+        return name ? (
+          <Tag style={{ margin: 0, padding: '0 5px', fontSize: 11, height: 19, lineHeight: '17px', borderRadius: 4 }}>{name}</Tag>
+        ) : <Text type="secondary" style={{ fontSize: 12 }}>未分类</Text>;
       },
     },
     {
       title: '服务商',
       dataIndex: 'provider_type',
       key: 'provider_type',
-      width: 100,
+      width: 90,
       ellipsis: true,
-      render: (text: string) => text || '-',
+      sorter: (a: ChannelConfig, b: ChannelConfig) => (a.provider_type || '').localeCompare(b.provider_type || '', 'zh'),
+      render: (text: string) => <Text style={{ fontSize: 12 }}>{text || '-'}</Text>,
     },
     {
       title: '调度',
       key: 'schedule',
-      width: 110,
+      width: 105,
+      sorter: (a: ChannelConfig, b: ChannelConfig) => (a.priority || 0) - (b.priority || 0),
       render: (_: unknown, record: ChannelConfig) => (
-        <Space size={4} wrap={false}>
+        <Space size={3} wrap={false}>
           <Tooltip title="优先级"><Text type="secondary" style={{ fontSize: 12 }}>P{record.priority || 0}</Text></Tooltip>
           <Tooltip title="权重"><Text type="secondary" style={{ fontSize: 12 }}>W{record.weight || 1}</Text></Tooltip>
-          <Tag color="orange" style={{ margin: 0, lineHeight: '18px', fontSize: 12 }}>{record.rate ?? 1.0}x</Tag>
+          <Tag color="orange" style={{ margin: 0, padding: '0 4px', lineHeight: '16px', height: 18, fontSize: 11, borderRadius: 4 }}>{record.rate ?? 1.0}x</Tag>
         </Space>
       ),
     },
     {
       title: '额度',
       key: 'quota',
-      width: 188,
+      width: 140,
+      sorter: (a: ChannelConfig, b: ChannelConfig) => {
+        const score = (r: ChannelConfig) => {
+          const used = r.quota_used || 0;
+          const limit = r.quota_limit ?? -1;
+          const dailyLimit = r.daily_quota_limit ?? -1;
+          const weeklyLimit = r.weekly_quota_limit ?? -1;
+          const monthlyLimit = r.monthly_quota_limit ?? -1;
+          const { dailyUsed, weeklyUsed, monthlyUsed } = getEffectiveChannelPeriodUsed(r, quotaTz);
+          const ratios: number[] = [];
+          const pushRatio = (u: number, l: number) => {
+            if (l < 0) return;
+            if (l === 0) {
+              ratios.push(u > 0 ? Number.POSITIVE_INFINITY : 0);
+              return;
+            }
+            ratios.push(u / l);
+          };
+          pushRatio(used, limit);
+          pushRatio(monthlyUsed, monthlyLimit);
+          pushRatio(weeklyUsed, weeklyLimit);
+          pushRatio(dailyUsed, dailyLimit);
+          // 未配置任何限额时按已用量排序（占比视为 0），便于与有限额项比较
+          if (ratios.length === 0) return used > 0 ? used * 1e-9 : 0;
+          return Math.max(...ratios);
+        };
+        const sa = score(a);
+        const sb = score(b);
+        if (sa === sb) return (a.quota_used || 0) - (b.quota_used || 0);
+        return sa - sb;
+      },
       render: (_: unknown, record: ChannelConfig) => renderQuotaCell(record),
     },
     {
       title: 'Base URL',
       dataIndex: 'base_url',
       key: 'base_url',
-      width: 200,
+      width: 180,
       ellipsis: true,
+      sorter: (a: ChannelConfig, b: ChannelConfig) => (a.base_url || '').localeCompare(b.base_url || ''),
       render: (text: string) => (
         <Tooltip title={text}>
-          <Text code style={{ fontSize: 12 }}>{text}</Text>
+          <Text code style={{ fontSize: 11, lineHeight: 1.2 }}>{text}</Text>
         </Tooltip>
       ),
     },
@@ -478,29 +652,47 @@ const ChannelConfigs: React.FC = () => {
       title: '排序',
       dataIndex: 'sort_order',
       key: 'sort_order',
-      width: 56,
+      width: 70,
       align: 'center' as const,
-      render: (val: number) => <Text type="secondary">{val || 0}</Text>,
+      sorter: (a: ChannelConfig, b: ChannelConfig) => (a.sort_order || 0) - (b.sort_order || 0),
+      render: (val: number) => <Text type="secondary" style={{ fontSize: 12 }}>{val || 0}</Text>,
+    },
+    {
+      title: '最新更新时间',
+      dataIndex: 'updated_at',
+      key: 'updated_at',
+      width: 150,
+      ellipsis: true,
+      sorter: (a: ChannelConfig, b: ChannelConfig) => {
+        const ta = a.updated_at || a.created_at || '';
+        const tb = b.updated_at || b.created_at || '';
+        return ta.localeCompare(tb);
+      },
+      render: (_: unknown, record: ChannelConfig) => {
+        const time = record.updated_at || record.created_at;
+        return <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{time ? formatApiDateTime(time) : '-'}</Text>;
+      },
     },
     {
       title: '备注',
       dataIndex: 'remark',
       key: 'remark',
-      width: 120,
+      width: 100,
       ellipsis: true,
-      render: (text: string) => <Text type="secondary">{text || '-'}</Text>,
+      render: (text: string) => <Text type="secondary" style={{ fontSize: 12 }}>{text || '-'}</Text>,
     },
     {
       title: t('common.actions'),
       key: 'actions',
-      width: 150,
+      width: 130,
       fixed: 'right' as const,
       render: (_: unknown, record: ChannelConfig) => (
-        <Space size={0}>
+        <Space size={2} style={{ justifyContent: 'center', width: '100%' }}>
           <Tooltip title={(record.status ?? 1) === 1 ? '点击禁用' : '点击启用'}>
             <Button
               type="text"
               size="small"
+              className="channel-table-action-btn"
               icon={(record.status ?? 1) === 1
                 ? <PlayCircleOutlined style={{ color: '#52c41a' }} />
                 : <StopOutlined style={{ color: '#ff4d4f' }} />}
@@ -509,15 +701,15 @@ const ChannelConfigs: React.FC = () => {
           </Tooltip>
           <Tooltip title="清零额度">
             <Popconfirm title="确定清零该预设的总/日/周/月已用额度吗？" onConfirm={() => handleResetQuota(record.id)}>
-              <Button type="text" size="small" icon={<ClearOutlined />} />
+              <Button type="text" size="small" className="channel-table-action-btn" icon={<ClearOutlined />} />
             </Popconfirm>
           </Tooltip>
           <Tooltip title="编辑">
-            <Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)} />
+            <Button type="text" size="small" className="channel-table-action-btn" icon={<EditOutlined />} onClick={() => handleEdit(record)} />
           </Tooltip>
           <Tooltip title="删除">
             <Popconfirm title={t('common.confirm_delete')} onConfirm={() => handleDelete(record.id)}>
-              <Button type="text" size="small" icon={<DeleteOutlined />} danger />
+              <Button type="text" size="small" className="channel-table-action-btn" icon={<DeleteOutlined />} danger />
             </Popconfirm>
           </Tooltip>
         </Space>
@@ -527,6 +719,104 @@ const ChannelConfigs: React.FC = () => {
 
   return (
     <Card bordered={false}>
+      <style>{`
+        .channel-configs-table .ant-table,
+        .channel-configs-table .ant-table-container,
+        .channel-configs-table .ant-table-content,
+        .channel-configs-table table {
+          border-collapse: collapse !important;
+          border-spacing: 0 !important;
+        }
+        .channel-configs-table .ant-table-thead {
+          background: ${isLight ? '#f9fafb' : '#18181b'} !important;
+        }
+        .channel-configs-table .ant-table-thead > tr {
+          height: 28px !important;
+          background: ${isLight ? '#f9fafb' : '#18181b'} !important;
+        }
+        .channel-configs-table .ant-table-thead > tr > th,
+        .channel-configs-table .ant-table-thead > tr > th.ant-table-cell {
+          padding: 3px 8px !important;
+          height: 28px !important;
+          line-height: 20px !important;
+          font-size: 12px !important;
+          font-weight: 600 !important;
+          background: ${isLight ? '#f9fafb' : '#18181b'} !important;
+          border-bottom: 1px solid ${isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.08)'} !important;
+          color: ${isLight ? '#64748b' : '#a1a1aa'} !important;
+        }
+        .channel-configs-table .ant-table-thead .ant-table-column-sorters {
+          padding: 0 !important;
+          margin: 0 !important;
+          height: 20px !important;
+          display: inline-flex !important;
+          align-items: center !important;
+        }
+        .channel-configs-table .ant-table-thead .ant-table-column-title {
+          line-height: 20px !important;
+          font-size: 12px !important;
+          font-weight: 600 !important;
+        }
+        .channel-configs-table .ant-table-thead .ant-table-column-sorter {
+          margin-inline-start: 3px !important;
+          font-size: 9px !important;
+        }
+        .channel-configs-table .ant-table-thead > tr > th::before {
+          display: none !important;
+        }
+        .channel-configs-table .ant-table-tbody {
+          margin: 0 !important;
+          padding: 0 !important;
+        }
+        .channel-configs-table .ant-table-tbody > tr {
+          margin: 0 !important;
+          background: transparent !important;
+        }
+        .channel-configs-table .ant-table-tbody > tr > td {
+          padding: 4px 8px !important;
+          font-size: 12px !important;
+          border-bottom: 1px solid ${isLight ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.05)'} !important;
+          vertical-align: middle !important;
+          line-height: 1.3 !important;
+        }
+        .channel-configs-table .ant-table-tbody > tr:first-child > td {
+          border-top: none !important;
+        }
+        .channel-configs-table .ant-table-measure-row,
+        .channel-configs-table .ant-table-measure-row td,
+        .channel-configs-table .ant-table-measure-row th,
+        .channel-configs-table tr.ant-table-measure-row,
+        .channel-configs-table tr.ant-table-measure-row td,
+        .channel-configs-table tr.ant-table-measure-row th,
+        .channel-configs-table tr.ant-table-measure-row .ant-table-cell {
+          padding: 0 !important;
+          height: 0 !important;
+          font-size: 0 !important;
+          line-height: 0 !important;
+          border: none !important;
+          visibility: hidden !important;
+        }
+        .channel-configs-table .ant-table-tbody > tr:hover > td {
+          background: ${isLight ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.03)'} !important;
+        }
+        .channel-configs-table .ant-table-pagination.ant-pagination {
+          margin: 10px 0 0 0 !important;
+        }
+        .channel-table-action-btn {
+          width: 22px !important;
+          height: 22px !important;
+          min-width: 22px !important;
+          padding: 0 !important;
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          border-radius: 4px !important;
+          font-size: 12px !important;
+        }
+        .channel-table-action-btn:hover {
+          background: ${isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.08)'} !important;
+        }
+      `}</style>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16, marginBottom: 24 }}>
         <Title level={4} style={{ margin: 0, fontSize: screens.xs ? 18 : 20, fontWeight: 600 }}>上游渠道配置预设</Title>
         <Space wrap>
@@ -619,16 +909,24 @@ const ChannelConfigs: React.FC = () => {
           dataSource={filteredConfigs}
           loading={loading}
           rowKey="id"
-          renderCard={(record: ChannelConfig) => (
+          renderCard={(record: ChannelConfig) => {
+            const sync = renderUpstreamSyncInline(record);
+            return (
             <MobileCard
               title={record.name}
               extra={<Typography.Text keyboard style={{ color: '#1677ff' }}>{record.yid || '-'}</Typography.Text>}
             >
+              {sync ? <CardRow label="上游同步">{sync}</CardRow> : null}
               <CardRow label="状态">{renderStatusBadge(record.status)}</CardRow>
               <CardRow label="上游分类">{resolveCategoryName(record.category_id) || '未分类'}</CardRow>
               <CardRow label="服务商广场展示">{record.provider_type || '-'}</CardRow>
               <CardRow label="Base URL"><Text code style={{ fontSize: 12 }}>{record.base_url}</Text></CardRow>
               <CardRow label="额度">{renderQuotaCell(record)}</CardRow>
+              <CardRow label="最新更新时间">
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {record.updated_at || record.created_at ? formatApiDateTime(record.updated_at || record.created_at) : '-'}
+                </Text>
+              </CardRow>
               <CardRow label="备注">{record.remark || '-'}</CardRow>
               <CardActions>
                 <Tooltip title={(record.status ?? 1) === 1 ? '点击禁用' : '点击启用'}>
@@ -652,17 +950,19 @@ const ChannelConfigs: React.FC = () => {
                 </Popconfirm>
               </CardActions>
             </MobileCard>
-          )}
+            );
+          }}
         />
       ) : (
         <Table
+          className="channel-configs-table compact-table"
           size="small"
           dataSource={filteredConfigs}
           columns={columns}
           rowKey="id"
           loading={loading}
           pagination={{ pageSize: 15, showTotal: (total) => `共 ${total} 条` }}
-          scroll={{ x: 1080 }}
+          scroll={{ x: 1370 }}
         />
       )}
 
@@ -837,111 +1137,134 @@ const ChannelConfigs: React.FC = () => {
                 const resetMinute = Number(form.getFieldValue('daily_reset_minute') ?? 0);
                 const resetCooldown = Number(form.getFieldValue('daily_reset_cooldown_minutes') ?? 0);
                 const tzSuffix = timedisplayOffsetSuffix(quotaTz);
-                const resetSummary = formatDailyResetSummary(resetHour, resetMinute, resetCooldown, tzSuffix);
+                const resetInline = formatDailyResetInline(resetHour, resetMinute, resetCooldown, tzSuffix);
+                const hh = String(Math.min(23, Math.max(0, resetHour))).padStart(2, '0');
+                const mm = String(Math.min(59, Math.max(0, resetMinute))).padStart(2, '0');
+                const resetTooltip = resetCooldown > 0
+                  ? `每天 ${hh}:${mm}${tzSuffix} 起，再冷却 ${resetCooldown} 分钟后清零日已用`
+                  : `每天 ${hh}:${mm}${tzSuffix} 清零日已用`;
                 return (
-                  <div style={{ marginBottom: 4 }}>
-                    <div
-                      style={{
-                        display: 'grid',
-                        gridTemplateColumns: '1fr 1fr',
-                        columnGap: 12,
-                      }}
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: '1fr 1fr',
+                      columnGap: 12,
+                      marginBottom: 4,
+                    }}
+                  >
+                    <Form.Item
+                      name="quota_limit"
+                      label="总额度"
+                      initialValue={-1}
+                      style={quotaItemStyle}
+                      dependencies={quotaDeps as unknown as string[]}
+                      validateTrigger={['onChange', 'onBlur']}
+                      rules={[fieldValidator('quota_limit')]}
                     >
-                      <Form.Item
-                        name="quota_limit"
-                        label="总额度"
-                        initialValue={-1}
-                        style={quotaItemStyle}
-                        dependencies={quotaDeps as unknown as string[]}
-                        validateTrigger={['onChange', 'onBlur']}
-                        rules={[fieldValidator('quota_limit')]}
-                      >
-                        <InputNumber
-                          min={-1}
-                          style={{ width: '100%' }}
-                          formatter={formatQuotaLimitDisplay}
-                          parser={parseQuotaLimitInput}
-                        />
-                      </Form.Item>
-                      <Form.Item
-                        name="monthly_quota_limit"
-                        label="月额度"
-                        initialValue={-1}
-                        style={quotaItemStyle}
-                        dependencies={quotaDeps as unknown as string[]}
-                        validateTrigger={['onChange', 'onBlur']}
-                        rules={[fieldValidator('monthly_quota_limit')]}
-                      >
-                        <InputNumber
-                          min={-1}
-                          style={{ width: '100%' }}
-                          formatter={formatQuotaLimitDisplay}
-                          parser={parseQuotaLimitInput}
-                        />
-                      </Form.Item>
-                      <Form.Item
-                        name="weekly_quota_limit"
-                        label="周额度"
-                        initialValue={-1}
-                        style={quotaItemStyle}
-                        dependencies={quotaDeps as unknown as string[]}
-                        validateTrigger={['onChange', 'onBlur']}
-                        rules={[fieldValidator('weekly_quota_limit')]}
-                      >
-                        <InputNumber
-                          min={-1}
-                          style={{ width: '100%' }}
-                          formatter={formatQuotaLimitDisplay}
-                          parser={parseQuotaLimitInput}
-                        />
-                      </Form.Item>
-                      <Form.Item
-                        name="daily_quota_limit"
-                        label="日额度"
-                        initialValue={-1}
-                        style={quotaItemStyle}
-                        dependencies={quotaDeps as unknown as string[]}
-                        validateTrigger={['onChange', 'onBlur']}
-                        rules={[fieldValidator('daily_quota_limit')]}
-                      >
-                        <InputNumber
-                          min={-1}
-                          style={{ width: '100%' }}
-                          formatter={formatQuotaLimitDisplay}
-                          parser={parseQuotaLimitInput}
-                        />
-                      </Form.Item>
-                    </div>
-                    <div
-                      style={{
-                        display: 'flex',
-                        alignItems: 'flex-start',
-                        gap: 10,
-                        marginBottom: 10,
-                        padding: '8px 12px',
-                        borderRadius: 8,
-                        border: isLight ? '1px solid rgba(0,0,0,0.06)' : '1px solid rgba(255,255,255,0.08)',
-                        background: isLight ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.04)',
-                      }}
+                      <InputNumber
+                        min={-1}
+                        style={{ width: '100%' }}
+                        formatter={formatQuotaLimitDisplay}
+                        parser={parseQuotaLimitInput}
+                      />
+                    </Form.Item>
+                    <Form.Item
+                      name="monthly_quota_limit"
+                      label="月额度"
+                      initialValue={-1}
+                      style={quotaItemStyle}
+                      dependencies={quotaDeps as unknown as string[]}
+                      validateTrigger={['onChange', 'onBlur']}
+                      rules={[fieldValidator('monthly_quota_limit')]}
                     >
-                      <Text strong style={{ fontSize: 12, flexShrink: 0, lineHeight: '22px' }}>日额度刷新</Text>
-                      <Text
-                        type="secondary"
-                        title={resetSummary}
-                        style={{ fontSize: 12, flex: 1, minWidth: 0, lineHeight: '22px', wordBreak: 'break-word' }}
-                      >
-                        {resetSummary}
-                      </Text>
-                      <Button
-                        type="link"
-                        size="small"
-                        icon={<SettingOutlined />}
-                        onClick={openDailyResetModal}
-                        style={{ paddingInline: 0, flexShrink: 0, height: 22 }}
-                      >
-                        配置
-                      </Button>
-                    </div>
+                      <InputNumber
+                        min={-1}
+                        style={{ width: '100%' }}
+                        formatter={formatQuotaLimitDisplay}
+                        parser={parseQuotaLimitInput}
+                      />
+                    </Form.Item>
+                    <Form.Item
+                      name="weekly_quota_limit"
+                      label="周额度"
+                      initialValue={-1}
+                      style={quotaItemStyle}
+                      dependencies={quotaDeps as unknown as string[]}
+                      validateTrigger={['onChange', 'onBlur']}
+                      rules={[fieldValidator('weekly_quota_limit')]}
+                    >
+                      <InputNumber
+                        min={-1}
+                        style={{ width: '100%' }}
+                        formatter={formatQuotaLimitDisplay}
+                        parser={parseQuotaLimitInput}
+                      />
+                    </Form.Item>
+                    <Form.Item
+                      name="daily_quota_limit"
+                      label={
+                        <span
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            maxWidth: '100%',
+                            verticalAlign: 'middle',
+                          }}
+                        >
+                          <span>日额度</span>
+                          <Tooltip title={resetTooltip}>
+                            <Text
+                              type="secondary"
+                              style={{
+                                fontSize: 11,
+                                fontWeight: 400,
+                                lineHeight: 1.2,
+                                maxWidth: 148,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {resetInline}
+                            </Text>
+                          </Tooltip>
+                          <Tooltip title="配置日额度刷新时间与冷却">
+                            <Button
+                              type="link"
+                              size="small"
+                              icon={<SettingOutlined />}
+                              aria-label="配置日额度刷新"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                openDailyResetModal();
+                              }}
+                              style={{
+                                padding: 0,
+                                width: 18,
+                                height: 18,
+                                minWidth: 18,
+                                lineHeight: '18px',
+                                flexShrink: 0,
+                              }}
+                            />
+                          </Tooltip>
+                        </span>
+                      }
+                      initialValue={-1}
+                      style={quotaItemStyle}
+                      dependencies={quotaDeps as unknown as string[]}
+                      validateTrigger={['onChange', 'onBlur']}
+                      rules={[fieldValidator('daily_quota_limit')]}
+                    >
+                      <InputNumber
+                        min={-1}
+                        style={{ width: '100%' }}
+                        formatter={formatQuotaLimitDisplay}
+                        parser={parseQuotaLimitInput}
+                      />
+                    </Form.Item>
                   </div>
                 );
               }}
@@ -986,6 +1309,89 @@ const ChannelConfigs: React.FC = () => {
               placeholder={editingConfig ? '保持当前密钥或输入新值覆盖' : 'API Key / sk-... / access_key:secret_key'}
             />
           </Form.Item>
+          <Form.Item name="upstream_system" label="上游系统" style={{ marginBottom: 10 }}>
+            <Select
+              allowClear
+              placeholder="可选"
+              options={UPSTREAM_SYSTEM_OPTIONS}
+            />
+          </Form.Item>
+          {upstreamSystem === 'newapi' && (
+            <>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                <Form.Item
+                  name="upstream_group"
+                  label="同步分组倍率"
+                  extra="选中后写入上方「渠道倍率」"
+                  style={{ flex: 1, marginBottom: 10 }}
+                >
+                  <Select
+                    allowClear
+                    showSearch
+                    placeholder={upstreamGroups.length ? '选择要同步的分组' : '先拉取分组倍率'}
+                    optionFilterProp="label"
+                    onChange={(value) => applyGroupToRate(value || undefined)}
+                    options={
+                      upstreamGroups.length
+                        ? upstreamGroups.map(g => ({
+                            value: g.name,
+                            label: `${g.name}  ${g.ratio}x${g.label && g.label !== g.name ? `  ${g.label}` : ''}`,
+                          }))
+                        : (form.getFieldValue('upstream_group')
+                            ? [{ value: form.getFieldValue('upstream_group'), label: form.getFieldValue('upstream_group') }]
+                            : [])
+                    }
+                  />
+                </Form.Item>
+                <Form.Item label=" " style={{ marginBottom: 10, width: 118 }}>
+                  <Button
+                    icon={<SyncOutlined spin={fetchingGroups} />}
+                    loading={fetchingGroups}
+                    onClick={loadUpstreamGroups}
+                    style={{ width: '100%' }}
+                  >
+                    拉取分组
+                  </Button>
+                </Form.Item>
+              </div>
+              <div style={{ display: 'flex', gap: 12 }}>
+                <Form.Item
+                  name="upstream_sync_interval_minutes"
+                  label="同步间隔（分钟）"
+                  extra="0 为不自动同步"
+                  style={{ flex: 1, marginBottom: 10 }}
+                >
+                  <InputNumber min={0} max={10080} precision={0} placeholder="0" style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item label="同步后叠加增量" style={{ flex: 1, marginBottom: 10 }}>
+                  <Space.Compact style={{ width: '100%' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', paddingRight: 8 }}>
+                      <Switch
+                        size="small"
+                        checked={syncAddEnabled}
+                        onChange={(checked) => {
+                          setSyncAddEnabled(checked);
+                          const nextAdd = checked ? Number(form.getFieldValue('upstream_sync_rate_add') || 0) : 0;
+                          if (!checked) form.setFieldsValue({ upstream_sync_rate_add: 0 });
+                          applyGroupToRate(undefined, nextAdd);
+                        }}
+                      />
+                    </div>
+                    <Form.Item name="upstream_sync_rate_add" noStyle>
+                      <InputNumber
+                        min={0}
+                        step={0.01}
+                        disabled={!syncAddEnabled}
+                        placeholder="0"
+                        style={{ width: '100%' }}
+                        onChange={(value) => applyGroupToRate(undefined, Number(value) || 0)}
+                      />
+                    </Form.Item>
+                  </Space.Compact>
+                </Form.Item>
+              </div>
+            </>
+          )}
           <Form.Item
             name="remark"
             label={

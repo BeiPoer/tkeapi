@@ -45,6 +45,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let mut admin_routes: Router<Arc<AppState>> = Router::new()
         .route("/users", get(users::list_users).post(users::create_user))
         .route(
+            "/users/consumption/stats_batch",
+            post(users::get_consumption_stats_batch),
+        )
+        .route(
             "/users/{id}",
             put(users::update_user).delete(users::delete_user),
         )
@@ -81,6 +85,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/channel-configs",
             post(channel_configs::create_channel_config),
+        )
+        .route(
+            "/channel-configs/upstream-groups",
+            post(channel_configs::fetch_upstream_groups),
         )
         .route(
             "/channel-configs/{id}",
@@ -172,6 +180,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(admin_stats_sync::trigger_stats_sync),
         )
         .route("/settings/database/verify", post(settings::verify_database))
+        .route("/settings/database/info", get(settings::database_info))
         .route(
             "/settings/database/initialize",
             post(settings::initialize_database),
@@ -366,6 +375,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         "/plugins/happyhorse_router",
         plugins::happyhorse_router::router(),
     );
+    #[cfg(feature = "plugin_comfyui")]
+    let management_routes = management_routes.nest(
+        "/plugins/comfyui_bridge",
+        plugins::comfyui_bridge::router(),
+    );
     let management_routes =
         management_routes.nest("/plugins/docs-api", plugins::docs_api::router());
     #[cfg(feature = "commercial_plugins")]
@@ -461,6 +475,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/user/bind/google/callback",
             get(user::bind_google_callback),
+        )
+        // 厂商任务回调（无 JWT；上游推送后结案并回传客户端原 callback_url）
+        .route(
+            "/relay/vendor-callback/{id}",
+            post(crate::relay::vendor_callback::vendor_callback),
         )
         .merge(payment_public_routes);
     {

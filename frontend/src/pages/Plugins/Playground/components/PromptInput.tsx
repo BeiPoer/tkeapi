@@ -33,6 +33,7 @@ import type { PluginAsset } from '../../../../types';
 import { useThemeStore } from '../../../../store/theme';
 import useAuthStore from '../../../../store/auth';
 import request from '../../../../utils/request';
+import { fetchActivePlugins } from '../../../../utils/activePlugins';
 import { useTranslation } from 'react-i18next';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
@@ -54,9 +55,9 @@ const PromptInput: React.FC<{ embedded?: boolean }> = React.memo(({ embedded }) 
   const [assetPickerNs, setAssetPickerNs] = useState<string>('asset_manager');
 
   React.useEffect(() => {
-    const fetchActivePlugins = async () => {
+    const loadActivePlugins = async () => {
       try {
-        const response: any = await request.get('/plugins/active');
+        const response: any = await fetchActivePlugins();
         if (response && response.active_plugins) {
           setActivePlugins(response.active_plugins);
         }
@@ -64,7 +65,7 @@ const PromptInput: React.FC<{ embedded?: boolean }> = React.memo(({ embedded }) 
         console.error('Failed to fetch active plugins', error);
       }
     };
-    fetchActivePlugins();
+    loadActivePlugins();
   }, []);
 
   const isPluginVisibleForUser = useCallback((pluginName: string) => {

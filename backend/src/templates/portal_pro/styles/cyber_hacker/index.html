@@ -4,9 +4,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{{ seo.meta_title | default(value="TokensByte - AI 基座与开源 API 中转分发系统") }}</title>
-  <meta name="description" content="{{ seo.meta_description | default(value="TokensByte - 大模型 API 中转开源系统：兼容 OpenAI，汇聚多模型，统一鉴权、限流与计费。") }}">
-  <meta name="keywords" content="{{ seo.meta_keywords | default(value="TokensByte, AI 基座, API 开源中转系统, 大模型网关, 开源 API 分发") }}">
+  <title>{{ seo.meta_title | default(value="Tkeapi - AI 基座与开源 API 中转分发系统") }}</title>
+  <meta name="description" content="{{ seo.meta_description | default(value="Tkeapi - 大模型 API 中转开源系统：兼容 OpenAI，汇聚多模型，统一鉴权、限流与计费。") }}">
+  <meta name="keywords" content="{{ seo.meta_keywords | default(value="Tkeapi, AI 基座, API 开源中转系统, 大模型网关, 开源 API 分发") }}">
   <meta name="robots" content="index, follow">
   {% if scripts and scripts.analytics %}{{ scripts.analytics | safe }}{% endif %}
 
@@ -462,15 +462,44 @@
       display: block;
     }
 
-    .hero-brand-mega-title .cursor {
+    .hero-brand-mega-title .hero-brand-name {
       display: block;
-      width: 0.55em;
-      height: 0.82em;
-      margin-top: 0.25em;
-      margin-left: 0;
+    }
+
+    .hero-typewriter {
+      display: flex;
+      align-items: center;
+      margin-top: 0.35em;
+      min-height: 0.9em;
+      font-size: 0.42em;
+      letter-spacing: 0.04em;
+      font-weight: 700;
+      line-height: 1.15;
+    }
+
+    .hero-typewriter-text {
+      color: #00ff66;
+      text-shadow: 0 0 14px rgba(0, 255, 102, 0.5), 0 0 36px rgba(0, 255, 102, 0.22);
+      white-space: nowrap;
+      overflow: hidden;
+      max-width: 100%;
+    }
+
+    .hero-brand-mega-title .cursor {
+      display: inline-block;
+      flex-shrink: 0;
+      width: 0.42em;
+      height: 0.95em;
+      margin-left: 0.12em;
       background: #00ff66;
-      box-shadow: 0 0 14px #00ff66;
+      box-shadow: 0 0 14px #00ff66, 0 0 28px rgba(0, 255, 102, 0.45);
       animation: blink 1s steps(1) infinite;
+      vertical-align: middle;
+    }
+
+    .hero-brand-mega-title .cursor.is-typing {
+      animation: none;
+      opacity: 1;
     }
 
     @keyframes blink {
@@ -1017,6 +1046,8 @@
       border-radius: 3px;
       transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
       box-shadow: inset 0 0 6px rgba(0, 255, 102, 0.1);
+      cursor: default;
+      user-select: none;
     }
 
     .contrib-node-badge:hover {
@@ -1172,14 +1203,19 @@
           <div class="hero-grid">
             <!-- Left Column: Mega Brand Title & Content (Exact Screenshot & Style01 Match) -->
             <div class="hero-left-col">
-              <h1 class="hero-brand-mega-title"><span data-i18n-dynamic="{{ nav.logo_text | default(value='TokensByte') }}">{{ nav.logo_text | default(value="TokensByte") }}</span><span class="cursor" aria-hidden="true"></span></h1>
+              <h1 class="hero-brand-mega-title">
+                <span class="hero-brand-name" data-i18n-dynamic="{{ nav.logo_text | default(value='Tkeapi') }}">{{ nav.logo_text | default(value="Tkeapi") }}</span>
+                <span class="hero-typewriter" aria-live="polite">
+                  <span class="hero-typewriter-text"></span><span class="cursor" aria-hidden="true"></span>
+                </span>
+              </h1>
 
               <h2 class="hero-main-headline">
                 <span data-i18n-dynamic="大模型 API 中转开源系统，一处接入|Open-source LLM API relay — one endpoint for ">大模型 API 中转开源系统，一处接入</span><span class="highlight" data-i18n-dynamic="全球模型.|global models.">全球模型.</span>
               </h2>
 
-              <p class="hero-sub-description" data-i18n-dynamic="兼容 OpenAI 协议 — 汇聚上游大模型，统一密钥、限流、路由与计费，开箱即用，可自托管。|OpenAI-compatible — aggregate upstream LLMs; unify keys, rate limits, routing and billing. Ready out of the box, self-hostable.">
-                兼容 OpenAI 协议 — 汇聚上游大模型，统一密钥、限流、路由与计费，开箱即用，可自托管。
+              <p class="hero-sub-description" data-i18n-dynamic="官方协议+兼容OpenAI协议—汇聚各种大模型，统一密钥、限流、路由与计费。|Official protocol + OpenAI-compatible — aggregate various LLMs; unify keys, rate limits, routing and billing.">
+                官方协议+兼容OpenAI协议—汇聚各种大模型，统一密钥、限流、路由与计费。
               </p>
 
               <div class="hero-action-buttons">
@@ -1277,26 +1313,27 @@
             </div>
           </div>
 
-          <!-- 4. Kimi-K3 -->
+          <!-- 4. MiniMax H3 -->
           <div class="cyber-model-card accent-amber">
             <div>
               <div class="cyber-card-top">
                 <div class="cyber-model-name-group">
                   <div class="cyber-model-icon-box">
                     <svg class="cyber-model-logo-svg svg-amber" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z" fill="#fbbf24" fill-opacity="0.25" stroke="#fbbf24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                      <path d="M3 17V7L7.5 17L12 8.5L16.5 17L21 7V17" stroke="#fbbf24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                      <path d="M3 17V7L7.5 17L12 8.5L16.5 17L21 7V17Z" fill="#fbbf24" fill-opacity="0.15"/>
                     </svg>
                   </div>
-                  <h3 class="cyber-model-title">Kimi-K3</h3>
+                  <h3 class="cyber-model-title">MiniMax H3</h3>
                 </div>
                 <span class="cyber-model-status status-amber">
-                  <span class="status-dot"></span><span data-i18n-dynamic="长上下文|Long Context">长上下文</span>
+                  <span class="status-dot"></span><span data-i18n-dynamic="视听全模态|Omni Multimodal">视听全模态</span>
                 </span>
               </div>
-              <p class="cyber-model-desc" data-i18n-dynamic="月之暗面突破性无损长文本大模型，拥有深度的长文分析、提炼与复杂思考能力。|Moonshot AI breakthrough long-context model designed for deep document synthesis and complex thinking.">月之暗面突破性无损长文本大模型，拥有深度的长文分析、提炼与复杂思考能力。</p>
+              <p class="cyber-model-desc" data-i18n-dynamic="MiniMax 旗舰开源通用全模态大模型，原生 2K 高清直出与 32kHz 视听一体同步生成。|MiniMax flagship open-source omni multimodal model with native 2K video generation and 32kHz audio-video synchronization.">MiniMax 旗舰开源通用全模态大模型，原生 2K 高清直出与 32kHz 视听一体同步生成。</p>
             </div>
             <div class="cyber-model-footer">
-              <span class="cyber-tech-badge">2M+ Context</span>
+              <span class="cyber-tech-badge">H3-Omni 2K</span>
             </div>
           </div>
 
@@ -1427,26 +1464,16 @@
               <h3 class="contrib-card-title" data-i18n-dynamic="开发贡献者|Code Contributors">开发贡献者</h3>
             </div>
             <div class="contrib-badges-grid">
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">TB</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">NX</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">KR</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">QL</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">ZM</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">HY</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">RV</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">JX</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">LP</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">CW</a>
+              <span class="contrib-node-badge">AK</span>
+              <span class="contrib-node-badge">VN</span>
+              <span class="contrib-node-badge">ZR</span>
+              <span class="contrib-node-badge">QX</span>
+              <span class="contrib-node-badge">LY</span>
+              <span class="contrib-node-badge">MJ</span>
+              <span class="contrib-node-badge">FT</span>
+              <span class="contrib-node-badge">WB</span>
+              <span class="contrib-node-badge">HE</span>
+              <span class="contrib-node-badge">PC</span>
             </div>
           </div>
 
@@ -1456,22 +1483,14 @@
               <h3 class="contrib-card-title glow-highlight" data-i18n-dynamic="文档贡献者|Docs Contributors">文档贡献者</h3>
             </div>
             <div class="contrib-badges-grid">
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">DO</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">CS</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">MK</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">AN</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">ET</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">SG</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">YU</a>
-              <a href="https://github.com/aiqachat/tokensbyte/graphs/contributors" target="_blank"
-                class="contrib-node-badge">FH</a>
+              <span class="contrib-node-badge">SD</span>
+              <span class="contrib-node-badge">RG</span>
+              <span class="contrib-node-badge">UX</span>
+              <span class="contrib-node-badge">KA</span>
+              <span class="contrib-node-badge">NT</span>
+              <span class="contrib-node-badge">BM</span>
+              <span class="contrib-node-badge">FE</span>
+              <span class="contrib-node-badge">VL</span>
             </div>
           </div>
         </div>
@@ -1485,7 +1504,7 @@
       <div class="container">
         <div class="warning-notice-box">
           <h3 class="warning-title">
-            <span>⚠️</span> <span data-i18n-dynamic="谨防假冒 Tokensbyte 官方服务|Beware of fake TokensByte official services">谨防假冒 Tokensbyte 官方服务</span>
+            <span>⚠️</span> <span data-i18n-dynamic="谨防假冒 Tkeapi 官方服务|Beware of fake Tkeapi official services">谨防假冒 Tkeapi 官方服务</span>
           </h3>
           <p class="warning-sub-text" data-i18n-dynamic="未授权任何代理或经销商销售商业版软件，请仅信任官方开源仓库与官方文档节点。|We authorize no resellers for commercial editions. Trust only the official open-source repo and docs.">
             未授权任何代理或经销商销售商业版软件，请仅信任官方开源仓库与官方文档节点。
@@ -1502,7 +1521,7 @@
     <div class="container">
       <div class="footer-grid">
         <div class="footer-col">
-          <h4 data-i18n-dynamic="{{ footer.brand_name | default(value='TokensByte') }}">{{ footer.brand_name | default(value="TokensByte") }}</h4>
+          <h4 data-i18n-dynamic="{{ footer.brand_name | default(value='Tkeapi') }}">{{ footer.brand_name | default(value="Tkeapi") }}</h4>
           {% if footer.description %}
           <p data-i18n-dynamic="{{ footer.description }}">{{ footer.description }}</p>
           {% endif %}
@@ -1564,7 +1583,7 @@
       </div>
 
       <div class="footer-bottom">
-        <div>{{ footer.copyright | default(value="© 2026 TokensByte. All rights reserved.") }}</div>
+        <div>{{ footer.copyright | default(value="© 2026 TkeAPI. All rights reserved.") }}</div>
         <div>{{ year | default(value="2026") }} · SITE PORTAL PRO</div>
       </div>
     </div>
@@ -1619,6 +1638,68 @@
       }
     }
     initRandomCyberHexStreams();
+
+    /* Hero 绿色光标：轮播下方「支持各类大模型」卡片名称，打字 → 停顿 → 删除 → 下一个 */
+    function initHeroModelTypewriter() {
+      const textEl = document.querySelector('.hero-typewriter-text');
+      const cursorEl = document.querySelector('.hero-brand-mega-title .cursor');
+      if (!textEl || !cursorEl) return;
+
+      const fallbackModels = [
+        'Seedance-2.0/2.5',
+        'DeepSeek-V4',
+        'GLM-5.2',
+        'MiniMax H3',
+        'OpenAI-GPT',
+        'Google-Gemini',
+        'Anthropic-Claude',
+        'xAI-Grok',
+      ];
+
+      const fromCards = Array.from(document.querySelectorAll('.cyber-model-title'))
+        .map((el) => (el.textContent || '').trim())
+        .filter(Boolean);
+      const models = fromCards.length ? fromCards : fallbackModels;
+      if (!models.length) return;
+
+      let modelIndex = 0;
+      let charIndex = 0;
+
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+      const setTyping = (active) => cursorEl.classList.toggle('is-typing', active);
+
+      const loop = async () => {
+        while (true) {
+          const full = models[modelIndex % models.length];
+
+          setTyping(true);
+          while (charIndex < full.length) {
+            charIndex += 1;
+            textEl.textContent = full.slice(0, charIndex);
+            const ch = full[charIndex - 1];
+            const base = /[-./]/.test(ch) ? rand(70, 110) : rand(42, 78);
+            await wait(base);
+          }
+          setTyping(false);
+          await wait(rand(1600, 2400));
+
+          setTyping(true);
+          while (charIndex > 0) {
+            charIndex -= 1;
+            textEl.textContent = full.slice(0, charIndex);
+            await wait(rand(24, 42));
+          }
+          setTyping(false);
+          await wait(rand(280, 520));
+
+          modelIndex = (modelIndex + 1) % models.length;
+        }
+      };
+
+      loop();
+    }
+    initHeroModelTypewriter();
   </script>
 </body>
 

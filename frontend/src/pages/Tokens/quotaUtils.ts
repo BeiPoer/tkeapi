@@ -34,27 +34,34 @@ export function getPeriodicUsed(token: ApiToken, tz = 'Asia/Shanghai') {
   };
 }
 
-function formatDuration(diffMs: number) {
+function formatDuration(
+  diffMs: number,
+  t: (key: string, opts?: Record<string, unknown>) => string,
+) {
   const days = Math.floor(diffMs / (24 * 3600 * 1000));
   const hours = Math.floor((diffMs % (24 * 3600 * 1000)) / (3600 * 1000));
   const minutes = Math.floor((diffMs % (3600 * 1000)) / (60 * 1000));
-  if (days > 0) return `${days}天 ${hours}小时`;
-  return `${hours}小时 ${minutes}分钟`;
+  if (days > 0) return t('tokens.duration_dh', { days, hours });
+  return t('tokens.duration_hm', { hours, minutes });
 }
 
 /** 周期重置倒计时：日/月按自然日切；周按周日 00:00（对齐后端 `%Y-%U`） */
-export function getQuotaRefreshText(type: 'day' | 'week' | 'month', tz = 'Asia/Shanghai') {
+export function getQuotaRefreshText(
+  type: 'day' | 'week' | 'month',
+  tz = 'Asia/Shanghai',
+  t: (key: string, opts?: Record<string, unknown>) => string,
+) {
   const nowTime = dayjs().tz(tz);
   if (type === 'day') {
     const next = nowTime.add(1, 'day').startOf('day');
-    return formatDuration(next.diff(nowTime));
+    return formatDuration(next.diff(nowTime), t);
   }
   if (type === 'week') {
     const dow = nowTime.day(); // 0 = Sunday
     const daysToSunday = dow === 0 ? 7 : 7 - dow;
     const nextSunday = nowTime.add(daysToSunday, 'day').startOf('day');
-    return formatDuration(nextSunday.diff(nowTime));
+    return formatDuration(nextSunday.diff(nowTime), t);
   }
   const nextMonth = nowTime.add(1, 'month').startOf('month');
-  return formatDuration(nextMonth.diff(nowTime));
+  return formatDuration(nextMonth.diff(nowTime), t);
 }

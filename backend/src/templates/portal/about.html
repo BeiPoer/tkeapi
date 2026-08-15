@@ -7,7 +7,7 @@
 
 {% extends "base.html" %}
 {% set current_page = "about" %}
-{% block title %}{{ columns.about.title | default(value="关于我们") }} - {{ nav.logo_text | default(value="TokensByte") }}{% endblock %}
+{% block title %}{{ columns.about.title | default(value="关于我们") }} - {{ nav.logo_text | default(value="Tkeapi") }}{% endblock %}
 
 {% block content %}
 <style>
@@ -312,7 +312,7 @@
       <div style="display: flex; flex-direction: column; gap: 1rem;">
         <h1 class="hero-title">
           <span data-i18n="about_title_prefix">关于</span>
-          <span data-i18n-dynamic="{{ nav.logo_text | default(value="TokensByte") }}">{{ nav.logo_text | default(value="TokensByte") }}</span>
+          <span data-i18n-dynamic="{{ nav.logo_text | default(value="Tkeapi") }}">{{ nav.logo_text | default(value="Tkeapi") }}</span>
         </h1>
         <p class="hero-subtitle" data-i18n="about_hero_subtitle">
           作为业内领先的 AI 模型聚合服务平台，我们消除服务商锁定风险，通过更优的价格、高可用性和企业级的稳定性，为您打通全球最先进大语言模型的访问桥梁。
@@ -359,7 +359,7 @@
         <div class="press-text">
           <h2 class="press-title">
             <span data-i18n="about_press_title_prefix">统一大模型接口体验，</span>
-            <span data-i18n-dynamic="{{ nav.logo_text | default(value="TokensByte") }}">{{ nav.logo_text | default(value="TokensByte") }}</span>
+            <span data-i18n-dynamic="{{ nav.logo_text | default(value="Tkeapi") }}">{{ nav.logo_text | default(value="Tkeapi") }}</span>
             <span data-i18n="about_press_title_suffix"> 让接入 AI 零负担</span>
           </h2>
           <p class="press-desc" data-i18n="about_press_desc">旨在成为开发者接入、对比、调用不同 AI 模型的首选聚合网关。只需一次接入，即可全量访问数百个前沿模型。</p>

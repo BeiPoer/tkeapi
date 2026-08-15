@@ -22,10 +22,12 @@ import {
   theme,
 } from 'antd';
 import { ArrowLeftOutlined, SaveOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
-import { useNavigate, useParams } from 'react-router-dom';
 import request from '../../utils/request';
+import { fetchActivePlugins } from '../../utils/activePlugins';
+import { useNavigate, useParams } from 'react-router-dom';
 import useSettingsStore from '../../store/settings';
 import { useThemeStore } from '../../store/theme';
+import { useTranslation } from 'react-i18next';
 import { solidAccent } from '../../theme/tokens';
 import type { AdminGroup } from '../../types';
 import {
@@ -43,6 +45,7 @@ const ALL_BASIC_PERMISSION_VALUES = flattenAdminMenuPermissions();
 
 const AdminGroupEdit: React.FC = () => {
   const { token } = theme.useToken();
+  const { t } = useTranslation();
   const { themeMode } = useThemeStore();
   const solid = solidAccent(themeMode);
   const muted = themeMode === 'light' ? '#71717a' : '#a1a1aa';
@@ -64,7 +67,7 @@ const AdminGroupEdit: React.FC = () => {
     const load = async () => {
       setLoading(true);
       try {
-        const pluginsResp = await (request.get('/plugins/active') as any);
+        const pluginsResp = await fetchActivePlugins();
         if (pluginsResp.active_plugins) {
           setActivePlugins(pluginsResp.active_plugins);
         }
@@ -268,7 +271,7 @@ const AdminGroupEdit: React.FC = () => {
               onChange={(e) => toggleParent(group.value, group.children, e.target.checked)}
             >
               <Text strong style={{ fontSize: 13 }}>
-                {group.label}
+                {t(group.labelKey, group.label)}
               </Text>
             </Checkbox>
             {renderCountBadge(childSelectedCount, childTotalCount, isActive)}
@@ -286,7 +289,7 @@ const AdminGroupEdit: React.FC = () => {
                   className="admin-perm-check-item"
                   style={{ marginInlineEnd: 0 }}
                 >
-                  <span className="admin-perm-check-label">{child.label}</span>
+                  <span className="admin-perm-check-label">{t(child.labelKey, child.label)}</span>
                 </Checkbox>
               ))}
             </div>
@@ -398,7 +401,7 @@ const AdminGroupEdit: React.FC = () => {
             >
               <Space size={6}>
                 <Title level={5} style={{ margin: 0, fontSize: 13 }}>
-                  可见基础菜单
+                  {t('admin_perm.basic_menus')}
                 </Title>
                 {renderCountBadge(selectedMenuCount, totalMenuCount, selectedMenuCount > 0)}
               </Space>
@@ -409,7 +412,7 @@ const AdminGroupEdit: React.FC = () => {
                   setPermissions(e.target.checked ? [...ALL_BASIC_PERMISSION_VALUES] : []);
                 }}
               >
-                全选
+                {t('admin_perm.select_all')}
               </Checkbox>
             </div>
             <Row gutter={[8, 2]}>{ADMIN_MENU_PERMISSIONS.map(renderMenuGroup)}</Row>
@@ -429,7 +432,7 @@ const AdminGroupEdit: React.FC = () => {
               >
                 <Space size={6}>
                   <Title level={5} style={{ margin: 0, fontSize: 13 }}>
-                    插件权限
+                    {t('admin_perm.plugin_perms')}
                   </Title>
                   {renderCountBadge(
                     pluginPermissionsWatch.length,
@@ -448,7 +451,7 @@ const AdminGroupEdit: React.FC = () => {
                     });
                   }}
                 >
-                  全选
+                  {t('admin_perm.select_all')}
                 </Checkbox>
               </div>
               <div
@@ -470,7 +473,7 @@ const AdminGroupEdit: React.FC = () => {
                       className="admin-perm-check-item"
                       style={{ marginInlineEnd: 0 }}
                     >
-                      <span className="admin-perm-check-label">{p.title || p.name}</span>
+                      <span className="admin-perm-check-label">{String(t(`plugin_titles.${p.name}`, { defaultValue: p.title || p.name }))}</span>
                     </Checkbox>
                   );
                 })}

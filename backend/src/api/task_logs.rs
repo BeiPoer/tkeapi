@@ -153,6 +153,7 @@ pub async fn list_task_logs(
              {SQL_BILLING_SETTLE_FLAGS}, \
              c.name AS channel_name, c.group_aid AS channel_group_aid, \
              COALESCE(u.nickname, u.username) AS user_nickname, u.uid AS user_uid, \
+             NULLIF(btrim(COALESCE(u.admin_remark, '')), '') AS user_admin_remark, \
              l.task_id, l.action_type, cc.yid AS yid, l.billing_pid, l.forward_eid, l.is_completed, l.is_ha, l.created_at"
         ),
         TASK_LIST_JOINS,
@@ -189,6 +190,7 @@ pub async fn list_task_logs(
             log.channel_id = None;
             log.channel_name = None;
             log.channel_group_aid = None;
+            log.user_admin_remark = None;
             redact_log_match_ids_for_user(&mut log.billing_pid, &mut log.forward_eid, &mut log.yid);
         }
     }

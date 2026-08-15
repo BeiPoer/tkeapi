@@ -29,7 +29,8 @@ import {
 import { useTranslation } from 'react-i18next';
 import { Sidebar as SidebarIcon, Terminal } from 'lucide-react';
 import request from '../../../utils/request';
-import { persistUserLanguagePreference } from '../../../utils/language';
+import { fetchActivePlugins } from '../../../utils/activePlugins';
+import { persistUserLanguagePreference, LANG_NAME_MAP } from '../../../utils/language';
 import { useThemeStore } from '../../../store/theme';
 import useAuthStore from '../../../store/auth';
 import useSettingsStore from '../../../store/settings';
@@ -210,9 +211,9 @@ const PlaygroundHome: React.FC = () => {
         console.error('Failed to fetch announcements:', error);
       }
     };
-    const fetchActivePlugins = async () => {
+    const loadActivePlugins = async () => {
       try {
-        const response = await (request.get('/plugins/active') as any);
+        const response = await fetchActivePlugins();
         if (response.active_plugins) {
           setActivePlugins(response.active_plugins);
         }
@@ -221,18 +222,12 @@ const PlaygroundHome: React.FC = () => {
       }
     };
     fetchAnnouncements();
-    fetchActivePlugins();
+    loadActivePlugins();
   }, [user?.notification_preferences, settings?.notification?.low_balance_threshold, i18n.language]);
 
   const changeLanguage = (lng: string) => {
     i18n.changeLanguage(lng);
     persistUserLanguagePreference(lng);
-  };
-
-  const langNameMap: Record<string, string> = {
-    zh: '简体中文', en: 'English', ja: '日本語', ko: '한국어', vi: 'Tiếng Việt',
-    fr: 'Français', de: 'Deutsch', es: 'Español', pt: 'Português',
-    ru: 'Русский', ar: 'العربية',
   };
 
   const implementedLangs = i18n.options.resources ? Object.keys(i18n.options.resources) : ['zh', 'en'];
@@ -241,7 +236,7 @@ const PlaygroundHome: React.FC = () => {
     .filter(lng => implementedLangs.includes(lng))
     .map(lng => ({
       key: lng,
-      label: langNameMap[lng] || lng,
+      label: LANG_NAME_MAP[lng] || lng,
       onClick: () => changeLanguage(lng),
     }));
 

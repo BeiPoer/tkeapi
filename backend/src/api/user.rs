@@ -522,7 +522,7 @@ pub async fn get_wallet_stats(
         .fetch_one(&state.db.pool)
         .await?;
 
-    let (site_tz, _) = crate::relay::get_cached_config(&state).await;
+    let site_tz = crate::relay::relay_settings::get_cached_site_timezone(&state.db).await;
     let timedisplay =
         crate::api::date_helper::resolve_user_timedisplay_name(&state.db, user_id, &site_tz).await;
     let tz: chrono_tz::Tz = timedisplay.parse().unwrap_or(chrono_tz::Asia::Shanghai);

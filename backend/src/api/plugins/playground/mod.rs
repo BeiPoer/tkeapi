@@ -430,8 +430,32 @@ async fn delete_project(
     Path(id): Path<i64>,
     Extension(claims): Extension<auth::Claims>,
 ) -> AppResult<Json<serde_json::Value>> {
-    // 1. 物理删除项目
-    let result = sqlx::query(
+    // 删库前取出项目 uid + 资源 key/url（与上传路径一致，避免 list 扫空后漏删）
+    let project_uid: Option<String> = sqlx::query_scalar(
+        &state
+            .db
+            .format_query("SELECT uid FROM playground_projects WHERE id = ? AND user_id = ?"),
+    )
+    .bind(id)
+    .bind(&claims.sub)
+    .fetch_optional(&state.db.pool)
+    .await?;
+
+    let Some(project_uid) = project_uid else {
+        return Err(AppError::NotFound("项目不存在".to_string()));
+    };
+
+    let asset_rows: Vec<(String, String)> = sqlx::query_as(&state.db.format_query(
+        "SELECT COALESCE(tos_object_key, ''), COALESCE(file_url, '') \
+         FROM playground_assets WHERE project_id = ? AND user_id = ?",
+    ))
+    .bind(id)
+    .bind(&claims.sub)
+    .fetch_all(&state.db.pool)
+    .await?;
+
+    // assets 有 ON DELETE CASCADE，删项目即可
+    sqlx::query(
         &state
             .db
             .format_query("DELETE FROM playground_projects WHERE id = ? AND user_id = ?"),
@@ -441,44 +465,20 @@ async fn delete_project(
     .execute(&state.db.pool)
     .await?;
 
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("项目不存在".to_string()));
-    }
-
-    // 2. 物理删除项目下的所有资源
-    sqlx::query(
-        &state
-            .db
-            .format_query("DELETE FROM playground_assets WHERE project_id = ? AND user_id = ?"),
-    )
-    .bind(id)
-    .bind(&claims.sub)
-    .execute(&state.db.pool)
-    .await?;
-
-    // 3. 从 TOS 中清理项目文件夹下的所有文件（后台异步并行执行，不阻塞接口返回）
     if let Some(tos_config) = get_tos_config(&state, "playground").await {
-        let uid: String =
-            sqlx::query_scalar(&state.db.format_query("SELECT uid FROM users WHERE id = ?"))
-                .bind(&claims.sub)
-                .fetch_one(&state.db.pool)
-                .await?;
-
-        let project_id_copy = id;
-        tokio::spawn(async move {
-            let folder_prefix = format!("p{}/{:08}/", uid, project_id_copy);
-            if let Ok((objects, _)) = tos::list_folder(&tos_config, &folder_prefix).await {
-                // 并行删除所有文件
-                let futs: Vec<_> = objects
-                    .iter()
-                    .map(|obj| tos::delete_file(&tos_config, &obj.key))
-                    .collect();
-                futures::future::join_all(futs).await;
-            }
-            let folder_key = tos_config.full_key(&format!("p{}/{:08}/.keep", uid, project_id_copy));
-            let _ = tos::delete_file(&tos_config, &folder_key).await;
-            tracing::info!("[Playground] 项目 {} TOS 文件夹清理完成", project_id_copy);
-        });
+        let asset_keys = tos::collect_object_keys(&tos_config, asset_rows);
+        tos::spawn_purge(
+            tos_config,
+            format!("p{}/{:08}", project_uid, id),
+            asset_keys,
+            "[Playground] 项目",
+            id,
+        );
+    } else {
+        tracing::warn!(
+            "[Playground] 项目 {} 已删库，但未配置 TOS，跳过对象清理",
+            id
+        );
     }
 
     Ok(Json(json!({ "message": "项目及资源已永久删除" })))

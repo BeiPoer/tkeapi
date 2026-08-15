@@ -39,8 +39,13 @@ async fn settle_after_stream(
     hint_category: Option<&str>,
     pending_log_id: Option<i64>,
 ) {
+    // 结算映射：仅图片/视频沿用请求分辨率；聊天等不解析
+    let map_res = crate::relay::router::mapping_resolution(
+        hint_category,
+        features.resolution.as_deref(),
+    );
     let (resolved_model, mapping_source) =
-        crate::relay::router::resolve_model(channel, model, db_model);
+        crate::relay::router::resolve_model(channel, model, db_model, map_res);
     let (cost, mut detail) = crate::relay::calculate_relay_cost(
         state,
         db_model,
@@ -49,7 +54,7 @@ async fn settle_after_stream(
         ctx,
         usage,
         features,
-        mapping_source,
+        mapping_source.as_deref(),
         model,
         &resolved_model,
     )

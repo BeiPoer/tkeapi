@@ -15,6 +15,7 @@ pub mod payment;
 pub mod runtime_info;
 pub mod sms;
 pub mod tos;
+pub mod upstream_rate_sync;
 #[cfg(feature = "commercial_plugins")]
 pub mod upstream_asset_client;
 #[cfg(feature = "commercial_plugins")]

@@ -115,9 +115,12 @@ pub async fn gemini_proxy(
                 }
             };
 
-        // 模型表别名映射：渠道无映射时回落到 db_model.model_id_alias
-        let (resolved_model, mapping_source) =
-            super::router::resolve_model(&channel, model, db_model.as_ref());
+        // 模型映射：仅图片类走分辨率档；聊天等跳过 body 解析
+        let (resolved_model, mapping_source) = if resolved_cat.contains("图片") {
+            super::router::resolve_model_body(&channel, model, db_model.as_ref(), body_json.as_ref())
+        } else {
+            super::router::resolve_model(&channel, model, db_model.as_ref(), None)
+        };
 
         // Build upstream query: replace key with channel's real key, keep other params (e.g. alt=sse)
         let mut qs = format!("key={}", channel.api_key);

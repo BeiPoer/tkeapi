@@ -42,7 +42,81 @@ pub fn portal_pages_router() -> Router<Arc<AppState>> {
 
 // ─── 公开页面渲染 ───
 
-const PORTAL_DISABLED_HTML: &str = "<html><body style='background:#09090b;color:#fafafa;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh'><h1>门户未启用</h1></body></html>";
+const PORTAL_DISABLED_HTML: &str = r#"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>门户未启用 | Portal Not Enabled</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #09090b;
+    color: #fafafa;
+    font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 24px;
+    text-align: center;
+  }
+  .container {
+    max-width: 480px;
+    padding: 40px 32px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(12px);
+  }
+  .icon {
+    width: 56px;
+    height: 56px;
+    margin: 0 auto 20px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.06);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #a1a1aa;
+  }
+  h1 {
+    font-size: 24px;
+    font-weight: 600;
+    line-height: 1.3;
+    margin-bottom: 6px;
+    color: #f4f4f5;
+  }
+  .subtitle {
+    font-size: 16px;
+    font-weight: 500;
+    color: #a1a1aa;
+    margin-bottom: 16px;
+  }
+  p {
+    font-size: 14px;
+    color: #71717a;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="12" y1="8" x2="12" y2="12"></line>
+        <line x1="12" y1="16" x2="12.01" y2="16"></line>
+      </svg>
+    </div>
+    <h1>门户未启用</h1>
+    <div class="subtitle">Portal Not Enabled</div>
+    <p>请前往后台管理系统的插件中心开启站点门户插件。</p>
+    <p style="margin-top:4px;">Please enable the Site Portal plugin in the admin dashboard.</p>
+  </div>
+</body>
+</html>"#;
 
 async fn is_portal_enabled(state: &AppState) -> Result<bool, AppError> {
     let enabled: Option<i64> = sqlx::query_scalar(
@@ -132,7 +206,7 @@ async fn load_configs(
 fn default_portal_nav_config() -> serde_json::Value {
     json!({
         "logo_url": "",
-        "logo_text": "TokensByte",
+        "logo_text": "Tkeapi",
         "logo_link": "/home",
         "items": [
             {"label": "平台优势|Platform Advantages", "path": "#features", "enabled": true, "key": "features"},
@@ -150,8 +224,8 @@ fn default_portal_nav_config() -> serde_json::Value {
 
 fn default_portal_footer_config() -> serde_json::Value {
     json!({
-        "brand_name": "TokensByte",
-        "description": "TokensByte 是一个开源的 AI 大模型 API 中转平台系统，通过一个统一端点聚合全球前沿大模型通道，提供极速路由、高可用容灾与极低成本的模型中转与分发能力。|TokensByte is an open-source AI model API relay platform system. It aggregates global frontier LLMs through one unified endpoint, providing high-availability routing and low-cost model distribution.",
+        "brand_name": "Tkeapi",
+        "description": "Tkeapi 是一个开源的 AI 大模型 API 中转平台系统，通过一个统一端点聚合全球前沿大模型通道，提供极速路由、高可用容灾与极低成本的模型中转与分发能力。|Tkeapi is an open-source AI model API relay platform system. It aggregates global frontier LLMs through one unified endpoint, providing high-availability routing and low-cost model distribution.",
         "links_title": "产品与服务|Products & Services",
         "links": [
             {"label": "技术优势|Technical Advantages", "path": "#features", "enabled": true},
@@ -161,7 +235,7 @@ fn default_portal_footer_config() -> serde_json::Value {
         ],
         "news_title": "开发者资讯|Developer News",
         "news_description": "订阅每周通讯，获取最新全球 AI 模型折扣、高可用路由升级和开发洞察。|Subscribe to our weekly newsletter for the latest global AI model discounts, high-availability route upgrades, and development insights.",
-        "copyright": "© 2026 TokensByte. All rights reserved.",
+        "copyright": "© 2026 TkeAPI. All rights reserved.",
         "company_name": "Sexy Velora LLC",
         "company_address": "30 N Gould St Ste R, Sheridan, WY 82801",
         "icp_number": "",
@@ -184,11 +258,11 @@ fn merge_portal_defaults(value: &mut serde_json::Value, defaults: &serde_json::V
     }
 }
 
-/// 将已保存配置中的旧品牌文案 WhatsToken AI 替换为 TokensByte。
+/// 将已保存配置中的旧品牌文案 WhatsToken AI 替换为 Tkeapi。
 fn rewrite_whatstoken_brand(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::String(s) if s.contains("WhatsToken AI") => {
-            *s = s.replace("WhatsToken AI", "TokensByte");
+            *s = s.replace("WhatsToken AI", "Tkeapi");
         }
         serde_json::Value::Array(items) => {
             for item in items {
@@ -231,7 +305,7 @@ fn portal_nav_config(configs: &std::collections::HashMap<String, String>) -> ser
         if let (Some(nav_map), Some(default_map)) = (nav.as_object_mut(), defaults.as_object()) {
             nav_map.insert("items".to_string(), default_map["items"].clone());
             if nav_map.get("logo_text").and_then(|v| v.as_str()) == Some("WhatsToken AI") {
-                nav_map.insert("logo_text".to_string(), json!("TokensByte"));
+                nav_map.insert("logo_text".to_string(), json!("Tkeapi"));
             }
         }
     }
@@ -340,7 +414,7 @@ fn managed_homepage_html(configs: &std::collections::HashMap<String, String>) ->
         1,
     );
 
-    let logo_text = nav["logo_text"].as_str().unwrap_or("TokensByte");
+    let logo_text = nav["logo_text"].as_str().unwrap_or("Tkeapi");
     let logo_link = nav["logo_link"].as_str().unwrap_or("/home");
     let logo_url = nav["logo_url"].as_str().unwrap_or("");
     let logo_image = if logo_url.is_empty() {
@@ -493,7 +567,7 @@ fn managed_homepage_html(configs: &std::collections::HashMap<String, String>) ->
       </div>
     </div>
   </footer>"#,
-        brand = bilingual_span(footer["brand_name"].as_str().unwrap_or("TokensByte")),
+        brand = bilingual_span(footer["brand_name"].as_str().unwrap_or("Tkeapi")),
         description = bilingual_span(footer["description"].as_str().unwrap_or("")),
         links_title = bilingual_span(footer["links_title"].as_str().unwrap_or("")),
         links = if footer_links.is_empty() {
@@ -570,7 +644,7 @@ fn style_applies_to_homepage(configs: &std::collections::HashMap<String, String>
     true
 }
 
-/// 统一首页渲染：自定义 HTML > 风格化 Tera 首页 > 托管 TokensByte 首页。
+/// 统一首页渲染：自定义 HTML > 风格化 Tera 首页 > 托管 Tkeapi 首页。
 async fn render_homepage_html(
     state: &AppState,
     configs: &std::collections::HashMap<String, String>,
@@ -1200,6 +1274,7 @@ async fn build_portal_data(
     ctx.insert("default_language", default_lang);
 
     ctx.insert("portal_locales_zh", PORTAL_LOCALE_ZH);
+    ctx.insert("portal_locales_zh_tw", PORTAL_LOCALE_ZH_TW);
     ctx.insert("portal_locales_en", PORTAL_LOCALE_EN);
     ctx.insert("portal_locales_ja", PORTAL_LOCALE_JA);
     ctx.insert("portal_locales_ko", PORTAL_LOCALE_KO);
@@ -1210,6 +1285,8 @@ async fn build_portal_data(
 
 const PORTAL_LOCALE_ZH: &str =
     include_str!("../../../../../frontend/src/pages/Plugins/SitePortal/locales/portal/zh.json");
+const PORTAL_LOCALE_ZH_TW: &str =
+    include_str!("../../../../../frontend/src/pages/Plugins/SitePortal/locales/portal/zh-TW.json");
 const PORTAL_LOCALE_EN: &str =
     include_str!("../../../../../frontend/src/pages/Plugins/SitePortal/locales/portal/en.json");
 const PORTAL_LOCALE_JA: &str =

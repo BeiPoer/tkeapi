@@ -34,7 +34,7 @@ import {
 const { Header, Sider, Content } = Layout;
 const { useBreakpoint } = Grid;
 import request from '../../../utils/request';
-import { persistUserLanguagePreference } from '../../../utils/language';
+import { persistUserLanguagePreference, LANG_NAME_MAP } from '../../../utils/language';
 import { useThemeStore } from '../../../store/theme';
 import useSettingsStore from '../../../store/settings';
 import useAuthStore from '../../../store/auth';
@@ -541,7 +541,7 @@ const ModelMarketplace: React.FC = () => {
   };
 
   // 从 settings store 派生站点信息，不再独立调 /settings 接口
-  const siteName = settings?.site?.name || 'TokensByte';
+  const siteName = settings?.site?.name || 'Tkeapi';
   const siteLogo = settings?.site?.logo || '';
   const currencySymbol = settings?.currency?.currency_symbol || '¥';
   const auxiliaryCurrencies = useMemo(() => {
@@ -1198,16 +1198,16 @@ const ModelMarketplace: React.FC = () => {
       // 其它阶梯情况，如 image_resolution, image_size_pixel, video_resolution, video_quality 等
       const items: any[] = [];
       const unit = isDuration ? tp('unit_per_second') : (isRequests ? tp('unit_per_image') : tp('unit_per_request'));
-      let freeImageLine: string | null = null;
-      if (br === 'volc_seedream_pro' || br === 'minimax_h3') {
-        const pRate = billing.prompt_rate !== undefined && billing.prompt_rate !== null ? Number(billing.prompt_rate) : 0;
+      let freeImageLine: React.ReactNode = null;
+      if ((br === 'volc_seedream_pro' || br === 'minimax_h3') && Number(billing.prompt_rate) > 0) {
         const freeCount = resolveFreeImageCount(ext.free_image_count, br);
-        if (pRate > 0) {
-          freeImageLine = tp('free_images_then_extra', {
-            n: freeCount,
-            price: formatPrice(pRate * subRate, variant),
-          });
-        }
+        freeImageLine = (
+          <>
+            {tp('free_images_then_extra', { n: freeCount })}
+            {formatPrice(Number(billing.prompt_rate) * subRate, variant)}
+            {tp('unit_per_image')}
+          </>
+        );
       }
       tiers.filter((tier: any) => tier.enabled !== false).forEach((tier: any) => {
         let label = tp('specification');
@@ -1503,12 +1503,6 @@ const ModelMarketplace: React.FC = () => {
     );
   };
 
-  const langNameMap: Record<string, string> = {
-    zh: '简体中文', en: 'English', ja: '日本語', ko: '한국어', vi: 'Tiếng Việt',
-    fr: 'Français', de: 'Deutsch', es: 'Español', pt: 'Português',
-    ru: 'Русский', ar: 'العربية',
-  };
-
   const supportedLanguages = settings?.site?.supported_languages?.length ? settings.site.supported_languages : ['zh', 'en'];
   const implementedLangs = i18n.options.resources ? Object.keys(i18n.options.resources) : ['zh', 'en'];
 
@@ -1516,7 +1510,7 @@ const ModelMarketplace: React.FC = () => {
     .filter(lng => implementedLangs.includes(lng))
     .map(lng => ({
       key: lng,
-      label: langNameMap[lng] || lng,
+      label: LANG_NAME_MAP[lng] || lng,
       onClick: () => changeLanguage(lng),
     }));
 

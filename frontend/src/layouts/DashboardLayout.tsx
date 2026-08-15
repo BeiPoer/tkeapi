@@ -14,8 +14,9 @@ import {
 } from '../utils/notificationPrefs';
 import { Sidebar as SidebarIcon, Terminal } from 'lucide-react';
 import request from '../utils/request';
+import { fetchActivePlugins } from '../utils/activePlugins';
 import generateUUID from '../utils/uuid';
-import { persistUserLanguagePreference } from '../utils/language';
+import { persistUserLanguagePreference, LANG_NAME_MAP, toDisplayLocale } from '../utils/language';
 import useSettingsStore from '../store/settings';
 import { hasAdminChildMenuPermission } from '../constants/adminMenuPermissions';
 import { Layout, Menu, Button, Space, Typography, ConfigProvider, theme, Grid } from 'antd';
@@ -58,6 +59,7 @@ import { Dropdown, Modal, message, Popover, Avatar, Divider, Drawer, List, Badge
 import type { MenuProps } from 'antd';
 import type { Announcement } from '../types';
 import useAuthStore from '../store/auth';
+import { normalizeTitleHref } from './AuthLayout';
 import { useThemeStore } from '../store/theme';
 import UserAvatarMenu from '../components/UserAvatarMenu';
 import BindPromptModal from '../components/BindPromptModal';
@@ -108,8 +110,17 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
   const { settings } = useSettingsStore();
   const adminPath = settings?.site?.admin_path || 'admin1688';
   const site = settings?.site;
-  const siteName = isUserEnd ? (site?.name || 'TokensByte') : `${site?.name || 'TokensByte'}${t('common.admin_suffix', '管理后台')}`;
+  const siteName = isUserEnd ? (site?.name || 'Tkeapi') : `${site?.name || 'Tkeapi'}${t('common.admin_suffix', '管理后台')}`;
   const siteLogo = site?.logo || '';
+  const logoTitleHref = normalizeTitleHref(site?.logo_title_url);
+  const goLogoTitle = () => {
+    if (!logoTitleHref) return;
+    if (logoTitleHref.startsWith('/') || logoTitleHref.startsWith('#') || logoTitleHref.startsWith('?')) {
+      navigate(logoTitleHref);
+    } else {
+      window.location.href = logoTitleHref;
+    }
+  };
   const siteTitle = site?.title || '';
   const enableMultilingual = site?.enable_multilingual !== false;
   const enableThemeToggle = site?.enable_theme_toggle !== false;
@@ -120,9 +131,14 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [activePlugins, setActivePlugins] = useState<any[]>([]);
+  const contentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    fetchActivePlugins();
+    contentRef.current?.scrollTo(0, 0);
+  }, [location.pathname, location.search]);
+
+  useEffect(() => {
+    fetchActivePluginsList();
     if (isLoggedIn) {
       fetchCurrentUser();
     }
@@ -139,9 +155,9 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
     }
   };
 
-  const fetchActivePlugins = async () => {
+  const fetchActivePluginsList = async () => {
     try {
-      const response = await (request.get('/plugins/active') as any);
+      const response = await fetchActivePlugins();
       if (response.active_plugins) {
         setActivePlugins(response.active_plugins);
       }
@@ -160,45 +176,34 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
     persistUserLanguagePreference(lng);
   };
 
-  /** 语言代码 → 显示名称映射 */
-  const langNameMap: Record<string, string> = {
-    zh: '简体中文', en: 'English', ja: '日本語', ko: '한국어', vi: 'Tiếng Việt',
-    fr: 'Français', de: 'Deutsch', es: 'Español', pt: 'Português',
-    ru: 'Русский', ar: 'العربية',
-  };
-
   const implementedLangs = i18n.options.resources ? Object.keys(i18n.options.resources) : ['zh', 'en'];
 
   const langItems: MenuProps['items'] = supportedLanguages
     .filter(lng => implementedLangs.includes(lng))
     .map(lng => ({
       key: lng,
-      label: langNameMap[lng] || lng,
+      label: LANG_NAME_MAP[lng] || lng,
       onClick: () => changeLanguage(lng),
     }));
 
   useEffect(() => {
     const fetchAnnouncements = async () => {
-      const prefs = parseNotificationPreferences(
-        user?.notification_preferences,
-        settings?.notification?.low_balance_threshold ?? 100.0,
-      );
-      if (!shouldShowWebNotifications(prefs, settings?.notification)) {
-        setAnnouncements([]);
-        setUnreadCount(0);
-        return;
-      }
       try {
         const response = await (request.get('/announcements/public') as any);
         if (response.data) {
           setAnnouncements(response.data);
-          setUnreadCount(response.data.length);
-          if (response.data.length > 0) {
+          const prefs = parseNotificationPreferences(
+            user?.notification_preferences,
+            settings?.notification?.low_balance_threshold ?? 100.0,
+          );
+          const showWeb = shouldShowWebNotifications(prefs, settings?.notification);
+          setUnreadCount(showWeb ? response.data.length : 0);
+          if (showWeb && response.data.length > 0) {
             const first = response.data[0];
             const seenKey = `notif_push_seen_${first.id}`;
             if (!sessionStorage.getItem(seenKey)) {
               sessionStorage.setItem(seenKey, '1');
-              const title = getAnnouncementLabel(first.title || '') || (i18n.language === 'zh' ? '新通知' : 'New notification');
+              const title = getAnnouncementLabel(first.title || '') || (i18n.language.startsWith('zh') ? '新通知' : 'New notification');
               const body = getAnnouncementLabel(first.content || '').replace(/<[^>]+>/g, '').slice(0, 120);
               maybeShowBrowserPush(title, body, prefs, settings?.notification);
             }
@@ -242,7 +247,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
       return t(i18nKey);
     }
     const lang = i18n.language || 'zh';
-    if (lang === 'zh') {
+    if (lang.toLowerCase().startsWith('zh')) {
       return item.label_zh || item.label_en;
     }
     return item.label_en || item.label_zh;
@@ -372,7 +377,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
           userSettingsChildren.push({
             key: '/profile/notifications',
             icon: <BellOutlined style={{ fontSize: '18px' }} />,
-            label: <Link to="/profile/notifications">{i18n.language === 'en' ? 'Notifications' : '通知订阅'}</Link>,
+            label: <Link to="/profile/notifications">{t('menu.notifications')}</Link>,
           });
         }
         userSettingsChildren.sort((a, b) => {
@@ -383,7 +388,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
         menuItems.push({
           key: 'user-settings-group',
           icon: getMenuIcon('SettingOutlined'),
-          label: i18n.language === 'en' ? 'Settings' : t('menu.user_settings', '用户设置'),
+          label: t('menu.user_settings'),
           children: userSettingsChildren,
           sort_order: settingsSortOrder,
         } as any);
@@ -467,13 +472,13 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
       if (hasChildMenu('channels', 'channels.groups')) {
         channelChildren.push({
           key: '/admin0755/channels',
-          label: <Link to="/admin0755/channels">{t('menu.channel_groups', '模型渠道分组')}</Link>,
+          label: <Link to="/admin0755/channels">{t('menu.channel_groups')}</Link>,
         });
       }
       if (hasChildMenu('channels', 'channels.configs')) {
         channelChildren.push({
           key: '/admin0755/channel-configs',
-          label: <Link to="/admin0755/channel-configs">{t('menu.channel_configs', '上游渠道配置')}</Link>,
+          label: <Link to="/admin0755/channel-configs">{t('menu.channel_configs')}</Link>,
         });
       }
       if (channelChildren.length > 0) {
@@ -535,7 +540,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
       if (hasChildMenu('marketing', 'marketing.announcements')) {
         marketingChildren.push({
           key: '/admin0755/marketing/announcements',
-          label: <Link to="/admin0755/marketing/announcements">{t('menu.announcements', '提示通知')}</Link>,
+          label: <Link to="/admin0755/marketing/announcements">{t('menu.announcements')}</Link>,
         });
       }
       if (marketingChildren.length > 0) {
@@ -609,7 +614,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
       if (hasChildMenu('finance', 'finance.analysis')) {
         financeChildren.push({
           key: '/admin0755/finance/analysis',
-          label: <Link to="/admin0755/finance/analysis">{t('menu.finance_analysis', '财务数据分析')}</Link>,
+          label: <Link to="/admin0755/finance/analysis">{t('menu.finance_analysis')}</Link>,
         });
       }
       if (financeChildren.length > 0) {
@@ -832,7 +837,7 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: timeColor, fontSize: 12 }}>
                     <ScheduleOutlined />
-                    {new Date(item.created_at).toLocaleString(i18n.language === 'en' ? 'en-US' : (i18n.language === 'vi' ? 'vi-VN' : 'zh-CN'), {
+                    {new Date(item.created_at).toLocaleString(toDisplayLocale(i18n.language), {
                       year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
                     })}
                   </div>
@@ -929,7 +934,21 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                     ? 'opacity 0.1s ease'
                     : 'opacity 0.18s ease 0.12s',
                   pointerEvents: collapsed ? 'none' : 'auto',
+                  ...(logoTitleHref ? { cursor: 'pointer', textDecoration: 'none', color: 'inherit' } : {}),
                 }}
+                {...(logoTitleHref
+                  ? {
+                      role: 'link',
+                      tabIndex: 0,
+                      onClick: goLogoTitle,
+                      onKeyDown: (e: React.KeyboardEvent) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          goLogoTitle();
+                        }
+                      },
+                    }
+                  : {})}
               >
                 {siteLogo ? (
                   <img src={siteLogo} alt="logo" style={{ width: 20, height: 20, objectFit: 'contain', flexShrink: 0 }} />
@@ -968,7 +987,21 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                       ? 'opacity 0.18s ease 0.12s'
                       : 'opacity 0.1s ease',
                     pointerEvents: collapsed ? 'auto' : 'none',
+                    ...(logoTitleHref ? { cursor: 'pointer' } : {}),
                   }}
+                  {...(logoTitleHref
+                    ? {
+                        role: 'link',
+                        tabIndex: 0,
+                        onClick: goLogoTitle,
+                        onKeyDown: (e: React.KeyboardEvent) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            goLogoTitle();
+                          }
+                        },
+                      }
+                    : {})}
                 >
                   {siteLogo ? (
                     <img src={siteLogo} alt="logo" style={{ width: 24, height: 24, objectFit: 'contain' }} />
@@ -1020,9 +1053,9 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                   icon={<InfoCircleOutlined style={{ fontSize: '18px' }} />}
                   style={{ color: themeMode === 'light' ? 'rgba(0,0,0,0.65)' : 'rgba(255,255,255,0.65)', width: '100%', display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'flex-start' }}
                   onClick={showSystemAbout}
-                  title={`${t('menu.system_about')}${settings?.is_open_source ? '（开源版）' : '（商业版）'}`}
+                  title={`${t('menu.system_about')}${settings?.is_open_source ? t('menu.edition_oss') : t('menu.edition_commercial')}`}
                 >
-                  {(!collapsed) && <span style={{ marginLeft: 8 }}>{t('menu.system_about')}{settings?.is_open_source ? '（开源版）' : '（商业版）'}</span>}
+                  {(!collapsed) && <span style={{ marginLeft: 8 }}>{t('menu.system_about')}{settings?.is_open_source ? t('menu.edition_oss') : t('menu.edition_commercial')}</span>}
                 </Button>
               </div>
             )}
@@ -1086,7 +1119,13 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
                     overflow: 'hidden',
                     cursor: 'pointer'
                   }}
-                  onClick={() => navigate('/dashboard')}
+                  onClick={() => {
+                    if (logoTitleHref) {
+                      goLogoTitle();
+                    } else {
+                      navigate('/dashboard');
+                    }
+                  }}
                 >
                   {siteLogo ? (
                     <img src={siteLogo} alt="logo" style={{ width: 18, height: 18, objectFit: 'contain', flexShrink: 0 }} />
@@ -1301,7 +1340,9 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
             </Space>
 
           </Header>
-          <Content style={{
+          <Content
+            ref={contentRef}
+            style={{
             margin: screens.xs ? '0 8px 8px' : '0 12px 12px',
             // 顶栏浮层 + 原上边距/内边距，滚动时内容穿过毛玻璃
             padding: screens.xs ? 12 : 16,
@@ -1312,8 +1353,28 @@ const DashboardLayout: React.FC<DashboardLayoutProps> = ({ isUserEnd = false }) 
             overflow: 'auto',
             flex: 1,
             height: '100%',
+            display: 'flex',
+            flexDirection: 'column',
           }}>
-            <Outlet />
+            <div style={{ flex: '1 0 auto', width: '100%', minWidth: 0 }}>
+              <Outlet context={{ announcements }} />
+            </div>
+            {site?.copyright && (
+              <div
+                style={{
+                  flexShrink: 0,
+                  paddingTop: screens.xs ? 16 : 24,
+                  paddingBottom: screens.xs ? 4 : 8,
+                  textAlign: 'center',
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                  color: isLight ? 'rgba(0, 0, 0, 0.45)' : 'rgba(255, 255, 255, 0.35)',
+                  userSelect: 'none',
+                }}
+              >
+                {site.copyright}
+              </div>
+            )}
           </Content>
           {screens.xs && !collapsed && (
             <div

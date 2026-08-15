@@ -63,7 +63,7 @@ const EmailNotification: React.FC = () => {
         <Form.Item label={t('settings.smtp_user')} name="username" rules={[{ required: true }]}><Input placeholder="user@gmail.com" /></Form.Item>
         <Form.Item label={t('settings.smtp_pass')} name="password"><Input.Password placeholder="留空保持不变" /></Form.Item>
         <Form.Item label={t('settings.from_address')} name="from_address" rules={[{ required: true }]}><Input placeholder="noreply@tokensbyte.com" /></Form.Item>
-        <Form.Item label={t('settings.from_name')} name="from_name" rules={[{ required: true }]}><Input placeholder="TokensByte" /></Form.Item>
+        <Form.Item label={t('settings.from_name')} name="from_name" rules={[{ required: true }]}><Input placeholder="Tkeapi" /></Form.Item>
 
         <Space style={{ marginBottom: 24 }}>
           <Button type="primary" onClick={handleSave} loading={loading}>{t('common.save')}</Button>

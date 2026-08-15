@@ -51,6 +51,7 @@ export const PortalAboutManagerPro = loadPluginComponent('SitePortalPro/PortalAb
 export const PortalContactManagerPro = loadPluginComponent('SitePortalPro/PortalContactManagerPro.tsx');
 export const HappyHorseManager = loadPluginComponent('HappyHorse/HappyHorseManager.tsx');
 export const DocsManager = loadPluginComponent('DocsApi/DocsManager.tsx');
+export const HaLogs = loadPluginComponent('HighAvailability/HaLogs.tsx');
 
 // User-facing plugin pages (all under pages/Plugins/)
 export const Playground = loadPluginComponent('Playground/Playground.tsx');

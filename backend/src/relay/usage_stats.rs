@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 /// 归档表 `stat_date` 使用**站点默认 timedisplay** 分桶（全站统一日历）。
 async fn archive_timezone(state: &Arc<AppState>) -> Tz {
-    let (tz_name, _) = crate::relay::get_cached_config(state).await;
+    let tz_name = crate::relay::relay_settings::get_cached_site_timezone(&state.db).await;
     crate::time_system::parse_timedisplay(&tz_name)
 }
 
@@ -24,39 +24,36 @@ fn local_day_range_rfc3339(day: NaiveDate, tz: Tz) -> (String, String) {
 }
 
 /// 日聚合 upsert 模板（`?` 占位）。按日批次调用，避免周扫放大。
-fn stats_upsert_sql_template(tz_sql: &str) -> String {
-    format!(
-        "INSERT INTO usage_daily_stats (
-            stat_date, user_id, model, token_id, channel_id, action_type,
-            total_requests, total_tokens, total_cost, total_pre_deduct_gift, success_count, fail_count
-        )
-        SELECT
-            CAST(created_at AT TIME ZONE '{tz}' AS DATE),
-            user_id,
-            model,
-            COALESCE(token_id, -1),
-            COALESCE(channel_id, -1),
-            COALESCE(action_type, ''),
-            COUNT(*),
-            SUM(prompt_tokens + completion_tokens),
-            SUM(cost),
-            SUM(pre_deduct_gift),
-            COUNT(*) FILTER (WHERE status_code >= 200 AND status_code < 400),
-            COUNT(*) FILTER (WHERE status_code < 200 OR status_code >= 400)
-        FROM logs
-        WHERE created_at >= ?::timestamptz AND created_at < ?::timestamptz
-          AND is_completed = 1
-        GROUP BY 1, 2, 3, 4, 5, 6
-        ON CONFLICT (stat_date, user_id, model, token_id, channel_id, action_type)
-        DO UPDATE SET
-            total_requests = EXCLUDED.total_requests,
-            total_tokens = EXCLUDED.total_tokens,
-            total_cost = EXCLUDED.total_cost,
-            total_pre_deduct_gift = EXCLUDED.total_pre_deduct_gift,
-            success_count = EXCLUDED.success_count,
-            fail_count = EXCLUDED.fail_count",
-        tz = tz_sql
+fn stats_upsert_sql_template() -> String {
+    "INSERT INTO usage_daily_stats (
+        stat_date, user_id, model, token_id, channel_id, action_type,
+        total_requests, total_tokens, total_cost, total_pre_deduct_gift, success_count, fail_count
     )
+    SELECT
+        ?::DATE,
+        user_id,
+        model,
+        COALESCE(token_id, -1),
+        COALESCE(channel_id, -1),
+        COALESCE(action_type, ''),
+        COUNT(*),
+        SUM(prompt_tokens + completion_tokens),
+        SUM(cost),
+        SUM(pre_deduct_gift),
+        COUNT(*) FILTER (WHERE status_code >= 200 AND status_code < 400),
+        COUNT(*) FILTER (WHERE status_code < 200 OR status_code >= 400)
+    FROM logs
+    WHERE created_at >= ?::timestamptz AND created_at < ?::timestamptz
+      AND is_completed = 1
+    GROUP BY 1, 2, 3, 4, 5, 6
+    ON CONFLICT (stat_date, user_id, model, token_id, channel_id, action_type)
+    DO UPDATE SET
+        total_requests = EXCLUDED.total_requests,
+        total_tokens = EXCLUDED.total_tokens,
+        total_cost = EXCLUDED.total_cost,
+        total_pre_deduct_gift = EXCLUDED.total_pre_deduct_gift,
+        success_count = EXCLUDED.success_count,
+        fail_count = EXCLUDED.fail_count".to_string()
 }
 
 /// 按本地自然日推进；失败即中止；日间短暂让出连接池。
@@ -79,9 +76,7 @@ async fn perform_batch_sync(
     }
 
     let archive_tz = archive_timezone(state).await;
-    let sql = state.db.format_query(&stats_upsert_sql_template(
-        &crate::api::date_helper::sql_safe_tz_name(archive_tz),
-    ));
+    let sql = state.db.format_query(&stats_upsert_sql_template());
 
     tracing::info!(
         "[{}] 开始按日分批数据同步: {:?} 至 {:?} (archive_tz={})",
@@ -95,6 +90,7 @@ async fn perform_batch_sync(
     while current_day < end {
         let (start_str, end_str) = local_day_range_rfc3339(current_day, archive_tz);
         match sqlx::query(&sql)
+            .bind(current_day)
             .bind(&start_str)
             .bind(&end_str)
             .execute(&state.db.pool)
@@ -126,9 +122,56 @@ async fn perform_batch_sync(
 
 static LAST_SYNC_DATE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+#[inline]
+fn local_ymd_num(local: chrono::DateTime<Tz>) -> u32 {
+    use chrono::Datelike;
+    (local.year() as u32) * 10000 + (local.month() as u32) * 100 + (local.day() as u32)
+}
+
+/// 睡到站点时区下一次 00:00 再跑增量同步；当日 0 点窗内失败则 5 分钟重试，避免全天空转。
+pub async fn run_daily_stats_loop(
+    state: Arc<AppState>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    use chrono::{Duration, Timelike};
+
+    loop {
+        let _ = sync_daily_stats(&state).await;
+
+        let archive_tz = archive_timezone(&state).await;
+        let local_now = chrono::Utc::now().with_timezone(&archive_tz);
+        let today_num = local_ymd_num(local_now);
+        let retry_in_window = local_now.hour() == 0
+            && LAST_SYNC_DATE.load(std::sync::atomic::Ordering::Relaxed) != today_num;
+
+        let wait = if retry_in_window {
+            std::time::Duration::from_secs(300)
+        } else {
+            let next_naive = (local_now.date_naive() + Duration::days(1))
+                .and_hms_opt(0, 0, 0)
+                .unwrap();
+            match next_naive.and_local_timezone(archive_tz).single() {
+                Some(next_local) => (next_local.with_timezone(&chrono::Utc) - chrono::Utc::now())
+                    .to_std()
+                    .unwrap_or(std::time::Duration::from_secs(60))
+                    .max(std::time::Duration::from_secs(1)),
+                None => std::time::Duration::from_secs(3600),
+            }
+        };
+
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = shutdown_rx.changed() => {
+                tracing::info!("[CronTask] DailyStatsSync 定时任务已优雅关闭退出");
+                return;
+            }
+        }
+    }
+}
+
 /// 定时增量更新最近 3 天（站点 timedisplay 本地日切后首小时）
 pub async fn sync_daily_stats(state: &Arc<AppState>) -> AppResult<()> {
-    use chrono::{Datelike, Duration, Timelike};
+    use chrono::{Duration, Timelike};
 
     let archive_tz = archive_timezone(state).await;
     let local_now = chrono::Utc::now().with_timezone(&archive_tz);
@@ -136,9 +179,7 @@ pub async fn sync_daily_stats(state: &Arc<AppState>) -> AppResult<()> {
         return Ok(());
     }
 
-    let today_date_num = (local_now.year() as u32) * 10000
-        + (local_now.month() as u32) * 100
-        + (local_now.day() as u32);
+    let today_date_num = local_ymd_num(local_now);
     if LAST_SYNC_DATE.load(std::sync::atomic::Ordering::Relaxed) == today_date_num {
         return Ok(());
     }
@@ -289,7 +330,8 @@ pub async fn query_model_stats_by_slices(
 
     for r_slice in slices.realtime_slices() {
         let mut sql = String::from(
-            "SELECT model, SUM(cost) as cost, SUM(prompt_tokens + completion_tokens) as tokens, \
+            "SELECT model, SUM(cost) as cost, \
+             (COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0))::bigint as tokens, \
              COUNT(*) as count FROM logs WHERE ",
         );
         let mut binds = Vec::new();

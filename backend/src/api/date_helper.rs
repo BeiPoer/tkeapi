@@ -223,16 +223,8 @@ pub async fn resolve_user_timezone(
     user_id: &str,
     header_tz: &str,
 ) -> Result<chrono_tz::Tz, sqlx::Error> {
-    let site_settings_val: Option<String> = sqlx::query_scalar(
-        &db.format_query("SELECT value FROM settings WHERE key = 'site_settings'"),
-    )
-    .fetch_optional(&db.pool)
-    .await?;
-
-    let default_site_tz = site_settings_val
-        .and_then(|v| serde_json::from_str::<crate::models::SiteSettings>(&v).ok())
-        .map(|s| s.default_timezone)
-        .unwrap_or_else(|| crate::time_system::DEFAULT_TIMEDISPLAY.to_string());
+    let default_site_tz =
+        crate::relay::relay_settings::get_cached_site_timezone(db).await;
 
     let user_tz: Option<String> = if user_id.is_empty() {
         None
@@ -252,7 +244,7 @@ pub async fn resolve_user_timezone(
     Ok(crate::time_system::resolve_timedisplay(
         header,
         user_tz.as_deref(),
-        Some(default_site_tz.as_str()),
+        Some(default_site_tz.as_ref()),
     ))
 }
 
@@ -330,6 +322,16 @@ impl QueryTimeSlice {
             });
         }
         list
+    }
+
+    /// 去掉今日 realtime，保留归档天与首尾碎片（避免今日 logs 被扫两遍）。
+    pub fn excluding_today(&self) -> Self {
+        Self {
+            has_today: false,
+            today_start_ts: None,
+            today_end_ts: None,
+            ..self.clone()
+        }
     }
 
     /// 自动生成历史归档表检索的时间范围 SQL 条件片段

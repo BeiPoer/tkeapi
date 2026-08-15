@@ -51,6 +51,19 @@ export function shouldBlockTokenCreate(
   return !isBindSatisfied(reg, user);
 }
 
+export function tokenBindBlockI18nKey(reg?: RegistrationSettings | null): string {
+  const needMobile = !!reg?.require_bind_mobile;
+  const needEmail = !!reg?.require_bind_email;
+  if (needMobile && needEmail) {
+    return reg?.bind_enforcement === 'any'
+      ? 'tokens.bind_need_mobile_or_email'
+      : 'tokens.bind_need_mobile_and_email';
+  }
+  if (needMobile) return 'tokens.bind_need_mobile';
+  if (needEmail) return 'tokens.bind_need_email';
+  return 'tokens.bind_need_account';
+}
+
 export function tokenBindBlockMessage(reg?: RegistrationSettings | null): string {
   const needMobile = !!reg?.require_bind_mobile;
   const needEmail = !!reg?.require_bind_email;

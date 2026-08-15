@@ -280,6 +280,8 @@ const BillingRules: React.FC = () => {
   const [filterPricingType, setFilterPricingType] = useState('all');
   const [searchText, setSearchText] = useState('');
   const [loading, setLoading] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(15);
   const [isModalVisible, setIsModalVisible] = useState(false);
   const [editingItem, setEditingItem] = useState<BillingRuleData | null>(null);
   const [billingType, setBillingType] = useState('tokens');
@@ -302,6 +304,10 @@ const BillingRules: React.FC = () => {
   const [filterProvider, setFilterProvider] = useState<number | null>(null);
   const [filterTypeSelect, setFilterTypeSelect] = useState<number | null>(null);
   const tableContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filterType, filterPricingType, searchText, filterProvider, filterTypeSelect]);
 
   const fetchClassifications = async () => {
     try {
@@ -1031,6 +1037,21 @@ const BillingRules: React.FC = () => {
     return true;
   });
 
+  const paginationConfig = {
+    current: currentPage,
+    pageSize: pageSize,
+    showSizeChanger: true,
+    pageSizeOptions: ['10', '15', '20', '50', '100'],
+    showTotal: (total: number) => `共 ${total} 条`,
+    showQuickJumper: true,
+    onChange: (page: number, newPageSize: number) => {
+      setCurrentPage(page);
+      if (newPageSize !== pageSize) {
+        setPageSize(newPageSize);
+      }
+    },
+  };
+
   return (
     <>
       {!isModalVisible && (
@@ -1111,7 +1132,7 @@ const BillingRules: React.FC = () => {
               dataSource={filteredItems}
               loading={loading}
               rowKey="id"
-              pagination={{ pageSize: 15 }}
+              pagination={paginationConfig}
               renderCard={(record: any) => {
                 const colors: Record<string, string> = { tokens: 'cyan', requests: 'orange', duration: 'purple' };
                 return (
@@ -1151,7 +1172,7 @@ const BillingRules: React.FC = () => {
                 columns={columns}
                 rowKey="id"
                 loading={loading}
-                pagination={{ pageSize: 15 }}
+                pagination={paginationConfig}
                 size="middle"
                 scroll={{ x: 'max-content' }}
               />

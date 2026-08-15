@@ -9,7 +9,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import ModelSelector from '../../components/ModelSelector';
 import { Table, Button, Space, Tag, Modal, Form, Input, InputNumber, message, Popconfirm, Card, Typography, Select, Row, Col, Switch, Grid, Segmented, Tooltip, Divider, Alert, List, Progress, Drawer, Checkbox, Spin } from 'antd';
 import MobileCardList, { MobileCard, CardRow, CardActions } from '../../components/MobileCardList';
-import { PlusOutlined, EditOutlined, DeleteOutlined, SyncOutlined, ArrowLeftOutlined, ArrowRightOutlined, CloseOutlined, UnorderedListOutlined, AppstoreOutlined, PlayCircleOutlined, SearchOutlined, ApartmentOutlined, CloudServerOutlined, SettingOutlined, ThunderboltOutlined, ReloadOutlined, GlobalOutlined, ClearOutlined, StopOutlined, ExperimentOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, DeleteOutlined, SyncOutlined, ArrowLeftOutlined, ArrowRightOutlined, CloseOutlined, UnorderedListOutlined, AppstoreOutlined, PlayCircleOutlined, SearchOutlined, ApartmentOutlined, CloudServerOutlined, SettingOutlined, ThunderboltOutlined, ReloadOutlined, GlobalOutlined, ClearOutlined, StopOutlined, ExperimentOutlined, VideoCameraOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useLocation } from 'react-router-dom';
 import request from '../../utils/request';
@@ -32,6 +32,110 @@ type HHPluginModule = any;
 const { Title, Text } = Typography;
 const { Option } = Select;
 const { useBreakpoint } = Grid;
+
+/** 视频/图片常用分辨率档（优先按模型类型，其次渠道分类） */
+const VIDEO_RES_PRESETS = ['480p', '720p', '1080p', '2k', '4k'] as const;
+const IMAGE_RES_PRESETS = ['1k', '2k', '4k'] as const;
+
+/** 与后端 normalize_resolution_label 对齐，保证存库 key 能命中请求分辨率 */
+function normalizeResKey(raw: string): string {
+  let res = raw.trim().toLowerCase().replace(/\*/g, 'x');
+  if (res && /^[0-9]+$/.test(res)) res += 'p';
+  return res;
+}
+
+type ResModelMapping = Record<string, Record<string, Record<string, string>>>;
+
+const isFilled = (v: unknown) => !!v && String(v).trim().length > 0;
+const countFilled = (obj?: Record<string, unknown> | null) =>
+  Object.values(obj || {}).filter(isFilled).length;
+
+const COMFYUI_DISPATCH_DEFAULT = 'priority_weight';
+
+function parseComfyuiServerIds(
+  cfg: Record<string, any> | undefined,
+  workflows: { id: number; server_id?: number }[] = [],
+): number[] {
+  const raw = Array.isArray(cfg?.comfyui_server_ids) ? cfg!.comfyui_server_ids : [];
+  const ids: number[] = [];
+  for (const v of raw) {
+    const id = Number(v);
+    if (id > 0 && !ids.includes(id)) ids.push(id);
+  }
+  if (ids.length) return ids;
+  const sid = cfg?.comfyui_server_id
+    ?? workflows.find((w) => w.id === cfg?.comfyui_workflow_id)?.server_id;
+  const n = Number(sid);
+  return n > 0 ? [n] : [];
+}
+
+/** 按 valid 剪枝 Record 顶层 key；无变化时返回原引用 */
+function pruneRecordKeys<T>(prev: Record<string, T>, valid: Set<string>): Record<string, T> {
+  let changed = false;
+  const next = { ...prev };
+  for (const k of Object.keys(next)) {
+    if (!valid.has(k)) {
+      delete next[k];
+      changed = true;
+    }
+  }
+  return changed ? next : prev;
+}
+
+/** 设置/删除某模型某 scope 的分辨率映射表 */
+function patchResScope(
+  prev: ResModelMapping,
+  modelId: string,
+  scope: string,
+  map: Record<string, string> | null,
+): ResModelMapping {
+  const scopes = { ...(prev[modelId] || {}) };
+  if (!map || Object.keys(map).length === 0) delete scopes[scope];
+  else scopes[scope] = map;
+  if (Object.keys(scopes).length === 0) {
+    const next = { ...prev };
+    delete next[modelId];
+    return next;
+  }
+  return { ...prev, [modelId]: scopes };
+}
+
+/** 读入/保存共用：规范化分辨率 key、去掉空值；可选只保留仍绑定的子渠 */
+function cleanResModelMapping(
+  raw: ResModelMapping | Record<string, any> | null | undefined,
+  allowedSubIds?: number[],
+): ResModelMapping {
+  const cleaned: ResModelMapping = {};
+  for (const [modelId, scopes] of Object.entries(raw || {})) {
+    const validScopes: Record<string, Record<string, string>> = {};
+    for (const [scope, resMap] of Object.entries((scopes || {}) as Record<string, Record<string, string>>)) {
+      if (scope !== 'default' && allowedSubIds && !allowedSubIds.includes(Number(scope))) continue;
+      const validRes: Record<string, string> = {};
+      for (const [res, alias] of Object.entries(resMap || {})) {
+        const key = normalizeResKey(String(res || ''));
+        if (key && isFilled(alias)) validRes[key] = String(alias).trim();
+      }
+      if (Object.keys(validRes).length > 0) validScopes[scope] = validRes;
+    }
+    if (Object.keys(validScopes).length > 0) cleaned[modelId] = validScopes;
+  }
+  return cleaned;
+}
+
+/** 按模型类型优先选分辨率档（其次名称/id，最后渠道分类）；图片→1k…，视频→480p… */
+function resPresetsForHint(...hints: Array<string | null | undefined>): string[] {
+  for (const h of hints) {
+    const n = (h || '').toLowerCase();
+    if (!n) continue;
+    if (/视|video|seedance|kling|runway|luma|minimax.?video/.test(n)) return [...VIDEO_RES_PRESETS];
+    if (/图|image|dall|flux|midjourney|sdxl|gpt-image|imagen/.test(n)) return [...IMAGE_RES_PRESETS];
+  }
+  return [...IMAGE_RES_PRESETS];
+}
+
+function resScopeKey(modelId: string, scope: string) {
+  return `${modelId}:${scope}`;
+}
 
 const Channels: React.FC = () => {
   const { themeMode } = useThemeStore();
@@ -69,7 +173,11 @@ const Channels: React.FC = () => {
   const [modelMappingState, setModelMappingState] = useState<Record<string, string>>({});
   // 高可用渠道组：按子渠道独立别名映射 { model_id: { sub_channel_id: alias } }
   const [haModelMappingState, setHaModelMappingState] = useState<Record<string, Record<string, string>>>({});
+  // 分辨率映射：{ model_id: { "default"|subId: { "480p"|"1k": alias } } }
+  const [resModelMappingState, setResModelMappingState] = useState<ResModelMapping>({});
   const [expandedHaModels, setExpandedHaModels] = useState<string[]>([]);
+  // 展开的分辨率高级面板 key：`${modelId}:${scopeKey}`
+  const [expandedResScopes, setExpandedResScopes] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const screens = useBreakpoint();
   const [isExcludeMode, setIsExcludeMode] = useState(false);
@@ -78,8 +186,11 @@ const Channels: React.FC = () => {
   /** 选择上游渠道 / 高可用绑定物理上游：全部 | 激活 | 禁用 */
   const [upstreamStatusFilter, setUpstreamStatusFilter] = useState<'all' | 1 | 0>('all');
   const [enableQuota, setEnableQuota] = useState(false);
-  const [upstreamTab, setUpstreamTab] = useState<'preset' | 'volcengine_enhance'>('preset');
+  const [upstreamTab, setUpstreamTab] = useState<'preset' | 'volcengine_enhance' | 'comfyui'>('preset');
   const [volcengineEnhanceKeys, setVolcengineEnhanceKeys] = useState<any[]>([]);
+  const [comfyuiWorkflows, setComfyuiWorkflows] = useState<any[]>([]);
+  const [comfyuiServers, setComfyuiServers] = useState<any[]>([]);
+  const [comfyuiDispatchRules, setComfyuiDispatchRules] = useState<any[]>([]);
   /** 模型选择的桥接状态，同步 form store 与 ModelSelector 双向数据 */
   const [channelModelMids, setChannelModelMids] = useState<string[]>([]);
   const [selectedSubChannelAids, setSelectedSubChannelAids] = useState<any[]>([]);
@@ -101,7 +212,7 @@ const Channels: React.FC = () => {
 
   const [statusFilter, setStatusFilter] = useState<number | 'all'>(1);
   const [categoryFilter, setCategoryFilter] = useState<number | 'all' | 'unclassified'>('all');
-  const [typeFilter, setTypeFilter] = useState<'all' | 'default' | 'volcengine' | 'ha'>('all');
+  const [typeFilter, setTypeFilter] = useState<'all' | 'default' | 'volcengine' | 'ha' | 'comfyui'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [configObj, setConfigObj] = useState<Record<string, any>>({});
   const [categories, setCategories] = useState<ChannelCategory[]>([]);
@@ -117,9 +228,19 @@ const Channels: React.FC = () => {
     });
   };
 
-  const getChannelTypeKey = (c: Channel): 'default' | 'volcengine' | 'ha' => {
+  const clearComfyui = () => {
+    setUpstreamTab('preset');
+    form.setFieldsValue({ provider_type: 'custom' });
+    setConfigObj(prev => {
+      const { comfyui_workflow_id, comfyui_server_id, comfyui_server_ids, comfyui_dispatch, ...rest } = prev;
+      return rest;
+    });
+  };
+
+  const getChannelTypeKey = (c: Channel): 'default' | 'volcengine' | 'ha' | 'comfyui' => {
     if (c.provider_type === 'high_availability_group') return 'ha';
     if (c.provider_type === 'volcengine') return 'volcengine';
+    if (c.provider_type === 'comfyui') return 'comfyui';
     return 'default';
   };
 
@@ -234,11 +355,13 @@ const Channels: React.FC = () => {
       const plugins = resp.plugins || [];
       const activeMap: Record<string, boolean> = {};
       let hasVolcengineEnhance = false;
+      let hasComfyui = false;
 
       plugins.forEach(p => {
         if (p.is_enabled === 1) {
           activeMap[p.name] = true;
           if (p.name === 'volcengine_enhance') hasVolcengineEnhance = true;
+          if (p.name === 'comfyui_bridge') hasComfyui = true;
           // Plugin: happyhorse_router 数据加载（插件可移除）
           if (p.name === 'happyhorse_router') {
             setHappyHorseEnabled(true);
@@ -262,6 +385,17 @@ const Channels: React.FC = () => {
           if (r && r.keys) {
             setVolcengineEnhanceKeys(r.keys);
           }
+        }).catch(() => {});
+      }
+      if (hasComfyui) {
+        request.get('/plugins/comfyui_bridge/servers').then((r: any) => {
+          setComfyuiServers(r?.servers || []);
+        }).catch(() => {});
+        request.get('/plugins/comfyui_bridge/workflows').then((r: any) => {
+          setComfyuiWorkflows(r?.workflows || []);
+        }).catch(() => {});
+        request.get('/plugins/comfyui_bridge/dispatch-rules').then((r: any) => {
+          setComfyuiDispatchRules(r?.rules || []);
         }).catch(() => {});
       }
     } catch (e) {
@@ -361,7 +495,9 @@ const Channels: React.FC = () => {
     setActiveMappingInputs([]);
     setModelMappingState({});
     setHaModelMappingState({});
+    setResModelMappingState({});
     setExpandedHaModels([]);
+    setExpandedResScopes([]);
     setIsExcludeMode(false);
     setChannelModelMids([]);
     setActiveRightPanel('models');
@@ -427,6 +563,8 @@ const Channels: React.FC = () => {
       setUpstreamTab('preset');
     } else if (record.provider_type === 'volcengine') {
       setUpstreamTab('volcengine_enhance');
+    } else if (record.provider_type === 'comfyui') {
+      setUpstreamTab('comfyui');
     } else {
       setUpstreamTab('preset');
     }
@@ -446,12 +584,25 @@ const Channels: React.FC = () => {
     // 恢复高可用子渠道独立映射（必须在 parsedConfig 解析之后）
     const haMapping = parsedConfig?.ha_model_mapping || {};
     setHaModelMappingState(haMapping);
-    // 自动展开有映射值的模型
-    const expandedModels = Object.keys(haMapping).filter(k => {
-      const subMap = haMapping[k];
-      return subMap && Object.values(subMap).some((v: any) => v && String(v).trim());
-    });
-    setExpandedHaModels(expandedModels);
+    // 恢复分辨率映射（读入时规范化 key，与后端命中规则一致）
+    const resMapping = cleanResModelMapping(parsedConfig?.res_model_mapping);
+    setResModelMappingState(resMapping);
+    // 自动展开：有明文 HA 映射或分辨率映射的模型 + 已配置的分辨率高级面板
+    const resExpanded = Object.entries(resMapping).flatMap(([mid, scopes]) =>
+      Object.entries(scopes || {})
+        .filter(([, map]) => countFilled(map) > 0)
+        .map(([scope]) => resScopeKey(mid, scope)),
+    );
+    setExpandedResScopes(resExpanded);
+    setExpandedHaModels(Array.from(new Set([
+      ...Object.keys(haMapping).filter(k => countFilled(haMapping[k]) > 0),
+      ...Object.keys(resMapping).filter(mid =>
+        Object.values(resMapping[mid] || {}).some(m => countFilled(m) > 0),
+      ),
+    ])));
+    if (resExpanded.length > 0 || Object.values(haMapping).some(sub => countFilled(sub as Record<string, unknown>) > 0)) {
+      setShowMapping(true);
+    }
 
     setIsModalVisible(true);
 
@@ -537,19 +688,11 @@ const Channels: React.FC = () => {
       setActiveMappingInputs(prev => prev.filter(id => validModelIds.has(id)));
     }
 
-    // 同步清理 HA 子渠道映射中已移除的模型
-    setHaModelMappingState(prev => {
-      const cleaned = { ...prev };
-      let changed = false;
-      for (const key of Object.keys(cleaned)) {
-        if (!validModelIds.has(key)) {
-          delete cleaned[key];
-          changed = true;
-        }
-      }
-      return changed ? cleaned : prev;
-    });
+    // 同步清理 HA / 分辨率映射中已移除的模型
+    setHaModelMappingState(prev => pruneRecordKeys(prev, validModelIds));
+    setResModelMappingState(prev => pruneRecordKeys(prev, validModelIds));
     setExpandedHaModels(prev => prev.filter(id => validModelIds.has(id)));
+    setExpandedResScopes(prev => prev.filter(k => validModelIds.has(k.split(':')[0])));
   };
 
   const handleSave = async (values: any) => {
@@ -583,8 +726,8 @@ const Channels: React.FC = () => {
       return;
     }
 
-    if (!isHaGroup && values.provider_type !== 'volcengine' && !values.preset_id) {
-      message.error('请选择上游渠道（预设、卡池或增强凭证至少选其一）');
+    if (!isHaGroup && values.provider_type !== 'volcengine' && values.provider_type !== 'comfyui' && !values.preset_id) {
+      message.error('请选择上游渠道（预设、卡池或插件上游至少选其一）');
       setSubmitting(false);
       return;
     }
@@ -595,6 +738,21 @@ const Channels: React.FC = () => {
       setSubmitting(false);
       return;
     }
+
+    const comfyServerIds = parseComfyuiServerIds(configObj, comfyuiWorkflows);
+    if (values.provider_type === 'comfyui' && comfyServerIds.length === 0) {
+      message.error('请至少选择一个 ComfyUI 服务节点');
+      setSubmitting(false);
+      return;
+    }
+    const comfyServerId = comfyServerIds[0];
+    const comfyLegacyWf = comfyuiWorkflows.find((w) => w.id === configObj.comfyui_workflow_id);
+    const wfNodeIds: number[] = Array.isArray(comfyLegacyWf?.server_ids)
+      ? comfyLegacyWf.server_ids.map(Number).filter((id: number) => id > 0)
+      : (comfyLegacyWf?.server_id ? [Number(comfyLegacyWf.server_id)] : []);
+    const keepComfyWorkflowId = comfyLegacyWf && wfNodeIds.some((id: number) => comfyServerIds.includes(id))
+      ? comfyLegacyWf.id
+      : undefined;
 
     // Ensure only one upstream is used and others are explicitly cleared
     let { preset_id } = values;
@@ -622,8 +780,26 @@ const Channels: React.FC = () => {
       }
     }
 
+    // 构建分辨率映射（默认 + 仍绑定的子渠；只保留非空档位）
+    let finalResModelMapping: ResModelMapping | undefined;
+    if (showMapping) {
+      // HA：过滤已解绑子渠；非 HA：传 [] 仅保留 default
+      const cleaned = cleanResModelMapping(
+        resModelMappingState,
+        isHaGroup ? selectedSubChannelAids : [],
+      );
+      if (Object.keys(cleaned).length > 0) {
+        finalResModelMapping = cleaned;
+      }
+    }
+
     const finalConfig = isHaGroup 
-      ? { ...configObj, sub_channels: selectedSubChannelAids, ...(finalHaModelMapping ? { ha_model_mapping: finalHaModelMapping } : { ha_model_mapping: undefined }) }
+      ? {
+          ...configObj,
+          sub_channels: selectedSubChannelAids,
+          ...(finalHaModelMapping ? { ha_model_mapping: finalHaModelMapping } : { ha_model_mapping: undefined }),
+          ...(finalResModelMapping ? { res_model_mapping: finalResModelMapping } : { res_model_mapping: undefined }),
+        }
       : {
           tos_storage_enabled: configObj.tos_storage_enabled,
           tos_storage_days: configObj.tos_storage_days,
@@ -631,6 +807,15 @@ const Channels: React.FC = () => {
           ...(values.provider_type === 'volcengine' && configObj.volcengine_enhance_credential_id
             ? { volcengine_enhance_credential_id: configObj.volcengine_enhance_credential_id }
             : {}),
+          ...(values.provider_type === 'comfyui' && comfyServerId
+            ? {
+                comfyui_server_id: comfyServerId,
+                comfyui_server_ids: comfyServerIds,
+                comfyui_dispatch: configObj.comfyui_dispatch || COMFYUI_DISPATCH_DEFAULT,
+                ...(keepComfyWorkflowId ? { comfyui_workflow_id: keepComfyWorkflowId } : {}),
+              }
+            : {}),
+          ...(finalResModelMapping ? { res_model_mapping: finalResModelMapping } : {}),
         };
 
     const data = {
@@ -662,16 +847,16 @@ const Channels: React.FC = () => {
     delete data.level_select;
     data.models = reliableModels;
 
-    // 画质增强渠道不再存储 api_key/base_url，由后端通过 config 中的凭证 ID 实时查询
-    if (data.provider_type === 'volcengine') {
+    // 插件上游不落库密钥/基址，选渠时按凭证或服务节点实时覆盖
+    if (data.provider_type === 'volcengine' || data.provider_type === 'comfyui') {
       data.api_key = '';
       data.base_url = '';
     }
 
     try {
       if (editingChannel) {
-        // 密钥未修改（与加载时原值相同）或为空时不提交，防止覆盖（画质增强例外：必须清空）
-        if (data.provider_type !== 'volcengine' && (!data.api_key || data.api_key === (editingChannel as any).api_key)) {
+        // 密钥未修改（与加载时原值相同）或为空时不提交，防止覆盖（插件上游例外：必须清空）
+        if (data.provider_type !== 'volcengine' && data.provider_type !== 'comfyui' && (!data.api_key || data.api_key === (editingChannel as any).api_key)) {
           delete data.api_key;
         }
         await request.put(`/channels/${editingChannel.id}`, data);
@@ -723,14 +908,37 @@ const Channels: React.FC = () => {
     };
   };
 
+  const resolveComfyuiUpstream = (record: Channel) => {
+    const cfg = parseChannelConfig(record);
+    const ids = parseComfyuiServerIds(cfg, comfyuiWorkflows);
+    if (ids.length > 1) {
+      const names = ids.map((id) => comfyuiServers.find((s) => s.id === id)?.name || `#${id}`);
+      const dispatch = comfyuiDispatchRules.find((r) => r.code === cfg.comfyui_dispatch)?.name
+        || cfg.comfyui_dispatch
+        || '权重优先';
+      return { name: `${ids.length} 个节点 · ${dispatch}`, baseUrl: names.join('、') };
+    }
+    const sid = ids[0];
+    const server = comfyuiServers.find((s) => s.id === sid);
+    if (server) {
+      return { name: server.name, baseUrl: server.base_url || '' };
+    }
+    return {
+      name: sid ? `节点 #${sid}` : '未绑定服务节点',
+      baseUrl: '',
+    };
+  };
+
   const columns = [
     {
       title: '渠道分组名称',
       key: 'name_and_aid',
       render: (_: any, record: Channel) => (
-        <div style={{ display: 'flex', flexDirection: 'column' }}>
-          <Text strong style={{ fontSize: 14 }}>{record.name}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>AID: {record.group_aid || '-'}</Text>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 120 }}>
+          <Text strong style={{ fontSize: 13, lineHeight: 1.25 }}>{record.name}</Text>
+          <Text type="secondary" style={{ fontSize: 11, lineHeight: 1.2, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', opacity: 0.75 }}>
+            AID: {record.group_aid || '-'}
+          </Text>
         </div>
       ),
     },
@@ -738,10 +946,11 @@ const Channels: React.FC = () => {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
+      width: 75,
       render: (status: number) => (
-        <Space size={6} style={{ color: status === 1 ? '#52c41a' : '#ff4d4f' }}>
+        <Space size={5} style={{ color: status === 1 ? '#52c41a' : '#ff4d4f' }}>
           <div style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: status === 1 ? '#52c41a' : '#ff4d4f' }} />
-          <span style={{ fontSize: 13 }}>{status === 1 ? '启用' : '禁用'}</span>
+          <span style={{ fontSize: 12 }}>{status === 1 ? '启用' : '禁用'}</span>
         </Space>
       ),
     },
@@ -749,8 +958,9 @@ const Channels: React.FC = () => {
       title: '优先级',
       dataIndex: 'priority',
       key: 'priority',
+      width: 75,
       sorter: (a: Channel, b: Channel) => (a.priority || 0) - (b.priority || 0),
-      render: (priority: number) => <Text type="secondary" style={{ fontSize: 13 }}>{priority || 0}</Text>,
+      render: (priority: number) => <Text type="secondary" style={{ fontSize: 12 }}>{priority || 0}</Text>,
     },
     {
       title: '支持等级',
@@ -762,24 +972,41 @@ const Channels: React.FC = () => {
           const lv = availableUserLevels.find((l: any) => l.id.toString() === idStr || l.group_key === idStr);
           return lv ? lv.name : idStr;
         };
+        const tagStyle: React.CSSProperties = { borderRadius: 4, margin: 0, padding: '0 5px', fontSize: 11, height: 19, lineHeight: '17px' };
         if (excludeGroups && excludeGroups.length > 0) {
+          const visible = excludeGroups.slice(0, 2);
+          const hiddenCount = excludeGroups.length - visible.length;
+          const allNames = excludeGroups.map(resolveName).join(', ');
           return (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
-              <Tag color="orange" style={{ borderRadius: 4, margin: 0, fontSize: 11 }}>排除模式</Tag>
-              {excludeGroups.map((id: string) => (
-                <Tag key={id} color="red" style={{ borderRadius: 4, margin: 0, fontSize: 11, opacity: 0.85 }}>{resolveName(id)}</Tag>
+            <div style={{ display: 'flex', flexWrap: 'nowrap', gap: 3, alignItems: 'center' }}>
+              <Tag color="orange" style={tagStyle}>排除</Tag>
+              {visible.map((id: string) => (
+                <Tag key={id} color="red" style={{ ...tagStyle, opacity: 0.85 }}>{resolveName(id)}</Tag>
               ))}
+              {hiddenCount > 0 && (
+                <Tooltip title={`排除等级: ${allNames}`}>
+                  <Tag style={{ ...tagStyle, cursor: 'pointer' }}>+{hiddenCount}</Tag>
+                </Tooltip>
+              )}
             </div>
           );
         }
         if (!groups || groups.length === 0) {
-          return <Tag color="green" style={{ borderRadius: 4, margin: 0, fontSize: 11 }}>全部等级</Tag>;
+          return <Tag color="green" style={tagStyle}>全部等级</Tag>;
         }
+        const visible = groups.slice(0, 2);
+        const hiddenCount = groups.length - visible.length;
+        const allNames = groups.map(resolveName).join(', ');
         return (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-            {groups.map((id: string) => (
-              <Tag key={id} color="blue" style={{ borderRadius: 4, margin: 0, fontSize: 11 }}>{resolveName(id)}</Tag>
+          <div style={{ display: 'flex', flexWrap: 'nowrap', gap: 3, alignItems: 'center' }}>
+            {visible.map((id: string) => (
+              <Tag key={id} color="blue" style={tagStyle}>{resolveName(id)}</Tag>
             ))}
+            {hiddenCount > 0 && (
+              <Tooltip title={`允许等级: ${allNames}`}>
+                <Tag style={{ ...tagStyle, cursor: 'pointer' }}>+{hiddenCount}</Tag>
+              </Tooltip>
+            )}
           </div>
         );
       },
@@ -787,7 +1014,7 @@ const Channels: React.FC = () => {
     {
       title: '消耗 / 额度',
       key: 'quota',
-      width: 188,
+      width: 140,
       render: (_: any, record: Channel) => {
         const used = record.quota_used || 0;
         const limit = record.quota_limit ?? -1;
@@ -804,6 +1031,7 @@ const Channels: React.FC = () => {
           weeklyLimit,
           monthlyUsed,
           monthlyLimit,
+          compact: true,
         });
       }
     },
@@ -811,27 +1039,48 @@ const Channels: React.FC = () => {
       title: '使用上游',
       key: 'upstream',
       render: (_: any, record: Channel) => {
+        const tagStyle: React.CSSProperties = { borderRadius: 4, margin: 0, padding: '0 4px', fontSize: 10, height: 18, lineHeight: '16px', flexShrink: 0 };
         if (record.provider_type === 'high_availability_group') {
           const parsed = parseChannelConfig(record);
           const subCount = parsed.sub_channels ? parsed.sub_channels.length : 0;
           return (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-              <Tag color={activePlugins['high_availability_channel'] ? 'purple' : 'red'} style={{ borderRadius: 4, margin: 0, fontSize: 11, width: 'fit-content' }}>
-                {activePlugins['high_availability_channel'] ? '高可用' : '高可用插件未开启'}
-              </Tag>
-              <Text strong style={{ fontSize: 13 }}>高可用虚拟渠道组</Text>
-              <Text type="secondary" style={{ fontSize: 11 }}>已绑定 {subCount} 个渠道</Text>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <Tag color={activePlugins['high_availability_channel'] ? 'purple' : 'red'} style={tagStyle}>
+                  {activePlugins['high_availability_channel'] ? '高可用' : '高可用未开启'}
+                </Tag>
+                <Text strong style={{ fontSize: 12, lineHeight: 1.25 }}>高可用虚拟渠道组</Text>
+              </div>
+              <Text type="secondary" style={{ fontSize: 11, lineHeight: 1.2 }}>已绑定 {subCount} 个渠道</Text>
             </div>
           );
         }
         if (record.provider_type === 'volcengine') {
           const { name, baseUrl } = resolveVolcEnhanceUpstream(record);
           return (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-              <Tag color="magenta" style={{ borderRadius: 4, margin: 0, fontSize: 11, width: 'fit-content' }}>画质增强</Tag>
-              <Text strong style={{ fontSize: 13 }}>{name}</Text>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 1, maxWidth: 260 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <Tag color="magenta" style={tagStyle}>画质增强</Tag>
+                <Text strong style={{ fontSize: 12, lineHeight: 1.25 }} ellipsis={{ tooltip: name }}>{name}</Text>
+              </div>
               {baseUrl ? (
-                <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: baseUrl }}>
+                <Text type="secondary" style={{ fontSize: 11, lineHeight: 1.2 }} ellipsis={{ tooltip: baseUrl }}>
+                  {baseUrl}
+                </Text>
+              ) : null}
+            </div>
+          );
+        }
+        if (record.provider_type === 'comfyui') {
+          const { name, baseUrl } = resolveComfyuiUpstream(record);
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 1, maxWidth: 260 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <Tag color="geekblue" style={tagStyle}>ComfyUI</Tag>
+                <Text strong style={{ fontSize: 12, lineHeight: 1.25 }} ellipsis={{ tooltip: name }}>{name}</Text>
+              </div>
+              {baseUrl ? (
+                <Text type="secondary" style={{ fontSize: 11, lineHeight: 1.2 }} ellipsis={{ tooltip: baseUrl }}>
                   {baseUrl}
                 </Text>
               ) : null}
@@ -842,19 +1091,19 @@ const Channels: React.FC = () => {
           const preset = presets.find(p => p.id === record.preset_id);
           const presetDisabled = preset && (preset.status ?? 1) !== 1;
           return (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-              <Space size={4}>
-                <Tag color="cyan" style={{ borderRadius: 4, margin: 0, fontSize: 11, width: 'fit-content' }}>预设渠道</Tag>
-                {presetDisabled && <Tag color="error" style={{ borderRadius: 4, margin: 0, fontSize: 11 }}>上游已禁用</Tag>}
-              </Space>
-              <Text strong style={{ fontSize: 13 }}>{preset ? preset.name : '未知预设'}</Text>
-              <Text type="secondary" style={{ fontSize: 11 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <Tag color="cyan" style={tagStyle}>预设渠道</Tag>
+                {presetDisabled && <Tag color="error" style={tagStyle}>已禁用</Tag>}
+                <Text strong style={{ fontSize: 12, lineHeight: 1.25 }}>{preset ? preset.name : '未知预设'}</Text>
+              </div>
+              <Text type="secondary" style={{ fontSize: 11, lineHeight: 1.2, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>
                 {preset?.yid ? `YID: ${preset.yid}` : `ID: ${record.preset_id}`}
               </Text>
             </div>
           );
         }
-        return <Text type="secondary">-</Text>;
+        return <Text type="secondary" style={{ fontSize: 12 }}>-</Text>;
       }
     },
     {
@@ -863,7 +1112,11 @@ const Channels: React.FC = () => {
       key: 'category_id',
       render: (categoryId: number | null) => {
         const name = resolveCategoryName(categoryId);
-        return name ? <Tag style={{ margin: 0 }}>{name}</Tag> : <Text type="secondary">-</Text>;
+        return name ? (
+          <Tag style={{ margin: 0, padding: '0 5px', fontSize: 11, height: 19, lineHeight: '17px', borderRadius: 4 }}>
+            {name}
+          </Tag>
+        ) : <Text type="secondary" style={{ fontSize: 12 }}>-</Text>;
       },
     },
     {
@@ -879,26 +1132,29 @@ const Channels: React.FC = () => {
         const time = t || record.created_at;
         if (!time) return <Text type="secondary">-</Text>;
         const d = new Date(time);
-        return <Text type="secondary" style={{ fontSize: 13 }}>{d.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</Text>;
+        return <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{d.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</Text>;
       },
     },
     {
       title: '页面排序',
       dataIndex: 'sort_order',
       key: 'sort_order',
+      width: 80,
       sorter: (a: Channel, b: Channel) => (a.sort_order || 0) - (b.sort_order || 0),
-      render: (sort_order: number) => <Text type="secondary" style={{ fontSize: 13 }}>{sort_order || 0}</Text>,
+      render: (sort_order: number) => <Text type="secondary" style={{ fontSize: 12 }}>{sort_order || 0}</Text>,
     },
     {
       title: '操作',
       key: 'actions',
       align: 'center' as const,
+      width: 140,
       render: (_: unknown, record: Channel) => (
-        <Space size={0} style={{ opacity: 0.8, justifyContent: 'center', width: '100%' }}>
+        <Space size={2} style={{ justifyContent: 'center', width: '100%' }}>
           <Tooltip title={record.status === 1 ? '点击禁用' : '点击启用'}>
             <Button
               type="text"
               size="small"
+              className="channel-table-action-btn"
               icon={record.status === 1
                 ? <PlayCircleOutlined style={{ color: '#52c41a' }} />
                 : <StopOutlined style={{ color: '#ff4d4f' }} />}
@@ -910,6 +1166,7 @@ const Channels: React.FC = () => {
               <Button
                 type="text"
                 size="small"
+                className="channel-table-action-btn"
                 icon={<ReloadOutlined style={{ color: '#1890ff' }} />}
                 onClick={() => handleResetMeltdown(record.id)}
                 loading={meltdownLoading[record.id]}
@@ -920,21 +1177,22 @@ const Channels: React.FC = () => {
             <Button
               type="text"
               size="small"
+              className="channel-table-action-btn"
               icon={<ExperimentOutlined />}
               onClick={() => handleTest(record)}
             />
           </Tooltip>
           <Tooltip title="清零额度">
             <Popconfirm title="确定清零该渠道的总/日/周/月已用额度吗？" onConfirm={() => handleResetQuota(record.id)}>
-              <Button type="text" size="small" icon={<ClearOutlined />} />
+              <Button type="text" size="small" className="channel-table-action-btn" icon={<ClearOutlined />} />
             </Popconfirm>
           </Tooltip>
           <Tooltip title="编辑">
-            <Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)} />
+            <Button type="text" size="small" className="channel-table-action-btn" icon={<EditOutlined />} onClick={() => handleEdit(record)} />
           </Tooltip>
           <Tooltip title="删除">
             <Popconfirm title={t('common.confirm_delete')} onConfirm={() => handleDelete(record.id)}>
-              <Button type="text" size="small" icon={<DeleteOutlined />} danger />
+              <Button type="text" size="small" className="channel-table-action-btn" icon={<DeleteOutlined />} danger />
             </Popconfirm>
           </Tooltip>
         </Space>
@@ -965,7 +1223,9 @@ const Channels: React.FC = () => {
     weeklyLimit: number;
     monthlyUsed: number;
     monthlyLimit: number;
+    compact?: boolean;
   }) => {
+    const compact = opts.compact ?? false;
     const fmt = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(6));
     const items = [
       { key: 'total', label: '总', used: opts.used, limit: opts.limit },
@@ -975,18 +1235,22 @@ const Channels: React.FC = () => {
     ];
     const hasAnyConfigured = items.some((item) => item.limit >= 0);
 
+    const slotWidth = compact ? 28 : 40;
+    const ringSize = compact ? 24 : 36;
+    const ringStroke = compact ? 5 : 10;
     const slotStyle: React.CSSProperties = {
-      width: 40,
+      width: slotWidth,
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'center',
-      gap: 2,
+      gap: compact ? 1 : 2,
       cursor: 'default',
     };
     const labelStyle: React.CSSProperties = {
-      fontSize: 10,
+      fontSize: compact ? 9 : 10,
       color: isLight ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.45)',
       lineHeight: 1,
+      transform: compact ? 'scale(0.92)' : undefined,
     };
 
     return (
@@ -994,11 +1258,11 @@ const Channels: React.FC = () => {
         className="channel-quota-rings"
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(4, 40px)',
-          gap: 4,
+          gridTemplateColumns: `repeat(4, ${slotWidth}px)`,
+          gap: compact ? 3 : 4,
           alignItems: 'center',
           justifyContent: 'start',
-          width: 172,
+          width: compact ? 122 : 172,
         }}
       >
         {items.map((item, index) => {
@@ -1009,7 +1273,7 @@ const Channels: React.FC = () => {
           if (!showRing) {
             return (
               <div key={item.key} style={{ ...slotStyle, visibility: 'hidden' }} aria-hidden>
-                <div style={{ width: 36, height: 36 }} />
+                <div style={{ width: ringSize, height: ringSize }} />
                 <span style={labelStyle}>{item.label}</span>
               </div>
             );
@@ -1029,14 +1293,14 @@ const Channels: React.FC = () => {
                 <Progress
                   type="circle"
                   percent={showUnlimited ? 100 : pct}
-                  size={36}
-                  strokeWidth={10}
+                  size={ringSize}
+                  strokeWidth={ringStroke}
                   strokeColor={stroke}
                   trailColor={isLight ? '#e4e4e7' : 'rgba(255,255,255,0.12)'}
                   format={() => (
                     <span
                       style={{
-                        fontSize: showUnlimited ? 11 : 10,
+                        fontSize: compact ? (showUnlimited ? 9 : 8) : (showUnlimited ? 11 : 10),
                         fontWeight: 600,
                         color: isLight ? 'rgba(0,0,0,0.72)' : 'rgba(255,255,255,0.88)',
                         lineHeight: 1,
@@ -1110,6 +1374,102 @@ const Channels: React.FC = () => {
         }
         .meltdown-pulse-dot {
           animation: meltdownPulse 1.5s ease-in-out infinite;
+        }
+        .channel-groups-table .ant-table,
+        .channel-groups-table .ant-table-container,
+        .channel-groups-table .ant-table-content,
+        .channel-groups-table table {
+          border-collapse: collapse !important;
+          border-spacing: 0 !important;
+        }
+        .channel-groups-table .ant-table-thead {
+          background: ${isLight ? '#f9fafb' : '#18181b'} !important;
+        }
+        .channel-groups-table .ant-table-thead > tr {
+          height: 28px !important;
+          background: ${isLight ? '#f9fafb' : '#18181b'} !important;
+        }
+        .channel-groups-table .ant-table-thead > tr > th,
+        .channel-groups-table .ant-table-thead > tr > th.ant-table-cell {
+          padding: 3px 8px !important;
+          height: 28px !important;
+          line-height: 20px !important;
+          font-size: 12px !important;
+          font-weight: 600 !important;
+          background: ${isLight ? '#f9fafb' : '#18181b'} !important;
+          border-bottom: 1px solid ${isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.08)'} !important;
+          color: ${isLight ? '#64748b' : '#a1a1aa'} !important;
+        }
+        .channel-groups-table .ant-table-thead .ant-table-column-sorters {
+          padding: 0 !important;
+          margin: 0 !important;
+          height: 20px !important;
+          display: inline-flex !important;
+          align-items: center !important;
+        }
+        .channel-groups-table .ant-table-thead .ant-table-column-title {
+          line-height: 20px !important;
+          font-size: 12px !important;
+          font-weight: 600 !important;
+        }
+        .channel-groups-table .ant-table-thead .ant-table-column-sorter {
+          margin-inline-start: 3px !important;
+          font-size: 9px !important;
+        }
+        .channel-groups-table .ant-table-thead > tr > th::before {
+          display: none !important;
+        }
+        .channel-groups-table .ant-table-tbody {
+          margin: 0 !important;
+          padding: 0 !important;
+        }
+        .channel-groups-table .ant-table-tbody > tr {
+          margin: 0 !important;
+          background: transparent !important;
+        }
+        .channel-groups-table .ant-table-tbody > tr > td {
+          padding: 4px 8px !important;
+          font-size: 12px !important;
+          border-bottom: 1px solid ${isLight ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.05)'} !important;
+          vertical-align: middle !important;
+          line-height: 1.3 !important;
+        }
+        .channel-groups-table .ant-table-tbody > tr:first-child > td {
+          border-top: none !important;
+        }
+        .channel-groups-table .ant-table-measure-row,
+        .channel-groups-table .ant-table-measure-row td,
+        .channel-groups-table .ant-table-measure-row th,
+        .channel-groups-table tr.ant-table-measure-row,
+        .channel-groups-table tr.ant-table-measure-row td,
+        .channel-groups-table tr.ant-table-measure-row th,
+        .channel-groups-table tr.ant-table-measure-row .ant-table-cell {
+          padding: 0 !important;
+          height: 0 !important;
+          font-size: 0 !important;
+          line-height: 0 !important;
+          border: none !important;
+          visibility: hidden !important;
+        }
+        .channel-groups-table .ant-table-tbody > tr:hover > td {
+          background: ${isLight ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.03)'} !important;
+        }
+        .channel-groups-table .ant-table-pagination.ant-pagination {
+          margin: 10px 0 0 0 !important;
+        }
+        .channel-table-action-btn {
+          width: 22px !important;
+          height: 22px !important;
+          min-width: 22px !important;
+          padding: 0 !important;
+          display: inline-flex !important;
+          align-items: center;
+          justify-content: center;
+          border-radius: 4px !important;
+          font-size: 12px !important;
+        }
+        .channel-table-action-btn:hover {
+          background: ${isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.08)'} !important;
         }
       `}</style>
       {!isModalVisible ? (
@@ -1217,14 +1577,16 @@ const Channels: React.FC = () => {
                 default: channels.filter(ch => getChannelTypeKey(ch) === 'default').length,
                 volcengine: channels.filter(ch => getChannelTypeKey(ch) === 'volcengine').length,
                 ha: channels.filter(ch => getChannelTypeKey(ch) === 'ha').length,
+                comfyui: channels.filter(ch => getChannelTypeKey(ch) === 'comfyui').length,
               };
               const typeOptions = (
                 [
                   { key: 'all' as const, label: '全部', count: channels.length },
                   { key: 'default' as const, label: '预设', count: typeCounts.default },
                   { key: 'volcengine' as const, label: '画质增强', count: typeCounts.volcengine },
+                  { key: 'comfyui' as const, label: 'ComfyUI', count: typeCounts.comfyui },
                   { key: 'ha' as const, label: '高可用', count: typeCounts.ha },
-                ] as { key: 'all' | 'default' | 'volcengine' | 'ha'; label: string; count: number }[]
+                ] as { key: 'all' | 'default' | 'volcengine' | 'ha' | 'comfyui'; label: string; count: number }[]
               ).filter((item) => item.key === 'all' || item.count > 0);
 
               if (typeOptions.length <= 1) return null;
@@ -1344,6 +1706,18 @@ const Channels: React.FC = () => {
                           return (
                             <Space size={4} wrap>
                               <Tag color="magenta" style={{ borderRadius: 4, margin: 0, fontSize: 10 }}>画质增强</Tag>
+                              <Text style={{ fontSize: 12 }}>
+                                {name}{baseUrl ? ` (${baseUrl})` : ''}
+                              </Text>
+                            </Space>
+                          );
+                        })()
+                      ) : record.provider_type === 'comfyui' ? (
+                        (() => {
+                          const { name, baseUrl } = resolveComfyuiUpstream(record);
+                          return (
+                            <Space size={4} wrap>
+                              <Tag color="geekblue" style={{ borderRadius: 4, margin: 0, fontSize: 10 }}>ComfyUI</Tag>
                               <Text style={{ fontSize: 12 }}>
                                 {name}{baseUrl ? ` (${baseUrl})` : ''}
                               </Text>
@@ -1489,6 +1863,7 @@ const Channels: React.FC = () => {
             />
           ) : viewMode === 'list' ? (
             <Table
+              className="channel-groups-table compact-table"
               size="small"
               dataSource={filteredChannels}
               columns={columns}
@@ -1560,6 +1935,13 @@ const Channels: React.FC = () => {
                   upstreamTag = (
                     <Tooltip title={<div style={{ whiteSpace: 'pre-wrap' }}>{baseUrl ? `画质增强: ${name}\n${baseUrl}` : `画质增强: ${name}`}</div>}>
                       <Tag color="magenta" style={{ margin: 0, padding: '0 5px', fontSize: 10, lineHeight: '18px', borderRadius: 4 }}>画质增强</Tag>
+                    </Tooltip>
+                  );
+                } else if (record.provider_type === 'comfyui') {
+                  const { name, baseUrl } = resolveComfyuiUpstream(record);
+                  upstreamTag = (
+                    <Tooltip title={<div style={{ whiteSpace: 'pre-wrap' }}>{baseUrl ? `ComfyUI: ${name}\n${baseUrl}` : `ComfyUI: ${name}`}</div>}>
+                      <Tag color="geekblue" style={{ margin: 0, padding: '0 5px', fontSize: 10, lineHeight: '18px', borderRadius: 4 }}>ComfyUI</Tag>
                     </Tooltip>
                   );
                 } else if (record.preset_id) {
@@ -1922,6 +2304,20 @@ const Channels: React.FC = () => {
                           const cred = volcengineEnhanceKeys.find(k => k.id === credId);
                           displayName = cred ? cred.name : '画质增强密钥';
                           displayDetail = cred ? `基址: ${cred.base_url || '-'}` : '';
+                        } else if (providerType === 'comfyui') {
+                          displayType = 'ComfyUI';
+                          const comfyIds = parseComfyuiServerIds(configObj, comfyuiWorkflows);
+                          const dispatchName = comfyuiDispatchRules.find((r) => r.code === (configObj.comfyui_dispatch || COMFYUI_DISPATCH_DEFAULT))?.name
+                            || '权重优先';
+                          if (comfyIds.length > 1) {
+                            displayName = `已选 ${comfyIds.length} 个服务节点`;
+                            displayDetail = dispatchName;
+                          } else {
+                            const sid = comfyIds[0];
+                            const server = comfyuiServers.find(s => s.id === sid);
+                            displayName = server ? server.name : (sid ? `节点 #${sid}` : '未选择服务节点');
+                            displayDetail = server?.base_url ? `基址: ${server.base_url}` : (sid ? dispatchName : '');
+                          }
                         }
 
                         return (
@@ -1950,7 +2346,9 @@ const Channels: React.FC = () => {
                                         ? 'purple'
                                         : providerType === 'volcengine'
                                           ? 'magenta'
-                                          : 'cyan'
+                                          : providerType === 'comfyui'
+                                            ? 'geekblue'
+                                            : 'cyan'
                                     }
                                     style={{ margin: 0, borderRadius: 4 }}
                                   >
@@ -1981,6 +2379,11 @@ const Channels: React.FC = () => {
                                           preset_id: null,
                                           provider_type: 'custom'
                                         });
+                                        setConfigObj(prev => {
+                                          const { volcengine_enhance_credential_id, comfyui_workflow_id, comfyui_server_id, comfyui_server_ids, comfyui_dispatch, ...rest } = prev;
+                                          return rest;
+                                        });
+                                        setUpstreamTab('preset');
                                       }}
                                     />
                                   </Space>
@@ -2037,6 +2440,62 @@ const Channels: React.FC = () => {
                                         </div>
                                       ))
                                     }
+                                  </div>
+                                )}
+                                {providerType === 'comfyui' && parseComfyuiServerIds(configObj, comfyuiWorkflows).length > 0 && (
+                                  <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4 }} onClick={(e) => e.stopPropagation()}>
+                                    {parseComfyuiServerIds(configObj, comfyuiWorkflows).map((id) => {
+                                      const s = comfyuiServers.find((x) => x.id === id);
+                                      return (
+                                        <div
+                                          key={id}
+                                          style={{
+                                            display: 'flex',
+                                            justifyContent: 'space-between',
+                                            alignItems: 'center',
+                                            padding: '4px 8px',
+                                            background: isLight ? 'rgba(0,0,0,0.015)' : 'rgba(255,255,255,0.015)',
+                                            borderRadius: 4,
+                                            border: isLight ? '1px dashed rgba(0,0,0,0.06)' : '1px dashed rgba(255,255,255,0.06)',
+                                            opacity: s && s.is_active !== 1 ? 0.75 : 1,
+                                          }}
+                                        >
+                                          <span style={{ fontSize: 11, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            {s?.name || `节点 #${id}`}
+                                          </span>
+                                          <Space size={4} style={{ flexShrink: 0, alignItems: 'center' }}>
+                                            <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '14px', height: 16, padding: '0 4px', borderRadius: 2 }}>优先级: {s?.priority ?? 0}</Tag>
+                                            <Tag color="cyan" style={{ margin: 0, fontSize: 10, lineHeight: '14px', height: 16, padding: '0 4px', borderRadius: 2 }}>权重: {s?.weight ?? 1}</Tag>
+                                            <Tooltip title="移除此节点">
+                                              <Button
+                                                type="text"
+                                                size="small"
+                                                danger
+                                                icon={<CloseOutlined style={{ fontSize: 10 }} />}
+                                                style={{ width: 20, height: 20, minWidth: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: 0 }}
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  const next = parseComfyuiServerIds(configObj, comfyuiWorkflows).filter((x) => x !== id);
+                                                  form.setFieldsValue({
+                                                    preset_id: null,
+                                                    provider_type: next.length ? 'comfyui' : 'custom',
+                                                  });
+                                                  setConfigObj(prev => {
+                                                    const { volcengine_enhance_credential_id, comfyui_workflow_id, comfyui_server_id, comfyui_server_ids, ...rest } = prev;
+                                                    return {
+                                                      ...rest,
+                                                      comfyui_server_ids: next,
+                                                      comfyui_server_id: next[0],
+                                                      comfyui_dispatch: prev.comfyui_dispatch || COMFYUI_DISPATCH_DEFAULT,
+                                                    };
+                                                  });
+                                                }}
+                                              />
+                                            </Tooltip>
+                                          </Space>
+                                        </div>
+                                      );
+                                    })}
                                   </div>
                                 )}
                               </>
@@ -2146,14 +2605,16 @@ const Channels: React.FC = () => {
                             const providerType = form.getFieldValue('provider_type');
                             const isHaMode = providerType === 'high_availability_group';
                             // 统计 HA 子渠道独立映射数量
-                            const haMappingCount = isHaMode ? Object.values(haModelMappingState).reduce((sum, subMap) => 
-                              sum + Object.values(subMap).filter(v => v && String(v).trim()).length, 0) : 0;
+                            const haMappingCount = isHaMode ? Object.values(haModelMappingState).reduce((sum, subMap) =>
+                              sum + countFilled(subMap), 0) : 0;
+                            const resMappingCount = Object.values(resModelMappingState).reduce((sum, scopes) =>
+                              sum + Object.values(scopes || {}).reduce((s, m) => s + countFilled(m), 0), 0);
                             return (
                               <div onClick={() => setActiveRightPanel('mapping')} style={{ padding: '12px 16px', borderRadius: 8, border: isActive ? '1px solid var(--text)' : (isLight ? '1px solid #e5e4e7' : '1px solid rgba(255,255,255,0.08)'), background: isActive ? (isLight ? '#f9fafb' : 'rgba(255,255,255,0.04)') : (isLight ? '#fff' : 'rgba(255,255,255,0.02)'), cursor: 'pointer', transition: 'all 0.2s' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: (showMapping && (mappedEntries.length > 0 || haMappingCount > 0)) ? 8 : 0 }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: (showMapping && (mappedEntries.length > 0 || haMappingCount > 0 || resMappingCount > 0)) ? 8 : 0 }}>
                                   <Text strong={isActive} style={{ color: isActive ? 'var(--text)' : 'inherit' }}>模型别名映射</Text>
                                   <span style={{ fontSize: 12, color: isActive ? 'var(--text)' : 'var(--text-secondary)' }}>
-                                    {showMapping ? <span style={{ fontWeight: 500 }}>已开启 {(mappedEntries.length + haMappingCount) > 0 ? `(${mappedEntries.length}${haMappingCount > 0 ? `+${haMappingCount}` : ''})` : ''}</span> : <span>未开启</span>} <ArrowRightOutlined style={{ marginLeft: 4 }} />
+                                    {showMapping ? <span style={{ fontWeight: 500 }}>已开启 {(mappedEntries.length + haMappingCount + resMappingCount) > 0 ? `(${mappedEntries.length}${haMappingCount > 0 ? `+${haMappingCount}` : ''}${resMappingCount > 0 ? `+R${resMappingCount}` : ''})` : ''}</span> : <span>未开启</span>} <ArrowRightOutlined style={{ marginLeft: 4 }} />
                                   </span>
                                 </div>
                                 {showMapping && mappedEntries.length > 0 && (
@@ -2187,6 +2648,12 @@ const Channels: React.FC = () => {
                                   <div style={{ padding: '6px 8px', background: isLight ? 'rgba(22,119,255,0.04)' : 'rgba(22,119,255,0.08)', borderRadius: 4, marginTop: mappedEntries.length > 0 ? 6 : 0, display: 'flex', alignItems: 'center', gap: 4 }}>
                                     <ApartmentOutlined style={{ fontSize: 11, color: '#1677ff' }} />
                                     <span style={{ fontSize: 11, color: '#1677ff', fontWeight: 500 }}>子渠道独立映射: {haMappingCount} 条</span>
+                                  </div>
+                                )}
+                                {showMapping && resMappingCount > 0 && (
+                                  <div style={{ padding: '6px 8px', background: isLight ? 'rgba(250,140,22,0.06)' : 'rgba(250,140,22,0.1)', borderRadius: 4, marginTop: (mappedEntries.length > 0 || haMappingCount > 0) ? 6 : 0, display: 'flex', alignItems: 'center', gap: 4 }}>
+                                    <SettingOutlined style={{ fontSize: 11, color: '#fa8c16' }} />
+                                    <span style={{ fontSize: 11, color: '#fa8c16', fontWeight: 500 }}>分辨率映射: {resMappingCount} 档</span>
                                   </div>
                                 )}
                               </div>
@@ -2522,7 +2989,8 @@ const Channels: React.FC = () => {
                                         }
                                         // 一键设置为高可用虚拟组
                                         setSelectedSubChannelAids([]);
-                                        setUpstreamTab('preset'); // 强制切回预设渠道
+                                        clearComfyui();
+                                        clearVolcengineEnhance();
                                         form.setFieldsValue({
                                           preset_id: -99, // 对应预设 ID
                                           rate: 1.0,
@@ -2545,6 +3013,7 @@ const Channels: React.FC = () => {
                                       if (upstreamTab === 'volcengine_enhance') {
                                         clearVolcengineEnhance();
                                       } else {
+                                        clearComfyui();
                                         setUpstreamTab('volcengine_enhance');
                                         setSelectedSubChannelAids([]);
                                         form.setFieldsValue({
@@ -2555,6 +3024,28 @@ const Channels: React.FC = () => {
                                     }}
                                   >
                                     {upstreamTab === 'volcengine_enhance' ? '已开启火山画质增强渠道' : '开启火山画质增强渠道'}
+                                  </Button>
+                                )}
+                                {activePlugins['comfyui_bridge'] && (
+                                  <Button
+                                    type={upstreamTab === 'comfyui' ? 'primary' : 'dashed'}
+                                    icon={<VideoCameraOutlined />}
+                                    size="small"
+                                    onClick={() => {
+                                      if (upstreamTab === 'comfyui') {
+                                        clearComfyui();
+                                      } else {
+                                        clearVolcengineEnhance();
+                                        setUpstreamTab('comfyui');
+                                        setSelectedSubChannelAids([]);
+                                        form.setFieldsValue({
+                                          preset_id: null,
+                                          provider_type: 'custom'
+                                        });
+                                      }
+                                    }}
+                                  >
+                                    {upstreamTab === 'comfyui' ? '已开启 ComfyUI 渠道' : '开启 ComfyUI 渠道'}
                                   </Button>
                                 )}
                               </Space>
@@ -2760,6 +3251,12 @@ const Channels: React.FC = () => {
                               p.name?.toLowerCase().includes(presetSearchText.toLowerCase()) ||
                               p.api_key?.toLowerCase().includes(presetSearchText.toLowerCase())
                             );
+                          } else if (upstreamTab === 'comfyui') {
+                            items = comfyuiServers.filter(p =>
+                              p.name?.toLowerCase().includes(presetSearchText.toLowerCase()) ||
+                              p.base_url?.toLowerCase().includes(presetSearchText.toLowerCase()) ||
+                              String(p.id).includes(presetSearchText)
+                            );
                           }
 
                           return (
@@ -2790,9 +3287,29 @@ const Channels: React.FC = () => {
                                 )}
                               </div>
 
+                              {upstreamTab === 'comfyui' && (
+                                <div style={{ marginBottom: 10, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                                  <Text strong style={{ whiteSpace: 'nowrap' }}>调用规则</Text>
+                                  <Select
+                                    style={{ minWidth: 220, flex: 1 }}
+                                    value={configObj.comfyui_dispatch || COMFYUI_DISPATCH_DEFAULT}
+                                    onChange={(v) => setConfigObj((prev) => ({ ...prev, comfyui_dispatch: v }))}
+                                    options={comfyuiDispatchRules
+                                      .filter((r) => r.is_active === 1)
+                                      .map((r) => ({ value: r.code, label: r.name, title: r.remark || undefined }))}
+                                    placeholder="选择调用规则"
+                                  />
+                                  <Text type="secondary" style={{ fontSize: 12 }}>
+                                    可多选节点；每次请求按规则选一台
+                                  </Text>
+                                </div>
+                              )}
+
                               {items.length === 0 ? (
                                 <div style={{ padding: '40px 0', textAlign: 'center', color: 'var(--text-secondary)' }}>
-                                  暂无匹配的上游渠道配置
+                                  {upstreamTab === 'comfyui'
+                                    ? '请先在「站点插件 → ComfyUI 接入」中新增服务节点'
+                                    : '暂无匹配的上游渠道配置'}
                                 </div>
                               ) : (
                                 <div style={{ 
@@ -2807,7 +3324,8 @@ const Channels: React.FC = () => {
                                       let cardTitle = item.name;
                                       let cardSubtitle = '';
                                       let extraTag = null;
-                                      const isConfigDisabled = upstreamTab === 'preset' && (item.status ?? 1) !== 1;
+                                      const isConfigDisabled = (upstreamTab === 'preset' && (item.status ?? 1) !== 1)
+                                        || (upstreamTab === 'comfyui' && item.is_active !== 1);
 
                                       if (upstreamTab === 'preset') {
                                         isSelected = currentPreset === item.id;
@@ -2825,6 +3343,18 @@ const Channels: React.FC = () => {
                                         isSelected = configObj.volcengine_enhance_credential_id === item.id;
                                         cardSubtitle = `基址: ${item.base_url || '-'}`;
                                         extraTag = <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>火山凭证</Tag>;
+                                      } else if (upstreamTab === 'comfyui') {
+                                        const selectedIds = parseComfyuiServerIds(configObj, comfyuiWorkflows);
+                                        isSelected = selectedIds.includes(item.id);
+                                        cardSubtitle = item.base_url ? `基址: ${item.base_url}` : '';
+                                        extraTag = (
+                                          <Space size={4}>
+                                            {item.is_active !== 1 && <Tag color="error" style={{ margin: 0, fontSize: 11, borderRadius: 4 }}>停用</Tag>}
+                                            <Tag color="blue" style={{ margin: 0, fontSize: 11, borderRadius: 4 }}>优先级: {item.priority ?? 0}</Tag>
+                                            <Tag color="cyan" style={{ margin: 0, fontSize: 11, borderRadius: 4 }}>权重: {item.weight ?? 1}</Tag>
+                                            <Tag color="geekblue" style={{ margin: 0, fontSize: 11 }}>服务节点</Tag>
+                                          </Space>
+                                        );
                                       }
 
                                       return (
@@ -2848,11 +3378,28 @@ const Channels: React.FC = () => {
                                                     preset_id: null,
                                                     provider_type: 'volcengine',
                                                   });
-                                                  // 仅在 config 中存储凭证 ID 关联关系，不再复制 api_key/base_url
-                                                  setConfigObj(prev => ({
-                                                    ...prev,
-                                                    volcengine_enhance_credential_id: item.id,
-                                                  }));
+                                                  setConfigObj(prev => {
+                                                    const { comfyui_workflow_id, comfyui_server_id, comfyui_server_ids, comfyui_dispatch, ...rest } = prev;
+                                                    return { ...rest, volcengine_enhance_credential_id: item.id };
+                                                  });
+                                                } else if (upstreamTab === 'comfyui') {
+                                                  const selectedIds = parseComfyuiServerIds(configObj, comfyuiWorkflows);
+                                                  const next = selectedIds.includes(item.id)
+                                                    ? selectedIds.filter((id: number) => id !== item.id)
+                                                    : [...selectedIds, item.id];
+                                                  form.setFieldsValue({
+                                                    preset_id: null,
+                                                    provider_type: next.length ? 'comfyui' : 'custom',
+                                                  });
+                                                  setConfigObj(prev => {
+                                                    const { volcengine_enhance_credential_id, comfyui_workflow_id, comfyui_server_id, comfyui_server_ids, ...rest } = prev;
+                                                    return {
+                                                      ...rest,
+                                                      comfyui_server_ids: next,
+                                                      comfyui_server_id: next[0],
+                                                      comfyui_dispatch: prev.comfyui_dispatch || COMFYUI_DISPATCH_DEFAULT,
+                                                    };
+                                                  });
                                                 }
                                               }
                                             }}
@@ -2988,7 +3535,7 @@ const Channels: React.FC = () => {
                         <Text type="secondary" style={{ display: 'block', marginBottom: 24 }}>开启后可为每个模型指定上游别名，解决上下游模型名称不一致的问题。</Text>
                         
                         {showMapping ? (
-                          <Form.Item shouldUpdate={(prev, curr) => prev.models !== curr.models || prev.provider_type !== curr.provider_type} noStyle>
+                          <Form.Item shouldUpdate={(prev, curr) => prev.models !== curr.models || prev.provider_type !== curr.provider_type || prev.category_id !== curr.category_id} noStyle>
                             {() => {
                               const providerType = form.getFieldValue('provider_type');
                               const isHaMode = providerType === 'high_availability_group';
@@ -3008,13 +3555,120 @@ const Channels: React.FC = () => {
                               const haSubChannels = isHaMode
                                 ? presets.filter((p: any) => selectedSubChannelAids.includes(p.id))
                                 : [];
+                              const channelCategoryName = resolveCategoryName(form.getFieldValue('category_id'));
+
+                              const toggleResScope = (modelId: string, scope: string) => {
+                                const key = resScopeKey(modelId, scope);
+                                setExpandedResScopes(prev =>
+                                  prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]
+                                );
+                              };
+
+                              const updateResAlias = (modelId: string, scope: string, res: string, alias: string) => {
+                                const resKey = normalizeResKey(res);
+                                if (!resKey) return;
+                                setResModelMappingState(prev => {
+                                  const map = { ...(prev[modelId]?.[scope] || {}) };
+                                  if (!alias.trim()) delete map[resKey];
+                                  else map[resKey] = alias;
+                                  return patchResScope(prev, modelId, scope, Object.keys(map).length ? map : null);
+                                });
+                              };
+
+                              const clearResScope = (modelId: string, scope: string) => {
+                                setResModelMappingState(prev => patchResScope(prev, modelId, scope, null));
+                                setExpandedResScopes(prev => prev.filter(k => k !== resScopeKey(modelId, scope)));
+                              };
+
+                              const renderResAdvancedBtn = (modelId: string, scope: string) => {
+                                const scopeMap = resModelMappingState[modelId]?.[scope] || {};
+                                const scopeKey = resScopeKey(modelId, scope);
+                                const isOpen = expandedResScopes.includes(scopeKey);
+                                const count = countFilled(scopeMap);
+                                return (
+                                  <Tooltip title={isOpen ? '收起分辨率映射' : '高级：按分辨率映射不同模型名'}>
+                                    <Button
+                                      type={count > 0 || isOpen ? 'primary' : 'default'}
+                                      size="small"
+                                      icon={<SettingOutlined />}
+                                      onClick={() => toggleResScope(modelId, scope)}
+                                      style={{
+                                        height: 24,
+                                        padding: '0 8px',
+                                        fontSize: 12,
+                                        flexShrink: 0,
+                                        ...(!(count > 0 || isOpen) ? {
+                                          color: 'var(--text-secondary)',
+                                          borderColor: isLight ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.22)',
+                                          background: isLight ? '#fff' : 'rgba(255,255,255,0.06)',
+                                        } : {}),
+                                      }}
+                                    >
+                                      高级{count > 0 ? ` ${count}` : ''}
+                                    </Button>
+                                  </Tooltip>
+                                );
+                              };
+
+                              const renderResAdvancedPanel = (modelId: string, scope: string, presets: string[]) => {
+                                const scopeMap = resModelMappingState[modelId]?.[scope] || {};
+                                const scopeKey = resScopeKey(modelId, scope);
+                                if (!expandedResScopes.includes(scopeKey)) return null;
+                                const configuredKeys = Object.keys(scopeMap).filter(k => isFilled(scopeMap[k]));
+                                // 预设按模型类型；已配置的历史档位仍展示便于清理
+                                const rows = [...new Set([...presets, ...configuredKeys])];
+                                return (
+                                  <div style={{
+                                    marginTop: 6,
+                                    marginLeft: 128,
+                                    padding: '8px 10px',
+                                    borderRadius: 6,
+                                    background: isLight ? 'rgba(22,119,255,0.04)' : 'rgba(22,119,255,0.08)',
+                                    border: isLight ? '1px solid rgba(22,119,255,0.15)' : '1px solid rgba(105,177,255,0.2)',
+                                  }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                                      <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                                        分辨率 → 上游模型（未填回退明文别名）
+                                      </span>
+                                      {configuredKeys.length > 0 && (
+                                        <Button type="link" size="small" danger style={{ padding: 0, height: 'auto', fontSize: 11 }} onClick={() => clearResScope(modelId, scope)}>
+                                          清空
+                                        </Button>
+                                      )}
+                                    </div>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                      {rows.map(res => (
+                                        <div key={res} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                          <Tag style={{ margin: 0, minWidth: 48, textAlign: 'center', fontSize: 11 }}>{res}</Tag>
+                                          <Input
+                                            size="small"
+                                            placeholder={`${res} 上游模型名`}
+                                            value={scopeMap[res] || ''}
+                                            onChange={(e) => updateResAlias(modelId, scope, res, e.target.value)}
+                                            style={{ flex: 1 }}
+                                          />
+                                          {scopeMap[res] && (
+                                            <Button
+                                              type="text"
+                                              size="small"
+                                              icon={<CloseOutlined style={{ fontSize: 10 }} />}
+                                              style={{ width: 20, height: 20, minWidth: 20, padding: 0, color: 'var(--text-secondary)' }}
+                                              onClick={() => updateResAlias(modelId, scope, res, '')}
+                                            />
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                );
+                              };
 
                               return (
                                 <div style={{ maxHeight: 'calc(100vh - 340px)', minHeight: 300, overflowY: 'auto', paddingRight: 12 }}>
                                   {isHaMode && haSubChannels.length > 0 && (
                                     <Alert
                                       message="高可用子渠道独立映射"
-                                      description="可为每个子渠道设置独立的模型别名。子渠道独立映射优先级最高，未设置时回退到默认别名。"
+                                      description="可为每个子渠道设置独立的模型别名；开启高级设置可按分辨率（视频 480p/…、图片 1k/…）映射不同上游模型名。优先级：子渠该分辨率 → 默认别名该分辨率 → 明文别名（未填档位即回退）。"
                                       type="info"
                                       showIcon
                                       style={{ borderRadius: 6, marginBottom: 16 }}
@@ -3024,12 +3678,18 @@ const Channels: React.FC = () => {
                                     {selectedModels.map((midOrId: string) => {
                                       const match = availableModels.find(m => m.mid === midOrId);
                                       const actualModelId = match ? match.model_id : midOrId;
+                                      const resPresets = resPresetsForHint(
+                                        match?.type_name,
+                                        match?.name,
+                                        actualModelId,
+                                        channelCategoryName,
+                                      );
                                       const isActive = activeMappingInputs.includes(actualModelId);
                                       const currentMapping = modelMappingState;
                                       const hasValue = currentMapping[actualModelId] && String(currentMapping[actualModelId]).trim();
                                       const isHaExpanded = expandedHaModels.includes(actualModelId);
                                       const haSubMapping = haModelMappingState[actualModelId] || {};
-                                      const haSubMappingCount = Object.values(haSubMapping).filter(v => v && String(v).trim()).length;
+                                      const haSubMappingCount = countFilled(haSubMapping);
 
                                       return (
                                         <Col span={24} key={midOrId}>
@@ -3061,9 +3721,8 @@ const Channels: React.FC = () => {
                                                 )}
                                                 {isHaMode && haSubChannels.length > 0 && (
                                                   <Button
-                                                    type={isHaExpanded ? 'primary' : 'dashed'}
+                                                    type={isHaExpanded ? 'primary' : 'default'}
                                                     size="small"
-                                                    ghost={isHaExpanded}
                                                     icon={<ApartmentOutlined />}
                                                     onClick={() => {
                                                       setExpandedHaModels(prev =>
@@ -3072,7 +3731,14 @@ const Channels: React.FC = () => {
                                                           : [...prev, actualModelId]
                                                       );
                                                     }}
-                                                    style={{ flexShrink: 0 }}
+                                                    style={{
+                                                      flexShrink: 0,
+                                                      ...(!isHaExpanded ? {
+                                                        color: 'var(--text)',
+                                                        borderColor: isLight ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.22)',
+                                                        background: isLight ? '#fff' : 'rgba(255,255,255,0.06)',
+                                                      } : {}),
+                                                    }}
                                                   >
                                                     {isHaExpanded ? '收起' : '子渠道映射'}{haSubMappingCount > 0 ? ` (${haSubMappingCount})` : ''}
                                                   </Button>
@@ -3126,112 +3792,117 @@ const Channels: React.FC = () => {
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                                                   {/* 默认别名 (回退) */}
                                                   <div style={{ 
-                                                    display: 'flex', 
-                                                    alignItems: 'center', 
-                                                    gap: 8, 
                                                     paddingBottom: 6, 
                                                     borderBottom: isLight ? '1px dashed #f0f0f0' : '1px dashed rgba(255,255,255,0.06)',
                                                     marginBottom: 4 
                                                   }}>
-                                                    <div style={{ 
-                                                      minWidth: 120, 
-                                                      maxWidth: 160, 
-                                                      flexShrink: 0,
-                                                      fontSize: 12,
-                                                      fontWeight: 600,
-                                                      color: 'var(--text-secondary)',
-                                                    }}>
-                                                      <GlobalOutlined style={{ marginRight: 4, color: '#fa8c16' }} />
-                                                      默认别名 (回退)
-                                                    </div>
-                                                    <Input
-                                                      size="small"
-                                                      placeholder={actualModelId}
-                                                      value={modelMappingState[actualModelId] || ''}
-                                                      onChange={(e) => {
-                                                        const val = e.target.value;
-                                                        setModelMappingState(prev => {
-                                                          if (!val.trim()) {
-                                                            const next = { ...prev };
-                                                            delete next[actualModelId];
-                                                            return next;
-                                                          }
-                                                          return { ...prev, [actualModelId]: val };
-                                                        });
-                                                      }}
-                                                      style={{ flex: 1 }}
-                                                    />
-                                                    {modelMappingState[actualModelId] && (
-                                                      <Button
-                                                        type="text"
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                      <div style={{ 
+                                                        minWidth: 120, 
+                                                        maxWidth: 160, 
+                                                        flexShrink: 0,
+                                                        fontSize: 12,
+                                                        fontWeight: 600,
+                                                        color: 'var(--text-secondary)',
+                                                      }}>
+                                                        <GlobalOutlined style={{ marginRight: 4, color: '#fa8c16' }} />
+                                                        默认别名 (回退)
+                                                      </div>
+                                                      <Input
                                                         size="small"
-                                                        icon={<CloseOutlined style={{ fontSize: 10 }} />}
-                                                        style={{ width: 20, height: 20, minWidth: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', margin: 0, padding: 0 }}
-                                                        onClick={() => {
+                                                        placeholder={actualModelId}
+                                                        value={modelMappingState[actualModelId] || ''}
+                                                        onChange={(e) => {
+                                                          const val = e.target.value;
                                                           setModelMappingState(prev => {
-                                                            const next = { ...prev };
-                                                            delete next[actualModelId];
-                                                            return next;
+                                                            if (!val.trim()) {
+                                                              const next = { ...prev };
+                                                              delete next[actualModelId];
+                                                              return next;
+                                                            }
+                                                            return { ...prev, [actualModelId]: val };
                                                           });
                                                         }}
+                                                        style={{ flex: 1 }}
                                                       />
-                                                    )}
+                                                      {renderResAdvancedBtn(actualModelId, 'default')}
+                                                      {modelMappingState[actualModelId] && (
+                                                        <Button
+                                                          type="text"
+                                                          size="small"
+                                                          icon={<CloseOutlined style={{ fontSize: 10 }} />}
+                                                          style={{ width: 20, height: 20, minWidth: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', margin: 0, padding: 0 }}
+                                                          onClick={() => {
+                                                            setModelMappingState(prev => {
+                                                              const next = { ...prev };
+                                                              delete next[actualModelId];
+                                                              return next;
+                                                            });
+                                                          }}
+                                                        />
+                                                      )}
+                                                    </div>
+                                                    {renderResAdvancedPanel(actualModelId, 'default', resPresets)}
                                                   </div>
                                                   {haSubChannels.map((sub: any) => {
                                                     const subIdStr = String(sub.id);
                                                     const subAlias = haSubMapping[subIdStr] || '';
                                                     return (
-                                                      <div key={sub.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                                        <div style={{ 
-                                                          minWidth: 120, 
-                                                          maxWidth: 160, 
-                                                          flexShrink: 0,
-                                                          fontSize: 12,
-                                                          fontWeight: 500,
-                                                          overflow: 'hidden',
-                                                          textOverflow: 'ellipsis',
-                                                          whiteSpace: 'nowrap'
-                                                        }} title={`${sub.name} (YID: ${sub.yid || '-'})`}>
-                                                          <CloudServerOutlined style={{ marginRight: 4, color: '#1677ff' }} />
-                                                          {sub.name}
-                                                        </div>
-                                                        <Input
-                                                          size="small"
-                                                          placeholder={modelMappingState[actualModelId] || actualModelId}
-                                                          value={subAlias}
-                                                          onChange={(e) => {
-                                                            const val = e.target.value;
-                                                            setHaModelMappingState(prev => ({
-                                                              ...prev,
-                                                              [actualModelId]: {
-                                                                ...(prev[actualModelId] || {}),
-                                                                [subIdStr]: val,
-                                                              }
-                                                            }));
-                                                          }}
-                                                          style={{ flex: 1 }}
-                                                        />
-                                                        {subAlias && (
-                                                          <Button
-                                                            type="text"
+                                                      <div key={sub.id}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                          <div style={{ 
+                                                            minWidth: 120, 
+                                                            maxWidth: 160, 
+                                                            flexShrink: 0,
+                                                            fontSize: 12,
+                                                            fontWeight: 500,
+                                                            overflow: 'hidden',
+                                                            textOverflow: 'ellipsis',
+                                                            whiteSpace: 'nowrap'
+                                                          }} title={`${sub.name} (YID: ${sub.yid || '-'})`}>
+                                                            <CloudServerOutlined style={{ marginRight: 4, color: '#1677ff' }} />
+                                                            {sub.name}
+                                                          </div>
+                                                          <Input
                                                             size="small"
-                                                            icon={<CloseOutlined style={{ fontSize: 10 }} />}
-                                                            style={{ width: 20, height: 20, minWidth: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', margin: 0, padding: 0 }}
-                                                            onClick={() => {
-                                                              setHaModelMappingState(prev => {
-                                                                const next = { ...prev };
-                                                                const subMap = { ...(next[actualModelId] || {}) };
-                                                                delete subMap[subIdStr];
-                                                                if (Object.keys(subMap).length === 0) {
-                                                                  delete next[actualModelId];
-                                                                } else {
-                                                                  next[actualModelId] = subMap;
+                                                            placeholder={modelMappingState[actualModelId] || actualModelId}
+                                                            value={subAlias}
+                                                            onChange={(e) => {
+                                                              const val = e.target.value;
+                                                              setHaModelMappingState(prev => ({
+                                                                ...prev,
+                                                                [actualModelId]: {
+                                                                  ...(prev[actualModelId] || {}),
+                                                                  [subIdStr]: val,
                                                                 }
-                                                                return next;
-                                                              });
+                                                              }));
                                                             }}
+                                                            style={{ flex: 1 }}
                                                           />
-                                                        )}
+                                                          {renderResAdvancedBtn(actualModelId, subIdStr)}
+                                                          {subAlias && (
+                                                            <Button
+                                                              type="text"
+                                                              size="small"
+                                                              icon={<CloseOutlined style={{ fontSize: 10 }} />}
+                                                              style={{ width: 20, height: 20, minWidth: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', margin: 0, padding: 0 }}
+                                                              onClick={() => {
+                                                                setHaModelMappingState(prev => {
+                                                                  const next = { ...prev };
+                                                                  const subMap = { ...(next[actualModelId] || {}) };
+                                                                  delete subMap[subIdStr];
+                                                                  if (Object.keys(subMap).length === 0) {
+                                                                    delete next[actualModelId];
+                                                                  } else {
+                                                                    next[actualModelId] = subMap;
+                                                                  }
+                                                                  return next;
+                                                                });
+                                                              }}
+                                                            />
+                                                          )}
+                                                        </div>
+                                                        {renderResAdvancedPanel(actualModelId, subIdStr, resPresets)}
                                                       </div>
                                                     );
                                                   })}

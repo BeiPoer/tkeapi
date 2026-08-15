@@ -515,11 +515,24 @@ pub fn normalize_ark_asset_id(id: &str) -> &str {
 }
 
 impl VolcClient {
-    /// 调用方舟 DeleteAsset，结果一律 `info` 输出；调用方应自行决定是否阻塞本地删除。
-    pub async fn delete_asset_logged(&self, asset_id: &str, log_tag: &str) -> bool {
+    /// 判断方舟/开放平台错误是否为限流（429 / AccountFlowLimitExceeded 等）。
+    pub fn is_api_rate_limited(err: &str) -> bool {
+        let m = err.to_ascii_lowercase();
+        m.contains("429")
+            || m.contains("too many requests")
+            || m.contains("accountflowlimitexceeded")
+            || m.contains("flow control")
+            || m.contains("flowcontrol")
+            || m.contains("rate limit")
+            || m.contains("ratelimit")
+            || m.contains("request limit")
+    }
+
+    /// 调用方舟 DeleteAsset：`Ok` 成功，`Err(true)` 限流应停本轮，`Err(false)` 其它失败。
+    pub async fn delete_asset_logged(&self, asset_id: &str, log_tag: &str) -> Result<(), bool> {
         let id = normalize_ark_asset_id(asset_id);
         if id.is_empty() {
-            return false;
+            return Err(false);
         }
         let req = DeleteAssetRequest {
             id: id.to_string(),
@@ -537,16 +550,27 @@ impl VolcClient {
         {
             Ok(_) => {
                 tracing::info!("[{}] DeleteAsset 成功: {}", log_tag, id);
-                true
+                Ok(())
             }
             Err(e) => {
-                tracing::info!(
-                    "[{}] DeleteAsset 失败(不影响本地删除): {} - {}",
-                    log_tag,
-                    id,
-                    e
-                );
-                false
+                let msg = e.to_string();
+                if Self::is_api_rate_limited(&msg) {
+                    tracing::info!(
+                        "[{}] DeleteAsset 限流，本轮停止: {} - {}",
+                        log_tag,
+                        id,
+                        msg
+                    );
+                    Err(true)
+                } else {
+                    tracing::info!(
+                        "[{}] DeleteAsset 失败(不影响本地删除): {} - {}",
+                        log_tag,
+                        id,
+                        msg
+                    );
+                    Err(false)
+                }
             }
         }
     }

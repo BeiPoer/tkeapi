@@ -58,13 +58,15 @@ interface RateDisplayProps {
   formatPrice?: (price: number | string | undefined | null) => string;
   siteDiscount?: number;
   siteDiscountEnabled?: number | boolean;
+  /** 隐藏计费规则名称（如「标准计费」），仅展示费率明细 */
+  hideRuleLabel?: boolean;
 }
 
 /**
  * 统一费率展示组件：计费名 → 子规则标签 → 费率明细
  * 用于 Models 列表和 BillingRules 列表
  */
-const RateDisplay: React.FC<RateDisplayProps> = ({ rule, currencySymbol, formatPrice, siteDiscount, siteDiscountEnabled }) => {
+const RateDisplay: React.FC<RateDisplayProps> = ({ rule, currencySymbol, formatPrice, siteDiscount, siteDiscountEnabled, hideRuleLabel }) => {
   const siteDiscountActive = !!(siteDiscountEnabled && siteDiscount && siteDiscount > 0 && siteDiscount < 1);
   const fp = (val: number | string | undefined | null) => {
     if (val === undefined || val === null || val === '') return '-';
@@ -418,25 +420,13 @@ const RateDisplay: React.FC<RateDisplayProps> = ({ rule, currencySymbol, formatP
     return <Text type="secondary" style={s}>{fp(rule.duration_rate)}/s</Text>;
   };
 
-  const ruleColors: Record<string, string> = {
-    standard: 'default', multimodal: 'gold', tiered: 'gold', doubao_chat: 'gold', volcengine: 'volcano',
-    'seedance2.0': 'volcano', 'seedance1.5pro': 'volcano', 'seedance1.0': 'volcano',
-    fixed: 'default', per_image: 'lime', image_resolution: 'gold', image_size_pixel: 'gold',
-    volc_seedream_pro: 'volcano',
-    video_resolution: 'gold',
-    minimax_h3: 'magenta',
-    kling_video: 'purple',
-    vidu_video: 'cyan',
-    vidu_image: 'green',
-    characters: 'geekblue',
-    volc_enhance_cascade: 'volcano',
-  };
   const hasTimeMultipliers = ext?.enable_time_multipliers && Array.isArray(ext.time_multipliers) && ext.time_multipliers.length > 0;
+  const titleLabel = hideRuleLabel ? '计费' : ruleLabel;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: '11px', lineHeight: 1.2, margin: 0, color: 'var(--text-secondary, #595959)' }}>{ruleLabel}</span>
+        <span style={{ fontSize: '11px', lineHeight: 1.2, margin: 0, color: 'var(--text-secondary, #595959)' }}>{titleLabel}</span>
         {discountTag}
         {hasTimeMultipliers && (
           <Tooltip title={

@@ -148,10 +148,16 @@ const ForwardRules: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [ruleTypeFilter, setRuleTypeFilter] = useState('all');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(15);
   // 动态获取的模型分类类型列表（从 model_types 接口获取，保持与后台一致）
   const [modelTypes, setModelTypes] = useState<{ id: number; name: string }[]>([]);
   const [form] = Form.useForm();
   const screens = useBreakpoint();
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, categoryFilter, ruleTypeFilter]);
 
   const uniqueCategories = Array.from(new Set([
     ...modelTypes.map(t => t.name),
@@ -633,6 +639,21 @@ const ForwardRules: React.FC = () => {
     </div>
   );
 
+  const paginationConfig = {
+    current: currentPage,
+    pageSize: pageSize,
+    showSizeChanger: true,
+    pageSizeOptions: ['10', '15', '20', '50', '100'],
+    showTotal: (total: number) => `共 ${total} 条`,
+    showQuickJumper: true,
+    onChange: (page: number, newPageSize: number) => {
+      setCurrentPage(page);
+      if (newPageSize !== pageSize) {
+        setPageSize(newPageSize);
+      }
+    },
+  };
+
   return (
     <>
       <Card variant="borderless">
@@ -695,7 +716,7 @@ const ForwardRules: React.FC = () => {
             dataSource={filteredItems}
             loading={loading}
             rowKey="id"
-            pagination={{ pageSize: 15 }}
+            pagination={paginationConfig}
             renderCard={(record: any) => {
               const mobileColorMap: Record<string, string> = {
                 '聊天': 'blue', '图片': 'magenta', '视频': 'volcano',
@@ -750,7 +771,7 @@ const ForwardRules: React.FC = () => {
             columns={columns}
             rowKey="id"
             loading={loading}
-            pagination={{ pageSize: 15 }}
+            pagination={paginationConfig}
             size="middle"
           />
         )}

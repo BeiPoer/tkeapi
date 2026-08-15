@@ -1,10 +1,10 @@
-a7c0759ef9e3363c480901df3d2a9849708333f2a7c0759ecgm5pm2026-08-09 23:56:47feat(kyc): 补充实名认证与实人核验 API 逻辑，优化渠道转发规则与系统设置
-7337d7c08c82cb4c22d87bf1a9550e80abb1ff997337d7c0cgm5pm2026-08-09 23:21:53chore: 合并远端分支 origin/cgdev0808 到本地 cgdev0726
-0c206eae9b52138df5019971a4b69d5b75200e850c206eaecgm5pm2026-08-09 23:18:29docs: 提交本地 git 日志以准备合并
-b013706a6125574cd51743bc8a2512995cf619c0b013706acgm5pm2026-08-09 23:17:46docs: 更新 git 日志记录
-6d1b69d44c60210b2ce567c8f5cedb1f943084e26d1b69d4aqachatm5pm2026-08-09 13:11:30chore: save latest changes
-0ba5b594aa73e51ad9f4f27477095a5874646b270ba5b594aqachatm5pm2026-08-09 12:25:23chore: save latest changes
-ff01bfdfdd6fb391bcfa972c05c48682ec5b0566ff01bfdfaqachatm5pm2026-08-08 12:24:38chore: merge origin/chenzs and resolve conflict in git_log.txt
-3699c7c4c1388ca9a5148084284b57552aefe3d53699c7c4aqachatm5pm2026-08-08 12:24:27chore: save local changes before merge
-0435b85afd78035bc1e3f5eda4725b8c97fb9a100435b85abubyday2026-08-07 23:00:36feat(relay): 级联 720p←480 裁剪开关 crop_480p
-4e2dee86e5cdac9e8518bb8259bcc3d352718d4d4e2dee86bubyday2026-08-07 22:26:27refactor(relay): 轮询 opts/CascadeMk 收口，POLL_FAIL_LIMIT=15
+3dbe5cb4d8f553930311eba65c7122feba7c67c23dbe5cbaqachatm5pm2026-08-10 09:01:03uodate
+ee5aedb2e3bba5f7909ac3d6c01cccb69b3e10beee5aedbcgm5pm2026-08-02 16:02:11update
+f1228ef49846b3c3c31893f432134578208c5e19f1228efcgm5pm2026-08-02 15:50:59update，更新开源版本的稳定性和新增加 minimax 的视频模型 h3 的计费
+14476ed19045ab732f025ca99a673ba13a25b29414476edArtsmcp2026-07-31 16:41:28fix(deploy): 优化 compose 镜像拉取策略为 always，禁止部署时触发本地 build
+433efd1ea890518bd91a2ed98c33e7a991f88b0a433efd1SAMDO-WORK-2025\samdo2026-07-31 14:09:34refactor(deploy): remove deprecated ADMIN_PASSWORD/ADMIN_USERNAME env vars in favor of Web UI initialization
+78b03aa21a7fd97138ac101375e4946baade875978b03aaSAMDO-WORK-2025\samdo2026-07-31 14:06:08docs(readme): update license reference to GNU AGPLv3 & recommend deploy.sh
+62243d7e0e8517e7d59c09936a8156c137c29a2662243d7SAMDO-WORK-2025\samdo2026-07-31 11:57:52feat(deploy): update default image registry to CNB (docker.cnb.cool) for fast mainland China access
+f61275ed2128bd74f558f444899fa4c6c0fbbc3af61275eArtsmcp2026-07-31 11:54:09build(deps): 添加 OpenSSL 静态编译依赖并更新 gitignore 离线构建忽略项
+f9feddc966811d429d548e01f440269d23ac5396f9feddcSAMDO-WORK-2025\samdo2026-07-31 11:51:17ci: remove automatic push triggers, keep manual workflow_dispatch only
+84d3e7f7f5d84d23d1c91a05491058af74695ef784d3e7fSAMDO-WORK-2025\samdo2026-07-31 09:48:06feat(deploy): optimize docker-compose for GHCR prebuilt images & add CI/CD workflow with Dockerfile.thin

@@ -532,6 +532,7 @@ async fn translate_content(
         "ja" => "Japanese",
         "ko" => "Korean",
         "vi" => "Vietnamese",
+        "zh-TW" | "zh-tw" => "Traditional Chinese",
         _ => &payload.to_lang,
     };
 

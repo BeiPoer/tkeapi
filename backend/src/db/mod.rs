@@ -6,6 +6,7 @@
  */
 
 pub mod migrations;
+pub mod preset_models;
 
 use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
 

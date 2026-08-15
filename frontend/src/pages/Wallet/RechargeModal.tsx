@@ -105,7 +105,7 @@ const pickDefaultHyperbc = (addrs: HyperbcAddr[]) => {
 };
 
 const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSuccess }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { user } = useAuthStore();
   const { settings } = useSettingsStore();
   const currencySymbol = settings?.currency?.currency_symbol || '¥';
@@ -311,7 +311,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
         if (res?.status === 'paid') {
           clearTimer();
           setPayStatus('success');
-          message.success('充值成功！');
+          message.success(t('recharge.recharge_success', '充值成功！'));
           setTimeout(() => { onSuccess(); }, 2000);
         }
       } catch (err) {
@@ -327,7 +327,9 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
       const ap = paymentChannels.find((c) => c.id === 'allinpay');
       const methods = ap ? getAllinpayMethods(ap) : [];
       if (!methods.includes(paymentMethod)) {
-        setErrorMessage(methods.length > 1 ? '请选择通联支付方式（微信或支付宝）' : '通联支付暂不可用');
+        setErrorMessage(methods.length > 1
+          ? t('recharge.allinpay_pick_error', '请选择通联支付方式（微信或支付宝）')
+          : t('recharge.allinpay_unavailable', '通联支付暂不可用'));
         return;
       }
     }
@@ -400,7 +402,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
         startPolling(res.out_trade_no);
       }
     } catch (err: any) {
-      const errMsg = err.response?.data?.error?.message || err.response?.data?.error || err.message || '获取支付信息失败';
+      const errMsg = err.response?.data?.error?.message || err.response?.data?.error || err.message || t('recharge.pay_info_fail', '获取支付信息失败');
       const errMsgStr = typeof errMsg === 'object' ? JSON.stringify(errMsg) : String(errMsg);
       if (
         errMsgStr.includes('充值金额不能小于') ||
@@ -505,8 +507,8 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
         key: c.id,
         channel: item,
         enabled: true,
-        name: resolveChannelName(item),
-        badge: resolveChannelSubtitle(item),
+        name: resolveChannelName(item, i18n.language),
+        badge: resolveChannelSubtitle(item, i18n.language),
         badgeBg: isLight ? `${accent}1a` : `${accent}33`,
         badgeColor: accent,
         icon: logoUrl
@@ -689,23 +691,23 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
           <Spin size="large" />
           <div style={{ marginTop: 20 }}>
             <Title level={3} style={{ color: '#ef4444', margin: 0, fontWeight: 800 }}>{currencySymbol} {finalAmount.toFixed(2)}</Title>
-            <Text type="secondary" style={{ fontSize: 13 }}>订单号: {outTradeNo}</Text>
+            <Text type="secondary" style={{ fontSize: 13 }}>{t('recharge.order_no', '订单号: ')}{outTradeNo}</Text>
           </div>
-          <Button style={{ marginTop: 20, borderRadius: 10, height: 40 }} onClick={resetState}>返回修改</Button>
+          <Button style={{ marginTop: 20, borderRadius: 10, height: 40 }} onClick={resetState}>{t('recharge.return_modify', '返回修改')}</Button>
         </div>
       ) : payStatus === 'paying' && paymentMethod === 'hyperbc' ? (
         hyperbcStep === 'select' ? (
           <div style={{ textAlign: 'left', maxWidth: 520, margin: '0 auto' }}>
             <Title level={4} style={{ color: titleColor, textAlign: 'center', marginBottom: 16, fontWeight: 600 }}>
-              HyperBC 账户充值
+              {t('recharge.hyperbc_account', 'HyperBC 账户充值')}
             </Title>
             <Text type="secondary" style={{ display: 'block', textAlign: 'center', marginBottom: 20, fontSize: 13 }}>
-              请选择支付币种与网络
+              {t('recharge.hyperbc_select_pay', '请选择支付币种与网络')}
             </Text>
 
             {/* 1. 币种 */}
             <div style={{ marginBottom: 16 }}>
-              <Text style={{ color: descColor, fontSize: 13, display: 'block', marginBottom: 8 }}>选择支付币种</Text>
+              <Text style={{ color: descColor, fontSize: 13, display: 'block', marginBottom: 8 }}>{t('recharge.select_pay_currency', '选择支付币种')}</Text>
               <div style={{ display: 'flex', gap: 10 }}>
                 {hyperbcCurrencies.map((coin) => {
                   const isSel = hyperbcCoin === coin;
@@ -744,7 +746,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
 
             {/* 2. 网络 */}
             <div style={{ marginBottom: 20 }}>
-              <Text style={{ color: descColor, fontSize: 13, display: 'block', marginBottom: 8 }}>选择网络</Text>
+              <Text style={{ color: descColor, fontSize: 13, display: 'block', marginBottom: 8 }}>{t('recharge.select_network', '选择网络')}</Text>
               <div style={{
                 border: `1px solid ${borderIdle}`,
                 borderRadius: 12,
@@ -754,7 +756,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                 flexWrap: 'wrap',
               }}>
                 {hyperbcNetworksForCoin.length === 0 ? (
-                  <Text type="secondary" style={{ fontSize: 12 }}>暂无可用网络</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>{t('recharge.no_network', '暂无可用网络')}</Text>
                 ) : hyperbcNetworksForCoin.map((net) => {
                   const isSel = hyperbcNetwork === net.keyUpper;
                   return (
@@ -780,7 +782,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
 
             {/* 金额显示 */}
             <div style={{ marginBottom: 20 }}>
-              <Text style={{ color: descColor, fontSize: 13, display: 'block', marginBottom: 8 }}>应付金额</Text>
+              <Text style={{ color: descColor, fontSize: 13, display: 'block', marginBottom: 8 }}>{t('recharge.payable_amount', '应付金额')}</Text>
               <div style={{
                 background: bgIdle,
                 border: `1px solid ${borderIdle}`,
@@ -815,12 +817,12 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                 boxShadow: '0 4px 16px rgba(139, 92, 246, 0.35)',
               }}
             >
-              前往支付 ➔
+              {t('recharge.go_pay_now', '前往支付 ➔')}
             </Button>
 
             <div style={{ marginTop: 12, textAlign: 'center' }}>
               <Button type="text" size="small" onClick={resetState} style={{ color: subColor }}>
-                返回修改充值金额
+                {t('recharge.return_modify_amount', '返回修改充值金额')}
               </Button>
             </div>
           </div>
@@ -836,7 +838,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
               return (
                 <div>
                   <Text type="secondary" style={{ fontSize: 13, display: 'block', marginBottom: 4 }}>
-                    待支付总额
+                    {t('recharge.amount_due', '待支付总额')}
                   </Text>
                   <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'center', marginBottom: 4 }}>
                     <span style={{ fontSize: 32, fontWeight: 800, color: labelColor }}>{integerPart}</span>
@@ -844,7 +846,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                     <span style={{ fontSize: 16, fontWeight: 600, color: subColor, marginLeft: 6 }}>{details.symbol}</span>
                   </div>
                   <div style={{ color: '#ef4444', fontSize: 12, fontWeight: 500, marginBottom: 16 }}>
-                    ⚠️ 请通过此网络支付精确金额：<span style={{ textDecoration: 'underline' }}>{details.network}</span>
+                    ⚠️ {t('recharge.pay_exact_network', '请通过此网络支付精确金额：')}<span style={{ textDecoration: 'underline' }}>{details.network}</span>
                   </div>
 
                   <div style={{
@@ -861,7 +863,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                   {/* 收款地址卡片 */}
                   <div style={{ textAlign: 'left', marginBottom: 16 }}>
                     <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-                      收款地址 ({details.network})
+                      {t('recharge.receive_address', { defaultValue: '收款地址 ({{network}})', network: details.network })}
                     </Text>
                     <Typography.Paragraph
                       copyable={{ text: selectedAddress.address }}
@@ -895,12 +897,12 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                     fontSize: 12,
                     lineHeight: 1.5
                   }}>
-                    ⚠️ 交易所提币提示：如使用 币安、OKX 等交易所提币，请手动加上提现手续费，确保到账金额完全一致。
+                    ⚠️ {t('recharge.exchange_withdraw_tip', '交易所提币提示：如使用 币安、OKX 等交易所提币，请手动加上提现手续费，确保到账金额完全一致。')}
                   </div>
 
                   <div style={{ marginBottom: 16 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                      <Text type="secondary" style={{ fontSize: 12 }}>等待支付中</Text>
+                      <Text type="secondary" style={{ fontSize: 12 }}>{t('recharge.waiting_payment', '等待支付中')}</Text>
                       <Text style={{ fontSize: 12, fontFamily: 'monospace', fontWeight: 'bold', color: labelColor }}>
                         {formatTimeLeft(timeLeft)}
                       </Text>
@@ -923,10 +925,10 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
 
                   <div style={{ display: 'flex', justifyContent: 'center', gap: 12 }}>
                     <Button style={{ borderRadius: 10 }} onClick={() => setHyperbcStep('select')}>
-                      修改币种网络
+                      {t('recharge.change_coin_network', '修改币种网络')}
                     </Button>
                     <Button style={{ borderRadius: 10 }} onClick={resetState}>
-                      修改充值金额
+                      {t('recharge.change_amount', '修改充值金额')}
                     </Button>
                   </div>
                 </div>
@@ -946,7 +948,14 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
           </div>
           <Title level={4} style={{ color: titleColor, margin: '0 0 8px 0' }}>{t('recharge.bonuspay_opened', '充值页面已打开')}</Title>
           <Text type="secondary" style={{ display: 'block', marginBottom: 8, lineHeight: 1.8 }}>
-            请在新打开的 BonusPay 收银台页面完成转账。<br />链上确认后余额将自动更新，您可以关闭此弹窗。
+            {t('recharge.bonuspay_desc', '请在新打开的 BonusPay 收银台页面完成转账。\n链上确认后余额将自动更新，您可以关闭此弹窗。')
+              .split('\n')
+              .map((line, i) => (
+                <React.Fragment key={i}>
+                  {i > 0 ? <br /> : null}
+                  {line}
+                </React.Fragment>
+              ))}
           </Text>
           <Space style={{ marginTop: 24 }}>
             <Button style={{ borderRadius: 10 }} onClick={resetState}>{t('recharge.recharge_again', '再次充值')}</Button>
@@ -974,7 +983,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                     <Text strong style={{ fontSize: isMobile ? 13 : 14, color: labelColor }}>
                       {t('recharge.select_amount', { defaultValue: `选择充值金额 (${currencyUnit})`, unit: currencyUnit })}
                     </Text>
-                    <Text style={{ fontSize: 11, color: subColor }}>点击快捷选择</Text>
+                    <Text style={{ fontSize: 11, color: subColor }}>{t('recharge.quick_select', '点击快捷选择')}</Text>
                   </div>
                   
                   {/* 快捷金额卡片网格 */}
@@ -1063,7 +1072,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                     <Text type="secondary" style={{ fontSize: isMobile ? 11 : 12, display: 'block' }}>
                       {t('recharge.payable_amount', '预计应付金额')}
                     </Text>
-                    {!isMobile && <Text style={{ fontSize: 11, color: subColor }}>实时按通道计费</Text>}
+                    {!isMobile && <Text style={{ fontSize: 11, color: subColor }}>{t('recharge.realtime_billing', '实时按通道计费')}</Text>}
                   </div>
                   <div style={{ textAlign: 'right' }}>
                     <div style={{ fontSize: isMobile ? 20 : 24, fontWeight: 800, color: '#ef4444', lineHeight: 1 }}>
@@ -1157,9 +1166,12 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                 {t('recharge.payment_method', '选择支付方式')}
               </Text>
               <Text style={{ fontSize: 11, color: subColor }}>
-                已选 {paymentOptions.find(o => o.key === selectedChannel)?.name || '支付方式'}
-                {selectedChannel === 'allinpay' && paymentMethod === 'allinpay_wechat' ? ' · 微信' : ''}
-                {selectedChannel === 'allinpay' && paymentMethod === 'allinpay_alipay' ? ' · 支付宝' : ''}
+                {t('recharge.selected', {
+                  defaultValue: '已选 {{name}}',
+                  name: paymentOptions.find(o => o.key === selectedChannel)?.name || t('recharge.payment_method', '支付方式'),
+                })}
+                {selectedChannel === 'allinpay' && paymentMethod === 'allinpay_wechat' ? ` · ${t('recharge.wechat_short', '微信')}` : ''}
+                {selectedChannel === 'allinpay' && paymentMethod === 'allinpay_alipay' ? ` · ${t('recharge.alipay_short', '支付宝')}` : ''}
               </Text>
             </div>
 
@@ -1250,7 +1262,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                 background: bgIdle,
               }}>
                 <Text style={{ fontSize: 12, color: subColor, display: 'block', marginBottom: 8 }}>
-                  请选择通联支付方式
+                  {t('recharge.allinpay_pick', '请选择通联支付方式')}
                 </Text>
                 <Row gutter={[10, 10]}>
                   {allinpayMethods.map((method) => {
@@ -1276,7 +1288,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                             ? <WechatOutlined style={{ fontSize: 20, color: accent }} />
                             : <AlipayCircleOutlined style={{ fontSize: 20, color: accent }} />}
                           <Text strong style={{ color: labelColor, fontSize: 13 }}>
-                            {isWechat ? '微信支付' : '支付宝'}
+                            {isWechat ? t('recharge.wechat_pay', '微信支付') : t('recharge.alipay', '支付宝')}
                           </Text>
                         </div>
                       </Col>
@@ -1345,7 +1357,7 @@ const RechargeModal: React.FC<RechargeModalProps> = ({ visible, onCancel, onSucc
                 if (paymentMethod === 'wechat' || paymentMethod === 'allinpay_wechat') {
                   return <Space style={btnFg}><WechatOutlined style={btnFg} />{t('recharge.gen_wechat_qr', '生成微信支付码')}</Space>;
                 }
-                return <Space style={btnFg}><WalletOutlined style={btnFg} />去支付</Space>;
+                return <Space style={btnFg}><WalletOutlined style={btnFg} />{t('recharge.go_pay', '去支付')}</Space>;
               })()}
             </Button>
 

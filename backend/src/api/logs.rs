@@ -40,9 +40,9 @@ pub(crate) fn redact_log_match_ids_for_user(
     *yid = None;
 }
 
-/// 用户端接口：plugin_tag 白名单，仅保留列表/展开展示字段。
+/// 用户端详情：plugin_tag 白名单（仅 client_ct 展开展示）。
 fn project_plugin_tag_for_user(plugin_tag: &mut Option<String>) {
-    const KEEP: &[&str] = &["client_ct", "title"];
+    const KEEP: &[&str] = &["client_ct"];
     let Some(raw) = plugin_tag.as_deref() else {
         return;
     };
@@ -85,8 +85,8 @@ pub(crate) fn redact_request_log_for_user(log: &mut RequestLog) {
     log.channel_group_aid = None;
     log.channel_name = None;
     log.sub_channel_name = None;
+    log.user_admin_remark = None;
     redact_log_match_ids_for_user(&mut log.billing_pid, &mut log.forward_eid, &mut log.yid);
-    project_plugin_tag_for_user(&mut log.plugin_tag);
     if let Some(ref err) = log.error_message {
         log.error_message = Some(crate::relay::proxy::sanitize_error_message(err));
     }
@@ -281,12 +281,13 @@ const LOGS_LIST_SELECT: &str = "SELECT l.id, l.log_id, l.user_id, l.channel_id, 
          COALESCE((regexp_match(COALESCE(l.billing_detail, ''), '(\\d+)创建@'))[1]::int, 0) AS billing_cache_creation, \
          COALESCE((regexp_match(COALESCE(l.billing_detail, ''), '(\\d+)读取@'))[1]::int, 0) AS billing_cache_read, \
          COALESCE((regexp_match(COALESCE(l.billing_detail, ''), '联网搜索:\\s*([\\d.]+)次'))[1]::float8, 0) AS billing_web_search, \
-         l.billing_pid, l.forward_eid, l.pre_deduct_gift, l.plugin_tag, \
+         l.billing_pid, l.forward_eid, l.pre_deduct_gift, \
          l.action_type, l.is_completed, l.channel_config_id, l.task_id, l.created_at, \
          l.is_ha, \
          c.group_aid AS channel_group_aid, c.name AS channel_name, \
          cc.name AS sub_channel_name, cc.yid AS yid, \
          COALESCE(u.nickname, u.username) AS user_nickname, \
+         NULLIF(btrim(COALESCE(u.admin_remark, '')), '') AS user_admin_remark, \
          u.user_group, ul.name AS user_level_name, u.uid AS user_uid, \
          t.name AS token_name, t.kid AS token_kid";
 
@@ -584,7 +585,14 @@ pub async fn get_log_detail(
             post_response: None,
             upstream_req_content: None,
             billing_detail: None,
+            plugin_tag: None,
         }));
+    }
+
+    let raw_plugin_tag = row.plugin_tag.clone();
+    let mut plugin_tag = raw_plugin_tag.clone();
+    if !is_admin {
+        project_plugin_tag_for_user(&mut plugin_tag);
     }
 
     let mut detail = LogDetailContent {
@@ -594,17 +602,19 @@ pub async fn get_log_detail(
         post_response: row.post_response,
         upstream_req_content: row.upstream_req_content,
         billing_detail: row.billing_detail,
+        plugin_tag,
     };
 
     if !is_admin {
-        // 级联：进行中掩码产物；完成后折叠 stage（仅 response/post；上游出参已不返回）
+        // 级联脱敏须用原始 plugin_tag（含 cascade）；对外返回已白名单投影
         cascade_sanitize_for_user(
             &mut detail.response_content,
             &mut detail.post_response,
-            row.plugin_tag.as_deref(),
+            raw_plugin_tag.as_deref(),
             row.is_completed == 1,
             row.task_id.as_deref().unwrap_or(""),
             detail.request_content.as_deref(),
+            row.status_code,
         );
         if row.status_code != 200 {
             if let Some(ref resp) = detail.response_content {

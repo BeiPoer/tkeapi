@@ -165,7 +165,7 @@ pub async fn audio_speech(
 
         // 模型映射：渠道内部映射 + 模型表别名映射
         let (final_resolved_model, mapping_source) =
-            router::resolve_model(&channel, model, db_model.as_ref());
+            router::resolve_model(&channel, model, db_model.as_ref(), None);
 
         // 查询计费规则（供计费阶段使用）
         let mut db_rule =
@@ -512,7 +512,7 @@ pub async fn audio_speech(
                     &ctx,
                     &usage_tokens,
                     &features,
-                    mapping_source,
+                    mapping_source.as_deref(),
                     &model,
                     &final_resolved_model,
                 )

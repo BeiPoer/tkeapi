@@ -70,6 +70,10 @@ pub struct TaskLog {
     #[sqlx(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_nickname: Option<String>,
+    /// 用户管理员备注（仅管理端列表展示）
+    #[sqlx(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_admin_remark: Option<String>,
     #[sqlx(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_uid: Option<String>,

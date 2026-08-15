@@ -93,6 +93,47 @@ const { useBreakpoint } = Grid;
 // Helper: check if email is a real user-bound email (not a placeholder)
 const isRealEmail = (email?: string) => !!email && !email.endsWith('@tokensbyte.local');
 
+/** 模型折扣 Tag：悬停一眼看全模型名与倍率（沿用早期友好布局） */
+function ModelDiscountHoverTag({
+  modelDiscounts,
+  models,
+  compact,
+}: {
+  modelDiscounts?: string | null;
+  models: any[];
+  compact?: boolean;
+}) {
+  let entries: [string, number][] = [];
+  try {
+    if (modelDiscounts) entries = Object.entries(JSON.parse(modelDiscounts));
+  } catch { /* ignore */ }
+  if (!entries.length) return null;
+
+  const tip = (
+    <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+      {entries.map(([mid, discount]) => {
+        const name = models.find((m) => m.mid === mid)?.name || mid;
+        return (
+          <div key={mid} style={{ display: 'flex', justifyContent: 'space-between', gap: 16, padding: '2px 0', fontSize: 12 }}>
+            <span style={{ opacity: 0.85 }}>{name}</span>
+            <span style={{ fontWeight: 500, flexShrink: 0, color: discount < 1 ? '#52c41a' : discount > 1 ? '#ff4d4f' : undefined }}>
+              {discount}x
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  return (
+    <Tooltip title={tip} placement="right" overlayStyle={{ maxWidth: 360 }}>
+      <Tag color="orange" style={{ alignSelf: 'flex-start', marginTop: compact ? 0 : 4, marginInlineEnd: 0, fontSize: 11, cursor: 'default', padding: '0 6px', lineHeight: '20px' }}>
+        {compact ? `已设(${entries.length})` : `模型折扣(${entries.length})`}
+      </Tag>
+    </Tooltip>
+  );
+}
+
 const Users: React.FC = () => {
   const { themeMode } = useThemeStore();
   const _isLight = themeMode === 'light';
@@ -117,33 +158,28 @@ const Users: React.FC = () => {
   const [rechargeLoading, setRechargeLoading] = useState(false);
 
   const [walletTimeFilter, setWalletTimeFilter] = useState<'all' | 'month'>(() => {
-    return (localStorage.getItem('walletTimeFilter') as 'all' | 'month') || 'all';
+    return (localStorage.getItem('walletTimeFilter') as 'all' | 'month') || 'month';
   });
-  const [monthStatsMap, setMonthStatsMap] = useState<Record<string, { recharge_amount: number; gift_amount: number }>>({});
-  const [allStatsMap, setAllStatsMap] = useState<Record<string, { recharge_amount: number; gift_amount: number }>>({});
+  const [monthConsumptionMap, setMonthConsumptionMap] = useState<Record<string, { system_cost: number; gift_cost: number }>>({});
 
   useEffect(() => {
-    if (users.length === 0) return;
-    const userIds = users.map(u => u.id);
-    if (walletTimeFilter === 'month') {
-      request.post('/finance/recharges/stats_batch', {
-        user_ids: userIds,
-        start_date: toAbsoluteDateParam(dayjs().startOf('month')),
-        end_date: toAbsoluteDateParam(dayjs().endOf('month'), true),
-      }).then((res: any) => {
-        setMonthStatsMap(res || {});
-      }).catch(console.error);
-    } else {
-      setMonthStatsMap({});
+    if (users.length === 0 || walletTimeFilter !== 'month') {
+      setMonthConsumptionMap({});
+      return;
     }
-    // 获取全量充值统计（用于"总充值"显示）
-    request.post('/finance/recharges/stats_batch', {
+    const userIds = users.map(u => u.id);
+    request.post('/users/consumption/stats_batch', {
       user_ids: userIds,
-    }).then((res: any) => {
-      setAllStatsMap(res || {});
-    }).catch(console.error);
+      start_date: toAbsoluteDateParam(dayjs().startOf('month')),
+      end_date: toAbsoluteDateParam(dayjs().endOf('month'), true),
+    }, { skipErrorHandler: true } as any).then((res: any) => {
+      setMonthConsumptionMap(res || {});
+    }).catch((e) => {
+      console.error('Failed to fetch month consumption stats', e);
+      setMonthConsumptionMap({});
+    });
   }, [walletTimeFilter, users]);
-  
+
   const [columnsWidths, setColumnsWidths] = useState<Record<string, number>>({
     uid: 100,
     username: 320,
@@ -159,6 +195,8 @@ const Users: React.FC = () => {
   const [searchText, setSearchText] = useState('');
   const [filterGroup, setFilterGroup] = useState<string>('all');
   const [filterReferrer, setFilterReferrer] = useState('');
+  /** 排序：default / 系统钱包余额 / 赠送钱包余额 / 信控额度 / 消费合计 */
+  const [listSort, setListSort] = useState<'default' | 'balance_desc' | 'balance_asc' | 'gift_balance_desc' | 'gift_balance_asc' | 'credit_limit_desc' | 'credit_limit_asc' | 'consumption_desc' | 'consumption_asc'>('default');
   const [form] = Form.useForm();
   const [rechargeForm] = Form.useForm();
   const rechargeActionType = Form.useWatch('actionType', rechargeForm);
@@ -253,9 +291,47 @@ const Users: React.FC = () => {
         user.admin_remark?.toLowerCase().includes(lower)
       );
     }
+
+    if (listSort === 'balance_desc' || listSort === 'balance_asc') {
+      result = [...result].sort((a, b) => {
+        const balA = a.balance || 0;
+        const balB = b.balance || 0;
+        return listSort === 'balance_desc' ? balB - balA : balA - balB;
+      });
+    } else if (listSort === 'gift_balance_desc' || listSort === 'gift_balance_asc') {
+      result = [...result].sort((a, b) => {
+        const giftA = a.gift_balance || 0;
+        const giftB = b.gift_balance || 0;
+        return listSort === 'gift_balance_desc' ? giftB - giftA : giftA - giftB;
+      });
+    } else if (listSort === 'credit_limit_desc' || listSort === 'credit_limit_asc') {
+      // 信控为 0 的用户不参与排序，固定排在有信控额度的用户之后
+      const withCredit: typeof result = [];
+      const noCredit: typeof result = [];
+      for (const u of result) {
+        if ((u.credit_limit || 0) > 0) withCredit.push(u);
+        else noCredit.push(u);
+      }
+      withCredit.sort((a, b) => {
+        const creditA = a.credit_limit || 0;
+        const creditB = b.credit_limit || 0;
+        return listSort === 'credit_limit_desc' ? creditB - creditA : creditA - creditB;
+      });
+      result = [...withCredit, ...noCredit];
+    } else if (listSort === 'consumption_desc' || listSort === 'consumption_asc') {
+      result = [...result].sort((a, b) => {
+        const costA = walletTimeFilter === 'month'
+          ? (monthConsumptionMap[a.id]?.system_cost || 0)
+          : (a.used_quota || 0);
+        const costB = walletTimeFilter === 'month'
+          ? (monthConsumptionMap[b.id]?.system_cost || 0)
+          : (b.used_quota || 0);
+        return listSort === 'consumption_desc' ? costB - costA : costA - costB;
+      });
+    }
     
     return result;
-  }, [users, searchText, filterGroup, filterReferrer, allUsers]);
+  }, [users, searchText, filterGroup, filterReferrer, allUsers, listSort, walletTimeFilter, monthConsumptionMap]);
 
   const handleAdd = () => {
     setEditingUser(null);
@@ -533,50 +609,7 @@ const Users: React.FC = () => {
             {record.admin_remark || '添加备注'}
           </Text>
           </div>
-          {/* 模型单独折扣标识：悬浮展示具体 mid 及折扣倍率 */}
-          {(() => {
-            const md: Record<string, number> = record.model_discounts ? (() => { try { return JSON.parse(record.model_discounts); } catch { return {}; } })() : {};
-            const entries = Object.entries(md);
-            if (entries.length === 0) return null;
-            const content = (
-              <div style={{ maxHeight: 260, overflowY: 'auto' }}>
-                {entries.map(([mid, discount]) => {
-                  const model = availableModels.find((m: any) => m.mid === mid);
-                  const hasLimit = model?.site_discount_enabled === 1;
-                  const limit = hasLimit ? Number(model.site_discount || 1) : null;
-                  const isLimited = hasLimit && discount < limit!;
-                  const actualDiscount = isLimited ? limit : discount;
-
-                  return (
-                    <div key={mid} style={{ display: 'grid', gridTemplateColumns: 'minmax(120px, 1fr) 85px 85px 85px', gap: 12, padding: '4px 0', fontSize: 12, alignItems: 'center' }}>
-                      <span style={{ opacity: 0.85, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={model ? model.name : mid}>
-                        {model ? model.name : mid}
-                      </span>
-                      <span style={{ textAlign: 'right', fontWeight: 500, color: discount < 1 ? '#52c41a' : discount > 1 ? '#ff4d4f' : undefined, textDecoration: isLimited ? 'line-through' : 'none', opacity: isLimited ? 0.6 : 1 }}>
-                        设置: {discount}x
-                      </span>
-                      <span style={{ textAlign: 'right', color: '#faad14' }}>
-                        {hasLimit ? `限价: ${limit}x` : ''}
-                      </span>
-                      <span style={{ textAlign: 'right', fontWeight: 'bold', color: actualDiscount! < 1 ? '#52c41a' : actualDiscount! > 1 ? '#ff4d4f' : undefined }}>
-                        实际: {actualDiscount}x
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            );
-            return (
-              <div style={{ marginTop: 4 }}>
-                <Tooltip title={content} placement="right" overlayStyle={{ maxWidth: 500 }}>
-                  <Tag color="orange" style={{ width: 'fit-content', fontSize: 11, padding: '0 6px', margin: 0, cursor: 'pointer', lineHeight: '20px', borderRadius: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                    <span>🏷️</span>
-                    <span>模型折扣({entries.length})</span>
-                  </Tag>
-                </Tooltip>
-              </div>
-            );
-          })()}
+          <ModelDiscountHoverTag modelDiscounts={record.model_discounts} models={availableModels} />
         </div>
       ),
     },
@@ -622,27 +655,7 @@ const Users: React.FC = () => {
       },
     },
     {
-      title: (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
-          <span>钱包余额</span>
-          <Select
-            size="small"
-            value={walletTimeFilter}
-            onChange={(v) => {
-              setWalletTimeFilter(v);
-              localStorage.setItem('walletTimeFilter', v);
-            }}
-            bordered={false}
-            options={[
-              { label: '全部数据', value: 'all' },
-              { label: '当月数据', value: 'month' },
-            ]}
-            style={{ width: 100, marginLeft: 8 }}
-            popupMatchSelectWidth={false}
-            onClick={(e) => e.stopPropagation()}
-          />
-        </div>
-      ),
+      title: '钱包余额',
       key: 'balance',
       width: 320,
       render: (_: unknown, record: User) => (
@@ -651,9 +664,8 @@ const Users: React.FC = () => {
           onWalletClick={openWalletDetail} 
           width={140} 
           gap={20} 
-          totalRecharge={allStatsMap[record.id]?.recharge_amount}
-          totalGiftRecharge={allStatsMap[record.id]?.gift_amount}
-          monthStats={walletTimeFilter === 'month' ? monthStatsMap[record.id] : undefined}
+          showConsumption
+          monthConsumption={walletTimeFilter === 'month' ? (monthConsumptionMap[record.id] || { system_cost: 0, gift_cost: 0 }) : undefined}
         />
       ),
     },
@@ -708,14 +720,34 @@ const Users: React.FC = () => {
             <Select
               value={filterGroup}
               onChange={setFilterGroup}
-              style={{ width: screens.xs ? '100%' : 200 }}
+              style={{ width: screens.xs ? '100%' : 200, fontSize: 12, height: 32 }}
+              styles={{ popup: { root: { fontSize: 12 } } }}
               options={[
                 { value: 'all', label: '全部用户等级' },
                 ...userLevels.map(level => ({ value: level.group_key, label: `${level.name} (${level.discount}x)` }))
               ]}
             />
           )}
-          {screens.xs && (
+          {!isAdminPage && (
+            <Select
+              value={listSort}
+              onChange={setListSort}
+              style={{ width: screens.xs ? '100%' : 200, fontSize: 12, height: 32 }}
+              styles={{ popup: { root: { fontSize: 12 } } }}
+              options={[
+                { value: 'default', label: '默认排序' },
+                { value: 'balance_desc', label: '系统钱包余额 ↓' },
+                { value: 'balance_asc', label: '系统钱包余额 ↑' },
+                { value: 'gift_balance_desc', label: '赠送钱包余额 ↓' },
+                { value: 'gift_balance_asc', label: '赠送钱包余额 ↑' },
+                { value: 'credit_limit_asc', label: '信控额度 ↑' },
+                { value: 'credit_limit_desc', label: '信控额度 ↓' },
+                { value: 'consumption_desc', label: '消费合计 ↓' },
+                { value: 'consumption_asc', label: '消费合计 ↑' },
+              ]}
+            />
+          )}
+          {!isAdminPage && (
             <Select
               value={walletTimeFilter}
               onChange={(v) => {
@@ -723,10 +755,11 @@ const Users: React.FC = () => {
                 localStorage.setItem('walletTimeFilter', v);
               }}
               options={[
-                { label: '全部钱包数据', value: 'all' },
-                { label: '当月钱包数据', value: 'month' },
+                { label: '当月数据', value: 'month' },
+                { label: '全部数据', value: 'all' },
               ]}
-              style={{ width: '100%' }}
+              style={{ width: screens.xs ? '100%' : 140, fontSize: 12, height: 32 }}
+              styles={{ popup: { root: { fontSize: 12 } } }}
             />
           )}
           <Input 
@@ -737,7 +770,7 @@ const Users: React.FC = () => {
             onChange={(e) => setSearchText(e.target.value)} 
             onBlur={() => setSearchText(searchText.trim())}
             onPressEnter={(e) => setSearchText((e.target as HTMLInputElement).value.trim())}
-            style={{ width: screens.xs ? '100%' : 280 }}
+            style={{ width: screens.xs ? '100%' : 280, fontSize: 12, height: 32 }}
           />
           {!isAdminPage && (
             <Input 
@@ -748,11 +781,11 @@ const Users: React.FC = () => {
               onChange={(e) => setFilterReferrer(e.target.value)} 
               onBlur={() => setFilterReferrer(filterReferrer.trim())}
               onPressEnter={(e) => setFilterReferrer((e.target as HTMLInputElement).value.trim())}
-              style={{ width: screens.xs ? '100%' : 220 }}
+              style={{ width: screens.xs ? '100%' : 220, fontSize: 12, height: 32 }}
             />
           )}
-          {isAdminPage && <Button icon={<SyncOutlined />} onClick={fetchUsers}>{t('common.refresh')}</Button>}
-          <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>{isAdminPage ? '添加管理员' : '添加普通用户'}</Button>
+          {isAdminPage && <Button icon={<SyncOutlined />} onClick={fetchUsers} style={{ height: 32, borderRadius: 6, fontSize: 12 }}>{t('common.refresh')}</Button>}
+          <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd} style={{ height: 32, borderRadius: 6, fontSize: 12 }}>{isAdminPage ? '添加管理员' : '添加普通用户'}</Button>
         </Space>
       </div>
 
@@ -765,9 +798,6 @@ const Users: React.FC = () => {
           renderCard={(record: any) => {
             const level = userLevels.find((l: any) => l.group_key === record.user_group);
             const levelName = level ? level.name : (record.user_group || 'default').toUpperCase();
-            const balance = record.balance || 0;
-            const used = record.used_quota || 0;
-            const total = balance + used;
             return (
               <MobileCard
                 title={<Space><UserOutlined /><Text strong>{record.username}</Text>{record.nickname && <Text type="secondary">({record.nickname})</Text>}</Space>}
@@ -819,47 +849,11 @@ const Users: React.FC = () => {
                 </CardRow>
 
                 {/* 模型单独折扣标识 */}
-                {(() => {
-                  const md: Record<string, number> = record.model_discounts ? (() => { try { return JSON.parse(record.model_discounts); } catch { return {}; } })() : {};
-                  const entries = Object.entries(md);
-                  if (entries.length === 0) return null;
-                  const content = (
-                    <div style={{ maxHeight: 260, overflowY: 'auto' }}>
-                      {entries.map(([mid, discount]) => {
-                        const model = availableModels.find((m: any) => m.mid === mid);
-                        const hasLimit = model?.site_discount_enabled === 1;
-                        const limit = hasLimit ? Number(model.site_discount || 1) : null;
-                        const isLimited = hasLimit && discount < limit!;
-                        const actualDiscount = isLimited ? limit : discount;
-                        return (
-                          <div key={mid} style={{ display: 'grid', gridTemplateColumns: 'minmax(120px, 1fr) 85px 85px 85px', gap: 12, padding: '4px 0', fontSize: 12, alignItems: 'center' }}>
-                            <span style={{ opacity: 0.85, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={model ? model.name : mid}>
-                              {model ? model.name : mid}
-                            </span>
-                            <span style={{ textAlign: 'right', fontWeight: 500, color: discount < 1 ? '#52c41a' : discount > 1 ? '#ff4d4f' : undefined, textDecoration: isLimited ? 'line-through' : 'none', opacity: isLimited ? 0.6 : 1 }}>
-                              设置: {discount}x
-                            </span>
-                            <span style={{ textAlign: 'right', color: '#faad14' }}>
-                              {hasLimit ? `限价: ${limit}x` : ''}
-                            </span>
-                            <span style={{ textAlign: 'right', fontWeight: 'bold', color: actualDiscount! < 1 ? '#52c41a' : actualDiscount! > 1 ? '#ff4d4f' : undefined }}>
-                              实际: {actualDiscount}x
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  );
-                  return (
-                    <CardRow label="模型折扣">
-                      <Tooltip title={content} placement="topRight" overlayStyle={{ maxWidth: '90vw' }}>
-                        <Tag color="orange" style={{ fontSize: 11, padding: '0 6px', margin: 0, cursor: 'pointer', borderRadius: 4 }}>
-                          🏷️ 已设({entries.length})
-                        </Tag>
-                      </Tooltip>
-                    </CardRow>
-                  );
-                })()}
+                {record.model_discounts && (
+                  <CardRow label="模型折扣">
+                    <ModelDiscountHoverTag modelDiscounts={record.model_discounts} models={availableModels} compact />
+                  </CardRow>
+                )}
 
                 {isAdminPage ? (
                   <CardRow label="分组">
@@ -890,9 +884,8 @@ const Users: React.FC = () => {
                   <WalletBalanceDisplay 
                     record={record} 
                     onWalletClick={openWalletDetail} 
-                    totalRecharge={allStatsMap[record.id]?.recharge_amount}
-                    totalGiftRecharge={allStatsMap[record.id]?.gift_amount}
-                    monthStats={walletTimeFilter === 'month' ? monthStatsMap[record.id] : undefined}
+                    showConsumption
+                    monthConsumption={walletTimeFilter === 'month' ? (monthConsumptionMap[record.id] || { system_cost: 0, gift_cost: 0 }) : undefined}
                     gap={12}
                   />
                 </div>
@@ -932,6 +925,7 @@ const Users: React.FC = () => {
             showTotal: (total) => `共 ${total} 条数据`
           }}
           scroll={{ x: 'max-content' }}
+          showSorterTooltip={false}
         />
       )}
       </>
@@ -1201,7 +1195,7 @@ const Users: React.FC = () => {
                     children: (
                       <div style={{ marginTop: 8 }}>
                         <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 16, fontSize: 13 }}>
-                          控制该用户是否可使用在线充值功能。关闭后，用户端资产中心将不显示在线充值按钮，且无法发起任何支付请求。
+                          控制该用户是否可使用在线充值功能。关闭后，用户端「我的钱包」将不显示在线充值按钮，且无法发起任何支付请求。
                         </Typography.Text>
                         <div style={{ padding: '16px 20px', background: _isLight ? '#f9fafb' : 'rgba(255,255,255,0.04)', borderRadius: 8, border: _isLight ? '1px solid #e5e4e7' : '1px solid rgba(255,255,255,0.1)' }}>
                           <Form.Item
@@ -1209,7 +1203,7 @@ const Users: React.FC = () => {
                             label="在线支付"
                             initialValue={1}
                             style={{ marginBottom: 0 }}
-                            extra="开启后用户可在资产中心使用在线充值功能（支付宝、微信、Stripe、加密货币等）"
+                            extra="开启后用户可在「我的钱包」使用在线充值功能（支付宝、微信、Stripe、加密货币等）"
                           >
                             <Radio.Group buttonStyle="solid" optionType="button">
                               <Radio value={1}>✅ 允许支付</Radio>
@@ -1477,7 +1471,7 @@ const Users: React.FC = () => {
               gridTemplateColumns: 'repeat(4, 1fr)', 
               gap: 12 
             }}>
-              {[10, 20, 50, 100, 500, 1000, 5000, 10000].map(val => (
+              {[10, 50, 100, 500, 1000, 10000, 20000, 100000].map(val => (
                 <Button 
                   key={val} 
                   style={{ 

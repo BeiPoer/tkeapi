@@ -30,7 +30,8 @@ import {
   PortalContactManagerPro,
   HappyHorseManager,
   DocsManager,
-  ApiAccessConfig
+  ApiAccessConfig,
+  HaLogs,
 } from '../../plugins-registry';
 import ModerationQuery from '../ModerationQuery/ModerationQuery';
 import { useThemeStore } from '../../store/theme';
@@ -78,8 +79,6 @@ const BUILTIN_TAB_KEYS = [
   'routing_rules', 'portal_manager', 'ha_config', 'ha_logs', 'docs_manager',
 ] as const;
 
-const HaLogs = safeLazy(() => import('./HighAvailability/HaLogs'));
-
 /** 使用独立 TOS 表单的插件（其余仅展示全局存储） */
 const INDEPENDENT_STORAGE_PLUGINS = new Set([
   'asset_manager',
@@ -87,6 +86,7 @@ const INDEPENDENT_STORAGE_PLUGINS = new Set([
   'playground',
   'playground_2026',
   'upstream_asset_relay',
+  'comfyui_bridge',
 ]);
 
 const { Title, Text } = Typography;
@@ -160,7 +160,8 @@ const pluginIcons: Record<string, React.ReactNode> = {
   site_portal: <HomeOutlined style={{ fontSize: 20 }} />,
   site_portal_pro: <HomeOutlined style={{ fontSize: 20 }} />,
   docs_api: <BookOutlined style={{ fontSize: 20 }} />,
-  happyhorse_router: <ThunderboltOutlined style={{ fontSize: 20 }} />
+  happyhorse_router: <ThunderboltOutlined style={{ fontSize: 20 }} />,
+  comfyui_bridge: <VideoCameraOutlined style={{ fontSize: 20 }} />,
 };
 
 const PluginConfigInner: React.FC = () => {
@@ -1482,7 +1483,11 @@ const PluginConfigInner: React.FC = () => {
                       ? storageConfig.global_configured
                         ? '尚未单独配置本插件存储。base64 转素材将暂时使用「站点设置 → 存储设置」全局 TOS；保存下方配置后优先使用本插件存储。'
                         : 'base64 转素材 ID 需要 TOS。请在此单独配置，或先到「站点设置 → 存储设置」配置全局存储作为回退。'
-                      : '用户上传素材功能需要先完成火山引擎 TOS 对象存储配置'
+                      : name === 'comfyui_bridge'
+                        ? storageConfig.global_configured
+                          ? '尚未单独配置本插件存储。成片将暂时使用「站点设置 → 存储设置」全局 TOS；都未配置时写入本地 /assets/comfyui/。保存下方配置后优先使用本插件存储。'
+                          : '建议配置 TOS。未配置时回退「站点设置 → 存储设置」全局 TOS，再没有则写入本地 /assets/comfyui/。'
+                        : '用户上传素材功能需要先完成火山引擎 TOS 对象存储配置'
                   }
                   style={{ background: 'rgba(250,173,20,0.06)', border: '1px solid rgba(250,173,20,0.2)' }}
                 />
@@ -2496,6 +2501,24 @@ const PluginConfigInner: React.FC = () => {
               {scheme.params.map((p: any) => {
                 const isRemoved = removes.has(p.key);
                 const mod = modifies[p.key] || {};
+                const fieldHint = { fontSize: 11, color: _isLight ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.4)', display: 'block', marginBottom: 4 } as const;
+                const sameValue = (a: any, b: any) =>
+                  Array.isArray(a) && Array.isArray(b)
+                    ? JSON.stringify(a) === JSON.stringify(b)
+                    : a === b || String(a) === String(b);
+                const patchModField = (field: string, value: any, original: any) => {
+                  const next = { ...mod };
+                  if (sameValue(value, original)) delete next[field];
+                  else next[field] = value;
+                  const newMod = { ...modifies };
+                  if (Object.keys(next).length === 0) delete newMod[p.key];
+                  else newMod[p.key] = next;
+                  setPgOverrideData({ ...overrides, modify: newMod });
+                };
+                const parseNum = (raw: string, fallback: number) => {
+                  const n = Number(raw);
+                  return Number.isFinite(n) ? n : fallback;
+                };
                 return (
                   <div key={p.key} style={{
                     padding: '10px 14px', borderRadius: 8,
@@ -2521,7 +2544,7 @@ const PluginConfigInner: React.FC = () => {
                       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                         {p.type !== 'switch' && p.type !== 'slider' && Array.isArray(p.options) && (
                           <div style={{ flex: 1, minWidth: 200 }}>
-                            <Text style={{ fontSize: 11, color: _isLight ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.4)', display: 'block', marginBottom: 4 }}>选项 (逗号分隔)</Text>
+                            <Text style={fieldHint}>选项 (逗号分隔)</Text>
                             <Input
                               size="small"
                               defaultValue={(mod.options || p.options).join(', ')}
@@ -2529,26 +2552,37 @@ const PluginConfigInner: React.FC = () => {
                               onBlur={e => {
                                 const isNumeric = typeof p.default === 'number' || (Array.isArray(p.options) && p.options.length > 0 && typeof p.options[0] === 'number');
                                 const newOpts = e.target.value.split(',').map((s: string) => s.trim()).filter(Boolean).map(x => (isNumeric && !isNaN(Number(x))) ? Number(x) : x);
-                                const isOriginal = JSON.stringify(newOpts) === JSON.stringify(p.options);
-                                const newMod = { ...modifies };
-                                if (isOriginal) { delete newMod[p.key]; } else { newMod[p.key] = { ...mod, options: newOpts }; }
-                                setPgOverrideData({ ...overrides, modify: newMod });
+                                patchModField('options', newOpts, p.options);
                               }}
                               onPressEnter={e => (e.target as HTMLInputElement).blur()}
                             />
                           </div>
                         )}
+                        {p.type === 'slider' && ([
+                          { field: 'min', label: `最小值${p.unit ? ` (${p.unit})` : ''}`, fallback: 0, width: 100 },
+                          { field: 'max', label: `最大值${p.unit ? ` (${p.unit})` : ''}`, fallback: 100, width: 100 },
+                          { field: 'step', label: '步长', fallback: 1, width: 80 },
+                        ] as const).map(({ field, label, fallback, width }) => {
+                          const original = p[field] ?? fallback;
+                          return (
+                            <div key={field} style={{ width }}>
+                              <Text style={fieldHint}>{label}</Text>
+                              <Input
+                                size="small"
+                                type="number"
+                                value={String(mod[field] !== undefined ? mod[field] : original)}
+                                onChange={e => patchModField(field, parseNum(e.target.value, original), original)}
+                              />
+                            </div>
+                          );
+                        })}
                         <div style={{ width: 120 }}>
-                          <Text style={{ fontSize: 11, color: _isLight ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.4)', display: 'block', marginBottom: 4 }}>默认值</Text>
+                          <Text style={fieldHint}>默认值</Text>
                           {p.type === 'switch' ? (
                             <Switch
                               size="small"
                               checked={mod.default !== undefined ? mod.default : p.default}
-                              onChange={v => {
-                                const newMod = { ...modifies };
-                                if (v === p.default) { delete newMod[p.key]; } else { newMod[p.key] = { ...mod, default: v }; }
-                                setPgOverrideData({ ...overrides, modify: newMod });
-                              }}
+                              onChange={v => patchModField('default', v, p.default)}
                             />
                           ) : (
                             <Input
@@ -2564,9 +2598,7 @@ const PluginConfigInner: React.FC = () => {
                                 } else if (p.type === 'slider') {
                                   val = Number(rawVal) || 0;
                                 }
-                                const newMod = { ...modifies };
-                                if (val === p.default || String(val) === String(p.default)) { delete newMod[p.key]; } else { newMod[p.key] = { ...mod, default: val }; }
-                                setPgOverrideData({ ...overrides, modify: newMod });
+                                patchModField('default', val, p.default);
                               }}
                             />
                           )}
@@ -3996,8 +4028,7 @@ const PluginConfigInner: React.FC = () => {
       {/* 页头 */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        marginBottom: 20, paddingBottom: 16,
-        borderBottom: '1px solid rgba(255,255,255,0.06)'
+        marginBottom: 4,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => navigate(`/${adminPath}/plugins`)} style={{ color: _isLight ? 'rgba(0,0,0,0.65)' : 'rgba(255,255,255,0.65)', padding: '4px 8px' }} />
@@ -4030,6 +4061,7 @@ const PluginConfigInner: React.FC = () => {
       <Tabs
         activeKey={activeTabKey}
         onChange={handleTabChange}
+        tabBarStyle={{ marginBottom: 12 }}
         items={
           currentDyn
             ? [
@@ -4050,7 +4082,7 @@ const PluginConfigInner: React.FC = () => {
                     ]
                   : []),
               // 独立 TOS 表单（可单独配置；未填则运行时回退全局存储）
-              ...(name === 'upstream_asset_relay'
+              ...(name === 'upstream_asset_relay' || name === 'comfyui_bridge'
                 ? [{ key: 'storage', label: '存储配置', children: storageTab }]
                 : []),
             ]

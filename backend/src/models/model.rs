@@ -44,6 +44,10 @@ pub struct Model {
     pub description: Option<String>,
     #[sqlx(default)]
     pub feature_attributes: Option<String>,
+    /// 1=系统预设，0=自定义
+    #[sqlx(default)]
+    #[serde(default)]
+    pub is_system: i32,
     pub created_at: DbTs,
     pub updated_at: DbTs,
     #[sqlx(default)]
@@ -328,6 +332,8 @@ pub struct ModelProvider {
     pub remark: Option<String>,
     #[sqlx(default)]
     pub logo: Option<String>,
+    #[sqlx(default)]
+    pub model_count: i64,
     pub created_at: DbTs,
     pub updated_at: DbTs,
 }
@@ -346,6 +352,8 @@ pub struct ModelType {
     pub logo: Option<String>,
     #[sqlx(default)]
     pub default_features: Option<String>,
+    #[sqlx(default)]
+    pub model_count: i64,
     pub created_at: DbTs,
     pub updated_at: DbTs,
 }

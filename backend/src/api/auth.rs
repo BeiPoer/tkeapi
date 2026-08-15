@@ -225,6 +225,8 @@ pub struct AdminInitStatusResponse {
 pub struct InitAdminRequest {
     pub username: String,
     pub password: String,
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 pub async fn admin_init_status(State(state): State<Arc<AppState>>) -> Response {
@@ -278,6 +280,9 @@ pub async fn init_admin(
         if request.password.len() < 6 {
             return Err(AppError::BadRequest("管理员密码长度至少需要6位".to_string()));
         }
+
+        crate::api::settings::apply_initial_site_timezone(&state, request.timezone.as_deref())
+            .await?;
 
         let password_hash = auth::hash_password(&request.password)?;
         let id = uuid::Uuid::new_v4().to_string();

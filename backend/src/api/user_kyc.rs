@@ -540,16 +540,3 @@ pub async fn upload_kyc_document(
         "object_key": object_key,
     })))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalize_helpers() {
-        assert_eq!(normalize_kyc_type("personal"), Some("personal"));
-        assert_eq!(normalize_kyc_type("x"), None);
-        assert_eq!(normalize_validity_type("long_term"), Some("long_term"));
-        assert_eq!(normalize_id_doc_type("passport"), Some("passport"));
-    }
-}

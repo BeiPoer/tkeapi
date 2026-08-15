@@ -13,6 +13,7 @@ import { useTranslation } from 'react-i18next';
 import axios, { AxiosError } from 'axios';
 import useAuthStore from '../../store/auth';
 import type { User } from '../../types';
+import { clearAwaitingFreshSetup, fetchAdminInitStatus, isAwaitingFreshSetup } from '../../utils/freshSetup';
 
 const { Title, Text } = Typography;
 
@@ -26,23 +27,34 @@ const AdminLogin: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [glitch, setGlitch] = useState(false);
   const [isInitialized, setIsInitialized] = useState<boolean | null>(null);
+  const [waitingRestart, setWaitingRestart] = useState(isAwaitingFreshSetup());
 
   const navigate = useNavigate();
   const { token, user, setToken, setUser } = useAuthStore();
 
-  // 检查系统是否有管理员初始化
+  // 检查系统是否有管理员；清空库后服务重启期间持续探测，直到返回明确状态
   useEffect(() => {
+    let cancelled = false;
     const checkInitStatus = async () => {
-      try {
-        const response = await axios.get<{ initialized: boolean }>('/api/v1/auth/admin/init-status');
-        setIsInitialized(response.data.initialized);
-      } catch (err) {
-        console.error('Failed to check admin init status', err);
-        // 探测失败时按未初始化处理，优先展示配置页
-        setIsInitialized(false);
+      while (!cancelled) {
+        try {
+          const initialized = await fetchAdminInitStatus();
+          if (cancelled) return;
+          clearAwaitingFreshSetup();
+          setWaitingRestart(false);
+          setIsInitialized(initialized);
+          return;
+        } catch {
+          if (cancelled) return;
+          setWaitingRestart(true);
+          await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        }
       }
     };
-    checkInitStatus();
+    void checkInitStatus();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // 如果管理员已登录，且系统已初始化，直接跳转到控制台页面
@@ -98,6 +110,7 @@ const AdminLogin: React.FC = () => {
       const response = await axios.post<LoginResponse>('/api/v1/auth/admin/init', {
         username: values.username,
         password: values.password,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       });
       const { token, user } = response.data;
       setToken(token);
@@ -121,13 +134,20 @@ const AdminLogin: React.FC = () => {
       <div style={{
         height: '100vh',
         display: 'flex',
+        flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
         backgroundColor: '#000',
         color: '#00ff41',
         fontFamily: 'monospace',
       }}>
-        CHECKING_SYSTEM_STATUS...
+        <div>CHECKING_SYSTEM_STATUS...</div>
+        {waitingRestart && (
+          <div style={{ marginTop: 12, fontSize: 12, opacity: 0.7, textAlign: 'center', lineHeight: 1.7 }}>
+            <div>服务正在重启，随后将进入全新安装</div>
+            <div>Restarting service, then entering fresh setup</div>
+          </div>
+        )}
       </div>
     );
   }
@@ -180,8 +200,8 @@ const AdminLogin: React.FC = () => {
         }} />
 
         <div style={{ zIndex: 2, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-          <Title level={1} style={{ margin: 0, marginBottom: 40, color: '#00ff41', letterSpacing: '8px', textShadow: '0 0 20px #00ff41', fontWeight: 'bold' }}>
-            TokensByte
+          <Title level={1} className="tke-api-title" style={{ margin: 0, marginBottom: 40, color: '#00ff41', fontWeight: 'bold' }}>
+            TkeApi
           </Title>
           <Card 
             style={{ 
@@ -211,7 +231,20 @@ const AdminLogin: React.FC = () => {
                   opacity: 0.3
                 }} />
               </div>
-              <Title level={3} style={{ margin: 0, color: '#00ff41', letterSpacing: '3px', textShadow: '0 0 10px #00ff41' }}>
+              <Title
+                level={3}
+                style={{
+                  margin: 0,
+                  color: '#00ff41',
+                  fontSize: isInitialized ? '20px' : '17px',
+                  letterSpacing: isInitialized ? '2px' : '1px',
+                  textShadow: '0 0 10px #00ff41',
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  maxWidth: '100%',
+                }}
+              >
                 {isInitialized ? 'ADMIN_SYS_ACCESS' : 'INITIALIZE_SUPER_ADMIN'}
               </Title>
               <Text style={{ color: '#00ff41', fontSize: '11px', opacity: 0.85 }}>
@@ -366,6 +399,32 @@ const AdminLogin: React.FC = () => {
             @keyframes scanner {
               0% { top: -100%; }
               100% { top: 100%; }
+            }
+
+            @keyframes tkeApiGlow {
+              0%, 100% {
+                text-shadow: 0 0 15px #00ff41, 0 0 30px #00ff41, 0 0 45px rgba(0, 255, 65, 0.6);
+                transform: translateY(0) scale(1);
+                letter-spacing: 8px;
+              }
+              50% {
+                text-shadow: 0 0 25px #00ff41, 0 0 50px #00ff41, 0 0 75px #00ff41, 0 0 100px rgba(0, 255, 65, 0.9);
+                transform: translateY(-4px) scale(1.03);
+                letter-spacing: 10px;
+              }
+            }
+
+            .tke-api-title {
+              display: inline-block;
+              animation: tkeApiGlow 3.5s ease-in-out infinite;
+              user-select: none;
+              transition: all 0.3s ease;
+              cursor: default;
+            }
+
+            .tke-api-title:hover {
+              text-shadow: 0 0 35px #00ff41, 0 0 70px #00ff41, 0 0 100px #00ff41;
+              transform: translateY(-6px) scale(1.06);
             }
           `}
         </style>

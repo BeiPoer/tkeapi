@@ -13,6 +13,7 @@ import { PlusOutlined, EditOutlined, DeleteOutlined, CopyOutlined, SyncOutlined,
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
+import { fetchActivePlugins } from '../../utils/activePlugins';
 import { useThemeStore } from '../../store/theme';
 import useSettingsStore from '../../store/settings';
 import useAuthStore from '../../store/auth';
@@ -20,7 +21,7 @@ import type { ApiToken } from '../../types';
 import dayjs from 'dayjs';
 import { getPeriodicUsed, getQuotaRefreshText, hasPeriodicLimits } from './quotaUtils';
 import { resolveTimedisplay } from '../../utils/timedisplay';
-import { shouldBlockTokenCreate, tokenBindBlockMessage } from '../../utils/bindPolicy';
+import { shouldBlockTokenCreate, tokenBindBlockI18nKey } from '../../utils/bindPolicy';
 
 const { Title, Text } = Typography;
 const { useBreakpoint } = Grid;
@@ -150,7 +151,7 @@ const Tokens: React.FC = () => {
 
   const fetchPluginsState = async () => {
     try {
-      const pluginRes = await (request.get('/plugins/active') as Promise<any>);
+      const pluginRes = await fetchActivePlugins();
       const isActiveHA = pluginRes?.active_plugins?.some((p: any) => p.name === 'high_availability_channel');
       setIsHAPluginEnabled(!!isActiveHA);
     } catch { /* ignore */ }
@@ -216,10 +217,10 @@ const Tokens: React.FC = () => {
   const handleAdd = () => {
     if (shouldBlockTokenCreate(settings?.registration, user)) {
       Modal.confirm({
-        title: '需要完成账号绑定',
-        content: tokenBindBlockMessage(settings?.registration),
-        okText: '去绑定',
-        cancelText: '取消',
+        title: t('tokens.bind_required_title'),
+        content: t(tokenBindBlockI18nKey(settings?.registration)),
+        okText: t('tokens.go_bind'),
+        cancelText: t('common.cancel'),
         onOk: () => navigate('/profile'),
       });
       return;
@@ -407,7 +408,7 @@ const Tokens: React.FC = () => {
 
   const columns = [
     {
-      title: '令牌(KID)',
+      title: t('tokens.kid'),
       dataIndex: 'kid',
       key: 'kid',
       width: 110,
@@ -423,12 +424,12 @@ const Tokens: React.FC = () => {
         const isPlayground2026 = record.only_playground_2026 === 1;
         const isActive = record.is_active === 1 || record.is_active === true;
         const scopeLabel = isPlayground && isPlayground2026
-          ? t('tokens.playground_both', '创作中心系列')
+          ? t('tokens.playground_both')
           : isPlayground2026
-            ? t('tokens.playground_2026_only', '仅创作中心2026')
+            ? t('tokens.playground_2026_only')
             : isPlayground
-              ? t('tokens.playground_only', '仅创作中心')
-              : t('tokens.general', '通用');
+              ? t('tokens.playground_only')
+              : t('tokens.general');
         const scopeColor = (isPlayground || isPlayground2026) ? 'orange' : 'blue';
         return (
           <Space direction="vertical" size={4} style={{ display: 'flex' }}>
@@ -461,10 +462,10 @@ const Tokens: React.FC = () => {
 
         const periodicTooltipContent = (
           <div style={{ fontSize: '12px', padding: '4px' }}>
-            <div style={{ fontWeight: 600, marginBottom: '4px' }}>周期额度详情：</div>
-            <div style={{ marginBottom: '2px' }}>日限额: {record.daily_quota_limit < 0 ? '无限' : `${dailyUsed.toFixed(6)} / ${record.daily_quota_limit}`}</div>
-            <div style={{ marginBottom: '2px' }}>周限额: {record.weekly_quota_limit < 0 ? '无限' : `${weeklyUsed.toFixed(6)} / ${record.weekly_quota_limit}`}</div>
-            <div>月限额: {record.monthly_quota_limit < 0 ? '无限' : `${monthlyUsed.toFixed(6)} / ${record.monthly_quota_limit}`}</div>
+            <div style={{ fontWeight: 600, marginBottom: '4px' }}>{t('tokens.periodic_quota_details')}</div>
+            <div style={{ marginBottom: '2px' }}>{t('tokens.daily_cap')}: {record.daily_quota_limit < 0 ? t('tokens.unlimited') : `${dailyUsed.toFixed(6)} / ${record.daily_quota_limit}`}</div>
+            <div style={{ marginBottom: '2px' }}>{t('tokens.weekly_cap')}: {record.weekly_quota_limit < 0 ? t('tokens.unlimited') : `${weeklyUsed.toFixed(6)} / ${record.weekly_quota_limit}`}</div>
+            <div>{t('tokens.monthly_cap')}: {record.monthly_quota_limit < 0 ? t('tokens.unlimited') : `${monthlyUsed.toFixed(6)} / ${record.monthly_quota_limit}`}</div>
           </div>
         );
 
@@ -476,7 +477,7 @@ const Tokens: React.FC = () => {
               </Text>
               <Text style={{ fontSize: 12 }}>
                 {t('tokens.limit')}: {record.quota_limit < 0 ? t('tokens.unlimited') : record.quota_limit}
-                {periodic && <span style={{ marginLeft: '4px', color: '#1890ff', fontSize: '10px', fontWeight: 500 }}>[周期限额]</span>}
+                {periodic && <span style={{ marginLeft: '4px', color: '#1890ff', fontSize: '10px', fontWeight: 500 }}>[{t('tokens.periodic_badge')}]</span>}
               </Text>
             </Space>
           </Tooltip>
@@ -513,7 +514,7 @@ const Tokens: React.FC = () => {
       key: 'actions',
       render: (_: unknown, record: ApiToken) => (
         <Space>
-          <Tooltip title="额度详情">
+          <Tooltip title={t('tokens.quota_details')}>
             <Button icon={<PieChartOutlined />} onClick={() => handleShowDetails(record)} />
           </Tooltip>
           <Button icon={<EditOutlined />} onClick={() => handleEdit(record)} />
@@ -627,7 +628,7 @@ const Tokens: React.FC = () => {
                   height: '36px'
                 }}
               >
-                API 快速入门
+                {t('tokens.api_quickstart')}
               </Button>
               <Button 
                 type="primary" 
@@ -646,7 +647,7 @@ const Tokens: React.FC = () => {
                   alignItems: 'center'
                 }}
               >
-                创建 API 令牌
+                {t('tokens.create_api_token')}
               </Button>
             </Space>
           </div>
@@ -710,7 +711,7 @@ const Tokens: React.FC = () => {
                       />
                     </Tooltip>
                     <Link to="/logs">
-                      <Tooltip title="查看使用日志">
+                      <Tooltip title={t('tokens.view_usage_logs')}>
                         <Button 
                           type="text" 
                           size="small" 
@@ -723,19 +724,19 @@ const Tokens: React.FC = () => {
                         items: [
                           {
                             key: 'details',
-                            label: '额度详情',
+                            label: t('tokens.quota_details'),
                             icon: <PieChartOutlined />,
                             onClick: () => handleShowDetails(record)
                           },
                           {
                             key: 'edit',
-                            label: '编辑令牌',
+                            label: t('tokens.edit_token'),
                             icon: <EditOutlined />,
                             onClick: () => handleEdit(record)
                           },
                           {
                             key: 'delete',
-                            label: <Text>删除令牌</Text>,
+                            label: <Text>{t('tokens.delete_token')}</Text>,
                             icon: <DeleteOutlined />,
                             onClick: () => {
                               Modal.confirm({
@@ -764,43 +765,43 @@ const Tokens: React.FC = () => {
                     extra={cardExtra}
                   >
                     <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      <CardRow label="令牌(KID)" compact={true}>
+                      <CardRow label={t('tokens.kid')} compact={true}>
                         {record.kid ? <Tag color="default" style={{ fontFamily: 'monospace', fontSize: 11, margin: 0 }}>{record.kid}</Tag> : <Text type="secondary">-</Text>}
                       </CardRow>
-                      <CardRow label="密钥状态" compact={true}>
+                      <CardRow label={t('tokens.key_status')} compact={true}>
                         <Tag color="default" style={{ margin: 0 }}>{record.is_active ? t('common.active') : t('common.disabled')}</Tag>
                       </CardRow>
-                      <CardRow label="可用限额" compact={true}>
+                      <CardRow label={t('tokens.available_quota')} compact={true}>
                         <Space direction="vertical" size={0}>
                           <Text style={{ fontSize: 12 }}>{record.quota_limit < 0 ? t('tokens.unlimited') : `${record.quota_used.toFixed(6)} / ${record.quota_limit}`}</Text>
                           {hasPeriodicLimits(record) && (() => {
                             const { dailyUsed, weeklyUsed, monthlyUsed } = getPeriodicUsed(record, quotaTz);
                             const parts: string[] = [];
-                            if (record.daily_quota_limit >= 0) parts.push(`日 ${dailyUsed.toFixed(6)}/${record.daily_quota_limit}`);
-                            if (record.weekly_quota_limit >= 0) parts.push(`周 ${weeklyUsed.toFixed(6)}/${record.weekly_quota_limit}`);
-                            if (record.monthly_quota_limit >= 0) parts.push(`月 ${monthlyUsed.toFixed(6)}/${record.monthly_quota_limit}`);
+                            if (record.daily_quota_limit >= 0) parts.push(`${t('tokens.daily_cap')} ${dailyUsed.toFixed(6)}/${record.daily_quota_limit}`);
+                            if (record.weekly_quota_limit >= 0) parts.push(`${t('tokens.weekly_cap')} ${weeklyUsed.toFixed(6)}/${record.weekly_quota_limit}`);
+                            if (record.monthly_quota_limit >= 0) parts.push(`${t('tokens.monthly_cap')} ${monthlyUsed.toFixed(6)}/${record.monthly_quota_limit}`);
                             return parts.length > 0 ? (
                               <Text type="secondary" style={{ fontSize: 11 }}>{parts.join(' · ')}</Text>
                             ) : null;
                           })()}
                         </Space>
                       </CardRow>
-                      <CardRow label="使用范围" compact={true}>
+                      <CardRow label={t('tokens.usage_scope')} compact={true}>
                         <Tag color={(record.only_playground === 1 || record.only_playground_2026 === 1) ? 'blue' : 'gray'} style={{ fontSize: 11, margin: 0 }}>
                           {record.only_playground === 1 && record.only_playground_2026 === 1
-                            ? t('tokens.playground_both', '创作中心系列')
+                            ? t('tokens.playground_both')
                             : record.only_playground_2026 === 1
-                              ? t('tokens.playground_2026_only', '仅创作中心2026')
+                              ? t('tokens.playground_2026_only')
                               : record.only_playground === 1
-                                ? t('tokens.playground_only', '仅创作中心')
-                                : t('tokens.general', '通用')}
+                                ? t('tokens.playground_only')
+                                : t('tokens.general')}
                         </Tag>
                       </CardRow>
-                      <CardRow label="速率限制" compact={true}>
+                      <CardRow label={t('tokens.rate_limits')} compact={true}>
                         <Text type="secondary" style={{ fontSize: 12 }}>RPS: {record.rps_limit || '∞'} · RPM: {record.rpm_limit || '∞'}</Text>
                       </CardRow>
-                      <CardRow label="创建日期" compact={true}>
-                        <Text type="secondary" style={{ fontSize: 12 }}>{dayjs(record.created_at).format('YYYY年M月D日')}</Text>
+                      <CardRow label={t('tokens.created_date')} compact={true}>
+                        <Text type="secondary" style={{ fontSize: 12 }}>{dayjs(record.created_at).format('YYYY-MM-DD')}</Text>
                       </CardRow>
                     </div>
                   </MobileCard>
@@ -920,7 +921,7 @@ const Tokens: React.FC = () => {
                 fontWeight: 500
               }}
             >
-              {t('common.back', '返回列表')}
+              {t('tokens.back_to_list')}
             </Button>
             
           </div>
@@ -938,8 +939,8 @@ const Tokens: React.FC = () => {
               </Title>
               <Text style={{ fontSize: '14px', lineHeight: '1.5', display: 'block', color: isLight ? '#71717a' : '#a1a1aa' }}>
                 {editingToken 
-                  ? t('tokens.edit_desc', '修改当前令牌的限制和配置信息') 
-                  : t('tokens.create_desc', '新建一个 API 访问令牌，用于调用站内的 AI 模型')}
+                  ? t('tokens.edit_desc') 
+                  : t('tokens.create_desc')}
               </Text>
             </div>
 
@@ -954,11 +955,11 @@ const Tokens: React.FC = () => {
                       name="name" 
                       label={<Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.name')}</Text>} 
                       rules={[
-                        { required: true, message: t('tokens.name_required', '请输入令牌名称') },
-                        { max: 24, message: t('tokens.name_max_length', '令牌名称不能超过 24 个字符') },
+                        { required: true, message: t('tokens.name_required') },
+                        { max: 24, message: t('tokens.name_max_length') },
                         {
                           pattern: /^[\p{L}\p{N}\s_-]+$/u,
-                          message: t('tokens.name_invalid_chars', '不支持标点符号'),
+                          message: t('tokens.name_invalid_chars'),
                         }
                       ]} 
                       initialValue="default"
@@ -973,15 +974,15 @@ const Tokens: React.FC = () => {
                       name="rps_limit" 
                       label={
                         <Space size={4}>
-                          <Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>RPS Limit</Text>
-                          <Tooltip title={t('tokens.rps_limit_tooltip', '每秒请求数限制，0代表不限制')}>
+                          <Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.rps_limit')}</Text>
+                          <Tooltip title={t('tokens.rps_limit_tooltip')}>
                             <span style={{ cursor: 'pointer', color: isLight ? '#71717a' : '#a1a1aa', fontSize: '13px' }}>ⓘ</span>
                           </Tooltip>
                         </Space>
                       } 
                       style={{ marginBottom: '20px' }}
                     >
-                      <InputNumber min={0} size="large" style={{ ...inputStyle, width: '100%' }} className="shadcn-input" placeholder="无限" />
+                      <InputNumber min={0} size="large" style={{ ...inputStyle, width: '100%' }} className="shadcn-input" placeholder={t('tokens.unlimited')} />
                     </Form.Item>
                   </Col>
 
@@ -990,15 +991,15 @@ const Tokens: React.FC = () => {
                       name="rpm_limit" 
                       label={
                         <Space size={4}>
-                          <Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>RPM Limit</Text>
-                          <Tooltip title={t('tokens.rpm_limit_tooltip', '每分钟请求数限制，0代表不限制')}>
+                          <Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.rpm_limit')}</Text>
+                          <Tooltip title={t('tokens.rpm_limit_tooltip')}>
                             <span style={{ cursor: 'pointer', color: isLight ? '#71717a' : '#a1a1aa', fontSize: '13px' }}>ⓘ</span>
                           </Tooltip>
                         </Space>
                       } 
                       style={{ marginBottom: '20px' }}
                     >
-                      <InputNumber min={0} size="large" style={{ ...inputStyle, width: '100%' }} className="shadcn-input" placeholder="无限" />
+                      <InputNumber min={0} size="large" style={{ ...inputStyle, width: '100%' }} className="shadcn-input" placeholder={t('tokens.unlimited')} />
                     </Form.Item>
                   </Col>
                 </Row>
@@ -1015,13 +1016,13 @@ const Tokens: React.FC = () => {
                   }}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', paddingRight: '12px' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.high_availability_label', '高可用通道')}</Text>
-                        <Tooltip title={t('tokens.high_availability_tooltip', '开启后，当调用物理渠道遇到网关错误、5xx、429 等故障时，系统会自动重试并秒级切换到同虚拟组内的备选渠道。')}>
+                        <Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.high_availability_label')}</Text>
+                        <Tooltip title={t('tokens.high_availability_tooltip')}>
                           <span style={{ cursor: 'pointer', color: isLight ? '#09090b' : '#fafafa', fontSize: '13px' }}>ⓘ</span>
                         </Tooltip>
                       </div>
                       <Text style={{ fontSize: '13px', lineHeight: '1.4', color: isLight ? '#71717a' : '#a1a1aa' }}>
-                        仅针对管理后台分组里已开启的高可用渠道生效，普通渠道无自动切换功能。
+                        {t('tokens.high_availability_desc')}
                       </Text>
                     </div>
                     <Form.Item name="high_availability" valuePropName="checked" noStyle>
@@ -1040,9 +1041,9 @@ const Tokens: React.FC = () => {
                   marginBottom: limitQuotaEnabled ? '12px' : '0px'
                 }}>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', paddingRight: '12px' }}>
-                    <Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.limit_total_quota', '限制总额度')}</Text>
+                    <Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.limit_total_quota')}</Text>
                     <Text style={{ fontSize: '13px', lineHeight: '1.4', color: isLight ? '#71717a' : '#a1a1aa' }}>
-                      {limitQuotaEnabled ? t('tokens.limited_quota_desc', '额度消耗完令牌失效') : t('tokens.unlimited_quota_desc', '不限制使用额度')}
+                      {limitQuotaEnabled ? t('tokens.limited_quota_desc') : t('tokens.unlimited_quota_desc')}
                     </Text>
                   </div>
                   <AppSwitch
@@ -1071,7 +1072,7 @@ const Tokens: React.FC = () => {
                       size="large"
                       style={{ ...inputStyle, width: '100%' }} 
                       className="shadcn-input"
-                      placeholder="无限"
+                      placeholder={t('tokens.unlimited')}
                     />
                   </Form.Item>
                 )}
@@ -1094,13 +1095,13 @@ const Tokens: React.FC = () => {
                 }}>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', paddingRight: '12px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.periodic_quota_limits', '周期额度限制')}</Text>
-                      <Tooltip title={t('tokens.periodic_quota_tooltip', '设定令牌在日、周、月等周期内的最高使用额度。')}>
+                      <Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.periodic_quota_limits')}</Text>
+                      <Tooltip title={t('tokens.periodic_quota_tooltip')}>
                         <span style={{ cursor: 'pointer', color: isLight ? '#71717a' : '#a1a1aa', fontSize: '13px' }}>ⓘ</span>
                       </Tooltip>
                     </div>
                     <Text style={{ fontSize: '13px', lineHeight: '1.4', color: isLight ? '#71717a' : '#a1a1aa' }}>
-                      按日、周、月循环控制额度消耗上限
+                      {t('tokens.periodic_quota_desc')}
                     </Text>
                   </div>
                   <AppSwitch
@@ -1134,7 +1135,7 @@ const Tokens: React.FC = () => {
                       <Col xs={24} sm={8}>
                         <Form.Item 
                           name="daily_quota_limit" 
-                          label={<Text style={{ fontSize: '13px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.daily_limit', '日额度限额')}</Text>} 
+                          label={<Text style={{ fontSize: '13px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.daily_limit')}</Text>} 
                           style={{ marginBottom: screens.xs ? '12px' : 0 }}
                         >
                           <InputNumber 
@@ -1142,7 +1143,7 @@ const Tokens: React.FC = () => {
                             size="large"
                             style={{ ...inputStyle, width: '100%' }} 
                             className="shadcn-input"
-                            placeholder="无限"
+                            placeholder={t('tokens.unlimited')}
                           />
                         </Form.Item>
                       </Col>
@@ -1150,7 +1151,7 @@ const Tokens: React.FC = () => {
                       <Col xs={24} sm={8}>
                         <Form.Item 
                           name="weekly_quota_limit" 
-                          label={<Text style={{ fontSize: '13px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.weekly_limit', '周额度限额')}</Text>} 
+                          label={<Text style={{ fontSize: '13px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.weekly_limit')}</Text>} 
                           style={{ marginBottom: screens.xs ? '12px' : 0 }}
                         >
                           <InputNumber 
@@ -1158,7 +1159,7 @@ const Tokens: React.FC = () => {
                             size="large"
                             style={{ ...inputStyle, width: '100%' }} 
                             className="shadcn-input"
-                            placeholder="无限"
+                            placeholder={t('tokens.unlimited')}
                           />
                         </Form.Item>
                       </Col>
@@ -1166,7 +1167,7 @@ const Tokens: React.FC = () => {
                       <Col xs={24} sm={8}>
                         <Form.Item 
                           name="monthly_quota_limit" 
-                          label={<Text style={{ fontSize: '13px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.monthly_limit', '月额度限额')}</Text>} 
+                          label={<Text style={{ fontSize: '13px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.monthly_limit')}</Text>} 
                           style={{ marginBottom: 0 }}
                         >
                           <InputNumber 
@@ -1174,7 +1175,7 @@ const Tokens: React.FC = () => {
                             size="large"
                             style={{ ...inputStyle, width: '100%' }} 
                             className="shadcn-input"
-                            placeholder="无限"
+                            placeholder={t('tokens.unlimited')}
                           />
                         </Form.Item>
                       </Col>
@@ -1211,9 +1212,9 @@ const Tokens: React.FC = () => {
                   transition: 'all 0.2s',
                 }}>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', paddingRight: '12px' }}>
-                    <Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.limit_models_switch', '限制模型')}</Text>
+                    <Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.limit_models_switch')}</Text>
                     <Text style={{ fontSize: '13px', lineHeight: '1.4', color: isLight ? '#71717a' : '#a1a1aa' }}>
-                      {enableModelFilter ? t('tokens.models_enabled_desc', '仅允许请求下方指定的模型') : t('tokens.models_disabled_desc', '全站模型都可以使用，一般不需要修改')}
+                      {enableModelFilter ? t('tokens.models_enabled_desc') : t('tokens.models_disabled_desc')}
                     </Text>
                   </div>
                   <AppSwitch
@@ -1278,13 +1279,13 @@ const Tokens: React.FC = () => {
                 }}>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', paddingRight: '12px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>IP 白名单</Text>
-                      <Tooltip title="限制允许调用该令牌的客户端 IP 地址。支持多个 IP，以英文逗号分隔。">
+                      <Text style={{ fontSize: '14px', fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{t('tokens.ip_whitelist')}</Text>
+                      <Tooltip title={t('tokens.ip_whitelist_tooltip')}>
                         <span style={{ cursor: 'pointer', color: isLight ? '#71717a' : '#a1a1aa', fontSize: '13px' }}>ⓘ</span>
                       </Tooltip>
                     </div>
                     <Text style={{ fontSize: '13px', lineHeight: '1.4', color: isLight ? '#71717a' : '#a1a1aa' }}>
-                      限制允许使用该令牌调用的客户端 IP 范围
+                      {t('tokens.ip_whitelist_desc')}
                     </Text>
                   </div>
                   <AppSwitch
@@ -1416,8 +1417,8 @@ const Tokens: React.FC = () => {
             }}>
               {selectedToken?.name}
             </span>
-            <span>额度详情</span>
-            <Tooltip title="打开时从服务端拉取最新用量；周期按站点默认时区统计（周重置为周日 00:00）">
+            <span>{t('tokens.quota_details')}</span>
+            <Tooltip title={t('tokens.quota_details_tooltip')}>
               <InfoCircleOutlined style={{ fontSize: '13px', color: isLight ? '#71717a' : '#a1a1aa', cursor: 'pointer', marginLeft: '2px' }} />
             </Tooltip>
             {detailRefreshing && <SyncOutlined spin style={{ fontSize: 13, color: isLight ? '#71717a' : '#a1a1aa' }} />}
@@ -1468,7 +1469,7 @@ const Tokens: React.FC = () => {
             items.push(
               <QuotaProgressItem
                 key="total"
-                label="总额度限制"
+                label={t('tokens.total_quota_limit')}
                 used={selectedToken.quota_used}
                 limit={selectedToken.quota_limit}
                 isLight={isLight}
@@ -1482,10 +1483,10 @@ const Tokens: React.FC = () => {
               items.push(
                 <QuotaProgressItem
                   key="daily"
-                  label="日额度限制"
+                  label={t('tokens.daily_quota_limit_label')}
                   used={dailyUsed}
                   limit={selectedToken.daily_quota_limit}
-                  refreshText={getQuotaRefreshText('day', quotaTz)}
+                  refreshText={getQuotaRefreshText('day', quotaTz, t)}
                   isLight={isLight}
                   isLast={count === totalItems}
                 />
@@ -1498,10 +1499,10 @@ const Tokens: React.FC = () => {
               items.push(
                 <QuotaProgressItem
                   key="weekly"
-                  label="周额度限制"
+                  label={t('tokens.weekly_quota_limit_label')}
                   used={weeklyUsed}
                   limit={selectedToken.weekly_quota_limit}
-                  refreshText={getQuotaRefreshText('week', quotaTz)}
+                  refreshText={getQuotaRefreshText('week', quotaTz, t)}
                   isLight={isLight}
                   isLast={count === totalItems}
                 />
@@ -1514,10 +1515,10 @@ const Tokens: React.FC = () => {
               items.push(
                 <QuotaProgressItem
                   key="monthly"
-                  label="月额度限制"
+                  label={t('tokens.monthly_quota_limit_label')}
                   used={monthlyUsed}
                   limit={selectedToken.monthly_quota_limit}
-                  refreshText={getQuotaRefreshText('month', quotaTz)}
+                  refreshText={getQuotaRefreshText('month', quotaTz, t)}
                   isLight={isLight}
                   isLast={count === totalItems}
                 />
@@ -1551,7 +1552,7 @@ const Tokens: React.FC = () => {
 
       {/* 开启高可用通道确认弹窗 */}
       <Modal
-        title="开启高可用通道确认"
+        title={t('tokens.ha_confirm_title')}
         open={isHAConfirmModalOpen}
         onCancel={() => {
           setIsHAConfirmModalOpen(false);
@@ -1561,16 +1562,16 @@ const Tokens: React.FC = () => {
           setIsHAConfirmModalOpen(false);
           executeSave(tempValues, haConfirmDismiss);
         }}
-        okText="确认"
-        cancelText="取消"
+        okText={t('common.confirm')}
+        cancelText={t('common.cancel')}
       >
         <div style={{ marginTop: '12px' }}>
           <p style={{ margin: 0, lineHeight: '1.6', fontSize: '14px', color: isLight ? '#3f3f46' : '#d4d4d8' }}>
-            高可用通道功能，使用中遇到上游不稳定的模型会自动切换稳定上游计费可能会受上游渠道不同费用会短暂增加，确认是否开启
+            {t('tokens.ha_confirm_body')}
           </p>
           <div style={{ marginTop: '16px' }}>
             <Checkbox checked={haConfirmDismiss} onChange={(e) => setHaConfirmDismiss(e.target.checked)}>
-              不再提示（仅针对当前令牌）
+              {t('tokens.ha_confirm_dont_ask')}
             </Checkbox>
           </div>
         </div>
@@ -1588,6 +1589,7 @@ const QuotaProgressItem: React.FC<{
   isLight: boolean;
   isLast: boolean;
 }> = ({ label, used, limit, refreshText, isLight, isLast }) => {
+  const { t } = useTranslation();
   const isUnlimited = limit < 0;
   const percent = isUnlimited ? 0 : Math.min(100, (used / limit) * 100);
   
@@ -1620,14 +1622,14 @@ const QuotaProgressItem: React.FC<{
         
         {/* 数据层级可视化排版 */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px' }}>
-          <span style={{ fontSize: '11px', color: isLight ? '#71717a' : '#a1a1aa', fontWeight: 500 }}>已使用</span>
+          <span style={{ fontSize: '11px', color: isLight ? '#71717a' : '#a1a1aa', fontWeight: 500 }}>{t('tokens.used_label')}</span>
           <span style={{ fontSize: '13px', fontWeight: 600, fontFamily: 'monospace', color: isLight ? '#09090b' : '#fafafa' }}>
             {used.toFixed(6)}
           </span>
           <span style={{ fontSize: '12px', color: isLight ? '#e4e4e7' : '#27272a' }}>/</span>
-          <span style={{ fontSize: '11px', color: isLight ? '#71717a' : '#a1a1aa', fontWeight: 500 }}>限额</span>
+          <span style={{ fontSize: '11px', color: isLight ? '#71717a' : '#a1a1aa', fontWeight: 500 }}>{t('tokens.cap_label')}</span>
           <span style={{ fontSize: '13px', fontWeight: 600, fontFamily: 'monospace', color: isLight ? '#09090b' : '#fafafa' }}>
-            {isUnlimited ? '无限' : limit.toFixed(6)}
+            {isUnlimited ? t('tokens.unlimited') : limit.toFixed(6)}
           </span>
         </div>
 
@@ -1642,7 +1644,7 @@ const QuotaProgressItem: React.FC<{
             color: isLight ? '#71717a' : '#a1a1aa'
           }}>
             <SyncOutlined spin style={{ fontSize: '10px', color: '#22c55e' }} />
-            <span>重置倒计时：</span>
+            <span>{t('tokens.reset_countdown')}</span>
             <span style={{ fontWeight: 500, color: isLight ? '#09090b' : '#fafafa' }}>{refreshText}</span>
           </div>
         )}

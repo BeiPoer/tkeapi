@@ -20,6 +20,7 @@
 //! - `upstream_asset_relay/` → UpstreamAssetRelay
 //! - `volc_ark_monitor/`     → VolcengineArkMonitor
 //! - `happyhorse_router/`    → HappyHorse
+//! - `comfyui_bridge/`       → ComfyUiBridge
 //! - `site_icons/`           → SiteIcons
 //! - `data_sync/`            → DataSync
 //! - `finance/` / `pay/` / `redemptions/` → backend-only optional plugins
@@ -52,6 +53,8 @@ pub mod volc_ark_monitor;
 pub mod data_sync;
 #[cfg(feature = "plugin_happyhorse")]
 pub mod happyhorse_router;
+#[cfg(feature = "plugin_comfyui")]
+pub mod comfyui_bridge;
 #[cfg(feature = "plugin_site_icons")]
 pub mod site_icons;
 #[cfg(feature = "plugin_site_portal")]

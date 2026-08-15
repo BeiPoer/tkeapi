@@ -32,6 +32,14 @@ pub struct ResolvedForward {
     pub upstream_asset_convert: bool,
     /// 上游素材绑定 ID（upstream_asset_bindings.id）
     pub upstream_asset_binding_id: Option<i64>,
+    /// ComfyUI 工作流 ID（comfyui_workflows.id）；仅 target_type=comfyui
+    pub comfyui_workflow_id: Option<i64>,
+    /// ComfyUI 服务节点 ID（comfyui_servers.id）；渠道分组绑定的物理上游
+    pub comfyui_server_id: Option<i64>,
+    /// 渠道勾选的多个 ComfyUI 节点；提交时按 comfyui_dispatch 选一个
+    pub comfyui_server_ids: Vec<i64>,
+    /// 多节点调用规则：priority_weight / random / sequential / least_busy
+    pub comfyui_dispatch: Option<String>,
     /// 异步任务轮询路径 (可选)，如果规则里配置了则优先使用
     pub poll_path: Option<String>,
     /// 是否启用免审核策略
@@ -66,6 +74,10 @@ impl Default for ResolvedForward {
             asset_convert_ns: "asset_manager".to_string(),
             upstream_asset_convert: false,
             upstream_asset_binding_id: None,
+            comfyui_workflow_id: None,
+            comfyui_server_id: None,
+            comfyui_server_ids: Vec::new(),
+            comfyui_dispatch: None,
             poll_path: None,
             asset_moderation: false,
             eid: String::new(),
@@ -117,7 +129,7 @@ pub fn scale_usage_in_json(root: &mut serde_json::Value, mult: f64) {
     if (mult - 1.0).abs() <= 1e-9 {
         return;
     }
-    for ptr in ["/usage", "/final_result/usage", "/data/usage"] {
+    for ptr in ["/usage", "/data/usage"] {
         if let Some(serde_json::Value::Object(obj)) = root.pointer_mut(ptr) {
             scale_usage_token_object(obj, mult);
         }
@@ -370,6 +382,120 @@ pub fn refine_target_type(resolved: &mut ResolvedForward, base_url: &str) {
         if url_lower.contains("apimart.ai") {
             resolved.target_type = "apimart".to_string();
         }
+    }
+}
+
+/// 渠道分组选定的插件上游覆盖转发目标。
+/// ComfyUI：服务节点即渠道；工作流仅在渠道仍绑定时覆盖，否则保留模型转发规则。
+pub fn apply_channel_provider(resolved: &mut ResolvedForward, ch: &crate::models::Channel) {
+    apply_comfyui_channel_config(resolved, &ch.provider_type, &ch.config);
+}
+
+pub(crate) fn parse_comfyui_server_ids(cfg: &serde_json::Value) -> Vec<i64> {
+    let mut ids = Vec::new();
+    if let Some(arr) = cfg.get("comfyui_server_ids").and_then(|v| v.as_array()) {
+        for v in arr {
+            if let Some(id) = v.as_i64().filter(|i| *i > 0) {
+                ids.push(id);
+            }
+        }
+    }
+    if ids.is_empty() {
+        if let Some(id) = cfg.get("comfyui_server_id").and_then(|v| v.as_i64()).filter(|i| *i > 0)
+        {
+            ids.push(id);
+        }
+    }
+    let mut out = Vec::new();
+    for id in ids {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+fn apply_comfyui_channel_config(resolved: &mut ResolvedForward, provider_type: &str, config: &str) {
+    if provider_type != "comfyui" {
+        return;
+    }
+    let cfg = serde_json::from_str::<serde_json::Value>(config).unwrap_or(serde_json::Value::Null);
+    let ids = parse_comfyui_server_ids(&cfg);
+    let workflow_id = cfg.get("comfyui_workflow_id").and_then(|v| v.as_i64());
+    if ids.is_empty() && workflow_id.is_none() {
+        return;
+    }
+    resolved.target_type = "comfyui".to_string();
+    resolved.upstream_path = "/prompt".to_string();
+    resolved.is_cascade = false;
+    if !ids.is_empty() {
+        resolved.comfyui_server_id = ids.first().copied();
+        resolved.comfyui_server_ids = ids;
+    }
+    if let Some(wid) = workflow_id {
+        resolved.comfyui_workflow_id = Some(wid);
+    }
+    resolved.comfyui_dispatch = cfg
+        .get("comfyui_dispatch")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+}
+
+#[cfg(test)]
+mod apply_comfyui_channel_config_tests {
+    use super::{apply_comfyui_channel_config, ResolvedForward};
+
+    #[test]
+    fn server_node_sets_target_and_keeps_rule_workflow() {
+        let mut resolved = ResolvedForward {
+            comfyui_workflow_id: Some(9),
+            ..Default::default()
+        };
+        apply_comfyui_channel_config(&mut resolved, "comfyui", r#"{"comfyui_server_id":3}"#);
+        assert_eq!(resolved.target_type, "comfyui");
+        assert_eq!(resolved.upstream_path, "/prompt");
+        assert_eq!(resolved.comfyui_server_id, Some(3));
+        assert_eq!(resolved.comfyui_server_ids, vec![3]);
+        assert_eq!(resolved.comfyui_workflow_id, Some(9));
+        assert!(!resolved.is_cascade);
+    }
+
+    #[test]
+    fn legacy_workflow_binding_still_overrides() {
+        let mut resolved = ResolvedForward {
+            comfyui_workflow_id: Some(9),
+            ..Default::default()
+        };
+        apply_comfyui_channel_config(
+            &mut resolved,
+            "comfyui",
+            r#"{"comfyui_workflow_id":5}"#,
+        );
+        assert_eq!(resolved.comfyui_workflow_id, Some(5));
+        assert_eq!(resolved.comfyui_server_id, None);
+    }
+
+    #[test]
+    fn other_provider_untouched() {
+        let mut resolved = ResolvedForward::default();
+        apply_comfyui_channel_config(&mut resolved, "custom", r#"{"comfyui_server_id":1}"#);
+        assert_eq!(resolved.target_type, "openai");
+        assert_eq!(resolved.comfyui_server_id, None);
+        assert!(resolved.comfyui_server_ids.is_empty());
+    }
+
+    #[test]
+    fn multi_ids_and_dispatch() {
+        let mut resolved = ResolvedForward::default();
+        apply_comfyui_channel_config(
+            &mut resolved,
+            "comfyui",
+            r#"{"comfyui_server_ids":[4,2,4],"comfyui_dispatch":"least_busy"}"#,
+        );
+        assert_eq!(resolved.comfyui_server_ids, vec![4, 2]);
+        assert_eq!(resolved.comfyui_server_id, Some(4));
+        assert_eq!(resolved.comfyui_dispatch.as_deref(), Some("least_busy"));
     }
 }
 
@@ -1198,7 +1324,7 @@ fn convert_web_search(
 // ── 鉴权 Header 构建 ──────────────────────────────────────────
 
 /// 根据 auth_type 构建请求 Headers
-pub fn build_auth_headers(resolved: &ResolvedForward, api_key: &str) -> Vec<(String, String)> {
+pub fn build_auth_headers(resolved: &ResolvedForward, api_key: &str, is_post: bool) -> Vec<(String, String)> {
     let mut headers = match resolved.auth_type.as_str() {
         "x-api-key" => vec![
             ("x-api-key".to_string(), api_key.to_string()),
@@ -1223,8 +1349,8 @@ pub fn build_auth_headers(resolved: &ResolvedForward, api_key: &str) -> Vec<(Str
             }
         }
     };
-    // DashScope 异步视频任务需要 X-DashScope-Async: enable
-    if resolved.target_type == "dashscope" {
+    // DashScope 异步视频任务需要 X-DashScope-Async: enable，且只能在 POST 提交阶段加入，GET 轮询阶段加入会报错
+    if resolved.target_type == "dashscope" && is_post {
         headers.push(("X-DashScope-Async".to_string(), "enable".to_string()));
     }
     headers
@@ -1269,7 +1395,7 @@ pub fn apply_request_auth(
             builder.body(signed_body)
         }
         _ => {
-            let auth_headers = build_auth_headers(resolved, api_key);
+            let auth_headers = build_auth_headers(resolved, api_key, true);
             for (k, v) in &auth_headers {
                 builder = builder.header(k, v);
             }
@@ -1355,6 +1481,7 @@ pub fn parse_forward_config(
     } else {
         category_path.to_string()
     };
+    let comfyui_server_ids = parse_comfyui_server_ids(config);
     ResolvedForward {
         target_type: config
             .get("target_type")
@@ -1385,6 +1512,14 @@ pub fn parse_forward_config(
         upstream_asset_binding_id: config
             .get("upstream_asset_binding_id")
             .and_then(|v| v.as_i64()),
+        comfyui_workflow_id: config.get("comfyui_workflow_id").and_then(|v| v.as_i64()),
+        comfyui_server_id: comfyui_server_ids.first().copied(),
+        comfyui_server_ids,
+        comfyui_dispatch: config
+            .get("comfyui_dispatch")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
         poll_path: config
             .get("poll_path")
             .and_then(|v| v.as_str())
@@ -1780,25 +1915,8 @@ const DASHSCOPE_PARAM_KEYS: &[&str] = &[
     "prompt_extend",
     "watermark",
     "seed",
+    "audio",
 ];
-
-/// OpenAI 转换路径专用：wan2.7-r2v 将 media.type=video → reference_video
-fn remap_dashscope_r2v_media_types(model: &str, body: &mut serde_json::Value) {
-    if !model.to_ascii_lowercase().contains("wan2.7-r2v") {
-        return;
-    }
-    let Some(arr) = body
-        .pointer_mut("/input/media")
-        .and_then(|v| v.as_array_mut())
-    else {
-        return;
-    };
-    for item in arr {
-        if item.get("type").and_then(|t| t.as_str()) == Some("video") {
-            item["type"] = serde_json::json!("reference_video");
-        }
-    }
-}
 
 /// 构建阿里百炼 DashScope 视频生成请求体
 fn build_dashscope_video_body(model: &str, body: &serde_json::Value) -> serde_json::Value {
@@ -1813,33 +1931,29 @@ fn build_dashscope_video_body(model: &str, body: &serde_json::Value) -> serde_js
     let prompt = body
         .get("prompt")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            body.get("messages")
-                .and_then(|m| m.as_array())
-                .and_then(|arr| arr.last())
-                .and_then(|msg| msg.get("content"))
-                .and_then(|c| c.as_str())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_else(|| "".to_string());
+        .unwrap_or("")
+        .to_string();
 
     let mut input = serde_json::json!({ "prompt": prompt });
     if let Some(np) = body.get("negative_prompt").and_then(|v| v.as_str()) {
         input["negative_prompt"] = serde_json::json!(np);
     }
+    // audio_url：官方字段直接透传
     if let Some(au) = body.get("audio_url").and_then(|v| v.as_str()) {
         input["audio_url"] = serde_json::json!(au);
     }
 
-    // media：已有数组视为用户自组官方字段透传；否则从 OpenAI 的 images/videos 组装
-    let from_openai_media;
+    // ── media 组装 ──────────────────────────────────────────────
+    // 优先级：body.media（已是官方格式，直透）> OpenAI 扁平字段
     if let Some(media) = body.get("media").filter(|v| v.is_array()) {
         input["media"] = media.clone();
-        from_openai_media = false;
     } else {
-        from_openai_media = true;
-        let mut media = Vec::new();
+        // 快乐小马（happyhorse）模型：视频 type 使用 "video"；其他模型统一使用 "reference_video"
+        let is_happyhorse = model.to_ascii_lowercase().contains("happyhorse");
+        let video_type = if is_happyhorse { "video" } else { "reference_video" };
+        let mut media: Vec<serde_json::Value> = Vec::new();
+
+        // 图片 → first_frame / last_frame / reference_image（按数量推断）
         let arr_images = collect_media_values(body, &["images", "image_urls"]);
         if !arr_images.is_empty() {
             let defaults = infer_image_default_roles(arr_images.len());
@@ -1851,13 +1965,39 @@ fn build_dashscope_video_body(model: &str, body: &serde_json::Value) -> serde_js
                 }
             }
         }
-        let arr_videos = collect_media_values(body, &["videos"]);
-        for item in &arr_videos {
-            let (url, role) = parse_media_item(item, "video");
+
+        // 视频 → reference_video（其他模型）/ video（happyhorse）
+        for item in &collect_media_values(body, &["videos"]) {
+            let (url, role) = parse_media_item(item, video_type);
             if let Some(u) = url.filter(|u| !u.is_empty()) {
                 media.push(serde_json::json!({ "type": role, "url": u }));
             }
         }
+
+        // 音频 → audio
+        for item in &collect_media_values(body, &["audios"]) {
+            let (url, role) = parse_media_item(item, "reference_audio");
+            if let Some(u) = url.filter(|u| !u.is_empty()) {
+                media.push(serde_json::json!({ "type": role, "url": u }));
+            }
+        }
+
+        // 文件 → file（通用，模型自动识别意图）
+        for item in &collect_media_values(body, &["files"]) {
+            let (url, role) = parse_media_item(item, "file");
+            if let Some(u) = url.filter(|u| !u.is_empty()) {
+                media.push(serde_json::json!({ "type": role, "url": u }));
+            }
+        }
+
+        // 网页链接 → webpage
+        for item in &collect_media_values(body, &["links"]) {
+            let (url, role) = parse_media_item(item, "link");
+            if let Some(u) = url.filter(|u| !u.is_empty()) {
+                media.push(serde_json::json!({ "type": role, "url": u }));
+            }
+        }
+
         if !media.is_empty() {
             input["media"] = serde_json::json!(media);
         }
@@ -1869,34 +2009,27 @@ fn build_dashscope_video_body(model: &str, body: &serde_json::Value) -> serde_js
             params.insert(key.to_string(), v.clone());
         }
     }
-    // size → resolution；resolution 统一大写（DashScope 接受 720P/1080P）
+    // size → resolution；统一大写（DashScope 接受 720P/1080P）
     if !params.contains_key("resolution") {
         if let Some(size) = body.get("size").and_then(|v| v.as_str()) {
-            params.insert(
-                "resolution".to_string(),
-                serde_json::json!(size.to_uppercase()),
-            );
+            params.insert("resolution".to_string(), serde_json::json!(size.to_uppercase()));
         }
     } else if let Some(res) = params.get("resolution").and_then(|v| v.as_str()) {
-        params.insert(
-            "resolution".to_string(),
-            serde_json::json!(res.to_uppercase()),
-        );
+        params.insert("resolution".to_string(), serde_json::json!(res.to_uppercase()));
     }
-    params
-        .entry("resolution".to_string())
-        .or_insert(serde_json::json!("720P"));
-    params
-        .entry("duration".to_string())
-        .or_insert(serde_json::json!(5));
+    params.entry("resolution".to_string()).or_insert(serde_json::json!("720P"));
+    params.entry("duration".to_string()).or_insert(serde_json::json!(5));
+    // generate_audio → parameters.audio（params 中无 audio 时生效，非 bool 强转）
+    if !params.contains_key("audio") {
+        if let Some(ga) = body.get("generate_audio") {
+            let enabled = ga.as_bool().unwrap_or(false) || ga.as_str() == Some("true");
+            params.insert("audio".to_string(), serde_json::json!(enabled));
+        }
+    }
 
     let mut result = serde_json::json!({ "model": model, "input": input });
     if !params.is_empty() {
         result["parameters"] = serde_json::Value::Object(params);
-    }
-    // 仅改 OpenAI images/videos 组装出的 media；官方 input / media 不改
-    if from_openai_media {
-        remap_dashscope_r2v_media_types(model, &mut result);
     }
     result
 }
@@ -2089,15 +2222,18 @@ const VOLCENGINE_CONTENT_PASSTHROUGH_KEYS: &[&str] = &[
     "return_last_frame", // 是否返回末帧 (bool)
     "watermark",         // 是否添加水印 (bool)
     // 流式/回调
-    "stream",                  // 是否流式返回
-    "callback_url",            // 回调地址
-    "service_tier",            // 服务等级（如 flex 离线减半）
-    "execution_expires_after", // 任务超时失效时间 (秒)
-    "draft",                   // 是否开启样片模式
-    "tools",                   // 调用的工具
-    "safety_identifier",       // 终端用户的唯一标识符
-    "priority",                // 请求的执行优先级
-    "frames",                  // 生成视频的帧数
+    "stream",                   // 是否流式返回
+    "callback_url",             // 回调地址
+    "service_tier",             // 服务等级（如 flex 离线减半）
+    "execution_expires_after",  // 任务超时失效时间 (秒)
+    "draft",                    // 是否开启样片模式
+    "tools",                    // 调用的工具
+    "safety_identifier",        // 终端用户的唯一标识符
+    "priority",                 // 请求的执行优先级
+    "frames",                   // 生成视频的帧数
+    "omni_reference_task_type", // 输出格式
+    "output_format",            // 任务类型引导
+    "bitrate_mode",             // 控制输出视频的编码码率，文档不体现的内部参数
 ];
 
 /// 构建火山方舟 /api/v3/contents/generations/tasks 请求体。
@@ -3394,9 +3530,13 @@ fn tc_collect_video_src(
     {
         tc_push_image(&mut images, u, "last_frame");
     }
-    for field in ["image_list", "images", "image_urls"] {
-        for item in collect_media_values(body, &[field]) {
-            let (url, role) = parse_media_item(&item, "");
+    // 与方舟等一致：未标 role 时按数量推断（1→首帧，2→首尾，3+→参考）
+    let list_images = collect_media_values(body, &["image_list", "images", "image_urls"]);
+    if !list_images.is_empty() {
+        let defaults = infer_image_default_roles(list_images.len());
+        for (i, item) in list_images.iter().enumerate() {
+            let (url, role) =
+                parse_media_item(item, defaults.get(i).copied().unwrap_or("reference_image"));
             if let Some(u) = url.filter(|s| !s.is_empty()) {
                 tc_push_image(&mut images, u, tc_list_image_role(role));
             }

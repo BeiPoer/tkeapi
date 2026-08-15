@@ -8,12 +8,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Card, Form, Input, Button, message, Typography, Tabs, Switch, Alert, Divider,
-  InputNumber, Table, Space, Image,
+  InputNumber, Table, Space, Image, Row, Col,
 } from 'antd';
 import {
   WechatOutlined, AlipayCircleOutlined, LinkOutlined, SafetyCertificateOutlined,
   DollarOutlined, CreditCardOutlined, ThunderboltOutlined, PlusOutlined, DeleteOutlined,
-  SettingOutlined, BankOutlined, ArrowLeftOutlined,
+  SettingOutlined, BankOutlined, ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined,
 } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import request from '../../utils/request';
@@ -45,6 +45,9 @@ const PaymentSettings: React.FC = () => {
   const [channels, setChannels] = useState<PaymentChannelUiItem[]>([]);
   const [fullSettings, setFullSettings] = useState<any>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState('currency');
+  const [editingSubtitleField, setEditingSubtitleField] = useState<string | null>(null);
+  const [editingSubtitleVal, setEditingSubtitleVal] = useState<string>('');
 
   const siteOrigin = window.location.origin;
   const notifyUrl = (path: string) => `${siteOrigin}/api/v1/finance/pay/notify/${path}`;
@@ -136,6 +139,40 @@ const PaymentSettings: React.FC = () => {
     }
   };
 
+  const onFieldCommit = async (
+    id: string,
+    field: 'display_name' | 'display_name_en' | 'subtitle' | 'subtitle_en',
+    raw: string,
+  ) => {
+    const meta = getChannelMeta(id);
+    const defaultVal =
+      field === 'display_name'
+        ? meta?.defaultName || ''
+        : field === 'display_name_en'
+        ? meta?.defaultNameEn || ''
+        : field === 'subtitle'
+        ? meta?.defaultSubtitle || ''
+        : meta?.defaultSubtitleEn || '';
+
+    const trimmed = raw.trim();
+    const val = !trimmed || trimmed === defaultVal ? null : trimmed;
+    const currentItem = channels.find((c) => c.id === id);
+    const prev = (currentItem?.[field] || '').trim() || null;
+    const prevNorm = !prev || prev === defaultVal ? null : prev;
+
+    if (prevNorm === val) return;
+
+    const next = channels.map((c) => (c.id === id ? { ...c, [field]: val } : c));
+    setChannels(mergeChannelList(next));
+    try {
+      await persistChannels(next);
+    } catch (e) {
+      console.error(e);
+      message.error(t('common.error'));
+      await fetchSettings();
+    }
+  };
+
   const openConfig = (id: string) => {
     const item = channels.find((c) => c.id === id);
     const meta = getChannelMeta(id);
@@ -144,8 +181,8 @@ const PaymentSettings: React.FC = () => {
     formDisplay.setFieldsValue({
       enabled: item.enabled,
       sort_order: item.sort_order,
-      display_name: item.display_name || '',
       subtitle: item.subtitle || '',
+      subtitle_en: item.subtitle_en || '',
       logo_url: item.logo_url || '',
       allinpay_wechat_enabled: item.allinpay_wechat_enabled !== false,
       allinpay_alipay_enabled: item.allinpay_alipay_enabled !== false,
@@ -156,6 +193,7 @@ const PaymentSettings: React.FC = () => {
 
   const closeEditor = () => {
     setEditingId(null);
+    setActiveTab('channels');
     formDisplay.resetFields();
     formGateway.resetFields();
   };
@@ -185,8 +223,8 @@ const PaymentSettings: React.FC = () => {
           ...c,
           enabled: !!displayValues.enabled,
           sort_order: Number(displayValues.sort_order) || 0,
-          display_name: (displayValues.display_name || '').trim() || null,
           subtitle: (displayValues.subtitle || '').trim() || null,
+          subtitle_en: (displayValues.subtitle_en || '').trim() || null,
           logo_url: (displayValues.logo_url || '').trim() || null,
         };
         if (editingId === 'allinpay') {
@@ -530,30 +568,181 @@ const PaymentSettings: React.FC = () => {
     {
       title: 'Logo',
       key: 'logo',
-      width: 72,
-      render: (_: any, record: PaymentChannelUiItem) => channelIcon(record.id, record.logo_url),
+      width: 68,
+      align: 'center' as const,
+      render: (_: unknown, record: PaymentChannelUiItem) => (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          {channelIcon(record.id, record.logo_url, 26)}
+        </div>
+      ),
     },
     {
-      title: '支付通道',
-      key: 'name',
-      render: (_: any, record: PaymentChannelUiItem) => {
-        const name = resolveChannelName(record);
-        const subtitle = resolveChannelSubtitle(record);
-        const customName = !!(record.display_name || '').trim();
+      title: '中文配置',
+      key: 'zh_config',
+      render: (_: unknown, record: PaymentChannelUiItem) => {
+        const meta = getChannelMeta(record.id);
+        const nameZh = resolveChannelName(record, 'zh');
         const subHint = record.id === 'allinpay'
           ? [
               record.allinpay_wechat_enabled !== false ? '微信' : null,
               record.allinpay_alipay_enabled !== false ? '支付宝' : null,
             ].filter(Boolean).join(' / ') || '未开子渠道'
           : '';
+        const isEditing = editingSubtitleField === `${record.id}:subtitle`;
+        const subZhDisplay = record.subtitle || meta?.defaultSubtitle || '无';
+
         return (
-          <div>
-            <div style={{ fontWeight: 600 }}>{name}</div>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {subtitle}
-              {!customName ? '' : ' · 已自定义名称'}
-              {subHint ? ` · 子渠道：${subHint}` : ''}
-            </Text>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 180, maxWidth: 300 }}>
+            <div style={{ fontWeight: 600, fontSize: 14 }}>{nameZh}</div>
+            {isEditing ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
+                <Input
+                  size="small"
+                  autoFocus
+                  value={editingSubtitleVal}
+                  placeholder={meta?.defaultSubtitle || '无'}
+                  maxLength={32}
+                  allowClear
+                  onChange={(e) => setEditingSubtitleVal(e.target.value)}
+                  onPressEnter={() => {
+                    onFieldCommit(record.id, 'subtitle', editingSubtitleVal);
+                    setEditingSubtitleField(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') setEditingSubtitleField(null);
+                  }}
+                  style={{ width: 140 }}
+                />
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<CheckOutlined style={{ color: '#52c41a' }} />}
+                  onClick={() => {
+                    onFieldCommit(record.id, 'subtitle', editingSubtitleVal);
+                    setEditingSubtitleField(null);
+                  }}
+                  title="保存"
+                />
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<CloseOutlined style={{ color: '#ff4d4f' }} />}
+                  onClick={() => setEditingSubtitleField(null)}
+                  title="取消"
+                />
+              </div>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                <Text
+                  type="secondary"
+                  style={{
+                    fontSize: 13,
+                    maxWidth: 200,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {subZhDisplay}
+                </Text>
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<EditOutlined style={{ fontSize: 13, color: '#1677ff' }} />}
+                  onClick={() => {
+                    setEditingSubtitleField(`${record.id}:subtitle`);
+                    setEditingSubtitleVal(record.subtitle ?? meta?.defaultSubtitle ?? '');
+                  }}
+                  title="编辑副标题"
+                  style={{ padding: '0 2px', height: 20 }}
+                />
+              </div>
+            )}
+            {subHint ? (
+              <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }}>
+                子渠道：{subHint}
+              </Text>
+            ) : null}
+          </div>
+        );
+      },
+    },
+    {
+      title: '英文配置',
+      key: 'en_config',
+      render: (_: unknown, record: PaymentChannelUiItem) => {
+        const meta = getChannelMeta(record.id);
+        const nameEn = resolveChannelName(record, 'en');
+        const isEditing = editingSubtitleField === `${record.id}:subtitle_en`;
+        const subEnDisplay = record.subtitle_en || meta?.defaultSubtitleEn || 'None';
+
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 180, maxWidth: 300 }}>
+            <div style={{ fontWeight: 600, fontSize: 14 }}>{nameEn}</div>
+            {isEditing ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
+                <Input
+                  size="small"
+                  autoFocus
+                  value={editingSubtitleVal}
+                  placeholder={meta?.defaultSubtitleEn || 'None'}
+                  maxLength={32}
+                  allowClear
+                  onChange={(e) => setEditingSubtitleVal(e.target.value)}
+                  onPressEnter={() => {
+                    onFieldCommit(record.id, 'subtitle_en', editingSubtitleVal);
+                    setEditingSubtitleField(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') setEditingSubtitleField(null);
+                  }}
+                  style={{ width: 140 }}
+                />
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<CheckOutlined style={{ color: '#52c41a' }} />}
+                  onClick={() => {
+                    onFieldCommit(record.id, 'subtitle_en', editingSubtitleVal);
+                    setEditingSubtitleField(null);
+                  }}
+                  title="Save"
+                />
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<CloseOutlined style={{ color: '#ff4d4f' }} />}
+                  onClick={() => setEditingSubtitleField(null)}
+                  title="Cancel"
+                />
+              </div>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                <Text
+                  type="secondary"
+                  style={{
+                    fontSize: 13,
+                    maxWidth: 200,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {subEnDisplay}
+                </Text>
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<EditOutlined style={{ fontSize: 13, color: '#1677ff' }} />}
+                  onClick={() => {
+                    setEditingSubtitleField(`${record.id}:subtitle_en`);
+                    setEditingSubtitleVal(record.subtitle_en ?? meta?.defaultSubtitleEn ?? '');
+                  }}
+                  title="Edit English subtitle"
+                  style={{ padding: '0 2px', height: 20 }}
+                />
+              </div>
+            )}
           </div>
         );
       },
@@ -561,10 +750,10 @@ const PaymentSettings: React.FC = () => {
     {
       title: '排序',
       key: 'sort_order',
-      width: 120,
+      width: 110,
       sorter: (a: PaymentChannelUiItem, b: PaymentChannelUiItem) => (a.sort_order || 0) - (b.sort_order || 0),
       defaultSortOrder: 'descend' as const,
-      render: (_: any, record: PaymentChannelUiItem) => (
+      render: (_: unknown, record: PaymentChannelUiItem) => (
         <InputNumber
           size="small"
           min={0}
@@ -578,16 +767,16 @@ const PaymentSettings: React.FC = () => {
     {
       title: '状态',
       key: 'enabled',
-      width: 100,
-      render: (_: any, record: PaymentChannelUiItem) => (
+      width: 90,
+      render: (_: unknown, record: PaymentChannelUiItem) => (
         <Switch checked={!!record.enabled} onChange={(v) => onToggleChannel(record.id, v)} />
       ),
     },
     {
       title: '操作',
       key: 'action',
-      width: 100,
-      render: (_: any, record: PaymentChannelUiItem) => (
+      width: 90,
+      render: (_: unknown, record: PaymentChannelUiItem) => (
         <Button type="link" icon={<SettingOutlined />} onClick={() => openConfig(record.id)}>
           配置
         </Button>
@@ -691,7 +880,7 @@ const PaymentSettings: React.FC = () => {
             showIcon
             style={{ marginBottom: 16, borderRadius: 8 }}
             message="支付渠道列表"
-            description="排序数字越大越靠前。显示名称 / 副标题 / Logo 留空则使用系统默认。通联支付为单一渠道，可在配置中分别开启微信 / 支付宝子渠道。"
+            description="排序数字越大越靠前。中文与英文副标题默认直接展示，点击后方编辑按钮可进行修改，留空则使用系统默认。点击「配置」可修改网关参数、Logo及子渠道。用户端中文站点显示中文配置，其他语言显示英文配置。"
           />
           <Table
             rowKey="id"
@@ -714,7 +903,7 @@ const PaymentSettings: React.FC = () => {
             <SafetyCertificateOutlined style={{ fontSize: 24, color: '#52c41a' }} />
             <Title level={3} style={{ margin: 0 }}>在线支付设置</Title>
           </div>
-          <Tabs items={tabItems} />
+          <Tabs activeKey={activeTab} onChange={setActiveTab} items={tabItems} />
         </>
       ) : (
         <div style={{ animation: 'fadeIn 0.3s' }}>
@@ -725,56 +914,89 @@ const PaymentSettings: React.FC = () => {
             </Title>
           </div>
 
-          <div style={{ maxWidth: 720, width: '100%' }}>
+          <div style={{ maxWidth: 760, width: '100%' }}>
             <Form form={formDisplay} layout="vertical" autoComplete="off">
-              <Divider orientation="left" plain>用户端展示</Divider>
-              <Form.Item label="启用该渠道" name="enabled" valuePropName="checked">
-                <Switch />
-              </Form.Item>
-              {editingId === 'allinpay' && (
-                <>
+              <Divider plain style={{ margin: '8px 0 16px' }}>用户端展示</Divider>
+
+              <div style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                alignItems: 'center',
+                gap: 24,
+                marginBottom: 16,
+              }}>
+                <Form.Item label="启用该渠道" name="enabled" valuePropName="checked" style={{ marginBottom: 0 }}>
+                  <Switch />
+                </Form.Item>
+                {editingId === 'allinpay' && (
+                  <>
+                    <Form.Item
+                      label="微信子渠道"
+                      name="allinpay_wechat_enabled"
+                      valuePropName="checked"
+                      style={{ marginBottom: 0 }}
+                    >
+                      <Switch />
+                    </Form.Item>
+                    <Form.Item
+                      label="支付宝子渠道"
+                      name="allinpay_alipay_enabled"
+                      valuePropName="checked"
+                      style={{ marginBottom: 0 }}
+                    >
+                      <Switch />
+                    </Form.Item>
+                  </>
+                )}
+                <Form.Item
+                  label="排序权重"
+                  name="sort_order"
+                  style={{ marginBottom: 0 }}
+                >
+                  <InputNumber min={0} max={9999} style={{ width: 100 }} placeholder="0" />
+                </Form.Item>
+              </div>
+
+              <Row gutter={16}>
+                <Col xs={24} sm={12}>
                   <Form.Item
-                    label="开通微信子渠道"
-                    name="allinpay_wechat_enabled"
-                    valuePropName="checked"
-                    extra="用户端可选「通联微信支付」"
+                    label={
+                      <Space size={4}>
+                        <span>{editingMeta?.defaultName || editingId}</span>
+                        <Text type="secondary" style={{ fontSize: 12, fontWeight: 'normal' }}>（中文副标题）</Text>
+                      </Space>
+                    }
+                    name="subtitle"
+                    extra={`留空使用默认：${editingMeta?.defaultSubtitle || '无'}`}
+                    style={{ marginBottom: 16 }}
                   >
-                    <Switch />
+                    <Input placeholder={editingMeta?.defaultSubtitle} allowClear maxLength={32} />
                   </Form.Item>
+                </Col>
+                <Col xs={24} sm={12}>
                   <Form.Item
-                    label="开通支付宝子渠道"
-                    name="allinpay_alipay_enabled"
-                    valuePropName="checked"
-                    extra="用户端可选「通联支付宝支付」；若只开一个子渠道，用户端无需再选"
+                    label={
+                      <Space size={4}>
+                        <span>{editingMeta?.defaultNameEn || editingMeta?.defaultName || editingId}</span>
+                        <Text type="secondary" style={{ fontSize: 12, fontWeight: 'normal' }}>（英文副标题）</Text>
+                      </Space>
+                    }
+                    name="subtitle_en"
+                    extra={`留空使用默认：${editingMeta?.defaultSubtitleEn || 'None'}`}
+                    style={{ marginBottom: 16 }}
                   >
-                    <Switch />
+                    <Input placeholder={editingMeta?.defaultSubtitleEn} allowClear maxLength={32} />
                   </Form.Item>
-                </>
-              )}
-              <Form.Item label="排序权重" name="sort_order" extra="数字越大越靠前">
-                <InputNumber min={0} max={9999} style={{ width: '100%' }} />
-              </Form.Item>
-              <Form.Item
-                label="显示名称"
-                name="display_name"
-                extra={`留空则使用默认：${editingMeta?.defaultName || ''}`}
-              >
-                <Input placeholder={editingMeta?.defaultName} allowClear />
-              </Form.Item>
-              <Form.Item
-                label="副标题"
-                name="subtitle"
-                extra={`留空则使用默认：${editingMeta?.defaultSubtitle || ''}`}
-              >
-                <Input placeholder={editingMeta?.defaultSubtitle} allowClear maxLength={32} />
-              </Form.Item>
-              <Form.Item label="Logo 图片 URL" name="logo_url" extra="留空则使用系统默认图标">
+                </Col>
+              </Row>
+
+              <Form.Item label="Logo 图片 URL" name="logo_url" extra="留空则使用系统默认图标" style={{ marginBottom: 16 }}>
                 <Input placeholder="https://..." allowClear />
               </Form.Item>
             </Form>
 
             <Form form={formGateway} layout="vertical" autoComplete="off">
-              <Divider orientation="left" plain>网关参数</Divider>
+              <Divider plain>网关参数</Divider>
               {renderGatewayFields()}
             </Form>
 

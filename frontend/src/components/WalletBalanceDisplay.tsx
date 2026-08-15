@@ -37,6 +37,13 @@ interface WalletBalanceDisplayProps {
   totalRecharge?: number;
   /** 赠送钱包总充值金额（来自充值记录合计） */
   totalGiftRecharge?: number;
+  /** 列表页展示消费合计（used_quota / gift_used_quota），优先于总充值 */
+  showConsumption?: boolean;
+  /** 当月消费合计（传入后标签变为「本月消费合计」） */
+  monthConsumption?: {
+    system_cost: number;
+    gift_cost: number;
+  };
 }
 
 const WalletBalanceDisplay: React.FC<WalletBalanceDisplayProps> = ({
@@ -51,6 +58,8 @@ const WalletBalanceDisplay: React.FC<WalletBalanceDisplayProps> = ({
   monthStats,
   totalRecharge,
   totalGiftRecharge,
+  showConsumption = false,
+  monthConsumption,
 }) => {
   const { t } = useTranslation('team_marketing');
   
@@ -76,9 +85,21 @@ const WalletBalanceDisplay: React.FC<WalletBalanceDisplayProps> = ({
 
   const isMonthView = !!monthStats;
   const hasTotalRecharge = totalRecharge !== undefined;
-  const displayTotal = isMonthView ? monthStats.recharge_amount : (hasTotalRecharge ? totalRecharge : total);
-  const displayGiftTotal = isMonthView ? monthStats.gift_amount : (totalGiftRecharge !== undefined ? totalGiftRecharge : gift_total);
-  const labelPrefix = isMonthView ? '本月' : (hasTotalRecharge ? '总充值' : '总');
+  const isMonthConsumption = showConsumption && !!monthConsumption;
+
+  let displayTotal: number;
+  let displayGiftTotal: number;
+  let labelPrefix: string;
+
+  if (showConsumption) {
+    displayTotal = isMonthConsumption ? monthConsumption.system_cost : used;
+    displayGiftTotal = isMonthConsumption ? monthConsumption.gift_cost : gift_used;
+    labelPrefix = isMonthConsumption ? '本月消费合计' : '消费合计';
+  } else {
+    displayTotal = isMonthView ? monthStats.recharge_amount : (hasTotalRecharge ? totalRecharge : total);
+    displayGiftTotal = isMonthView ? monthStats.gift_amount : (totalGiftRecharge !== undefined ? totalGiftRecharge : gift_total);
+    labelPrefix = isMonthView ? '本月' : (hasTotalRecharge ? '总充值' : '总');
+  }
 
   const displaySystemLabel = systemLabel || t('system_wallet', '系统钱包');
   const displayGiftLabel = giftLabel || t('gift_wallet', '赠送钱包');
@@ -126,19 +147,9 @@ const WalletBalanceDisplay: React.FC<WalletBalanceDisplayProps> = ({
           )}
           {/* 信控额度标识 */}
           {creditLimit > 0 && (
-            <Tooltip title={
-              <div style={{ fontSize: 12, lineHeight: '20px' }}>
-                <div>系统余额: {currencySymbol}{balance.toFixed(6)}</div>
-                <div>信控额度: {currencySymbol}{creditLimit.toFixed(6)}</div>
-                <div style={{ borderTop: '1px solid rgba(255,255,255,0.2)', marginTop: 4, paddingTop: 4, fontWeight: 500 }}>
-                  可用余额: {currencySymbol}{availableBalance.toFixed(6)}
-                </div>
-              </div>
-            }>
-              <Tag color="blue" style={{ fontSize: 10, padding: '0 4px', margin: 0, lineHeight: '16px', cursor: 'pointer', border: 'none', whiteSpace: 'nowrap' }}>
-                💳 信控 {currencySymbol}{formatCreditLimit(creditLimit)}
-              </Tag>
-            </Tooltip>
+            <Tag color="blue" style={{ fontSize: 10, padding: '0 4px', margin: 0, lineHeight: '16px', border: 'none', whiteSpace: 'nowrap' }}>
+              💳 信控 {currencySymbol}{formatCreditLimit(creditLimit)}
+            </Tag>
           )}
         </div>
         <div style={{ lineHeight: 1.2, marginBottom: 4 }}>

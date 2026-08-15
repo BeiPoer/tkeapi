@@ -15,8 +15,8 @@ pub mod db_ts;
 pub mod period;
 
 pub use core::{
-    enforce_process_utc, parse_timedisplay, resolve_timedisplay, utc_naive_string,
-    DEFAULT_TIMEDISPLAY, TIMESYSTEM_TZ,
+    enforce_process_utc, parse_timedisplay, resolve_timedisplay, try_iana_timezone_name,
+    utc_naive_string, DEFAULT_TIMEDISPLAY, TIMESYSTEM_TZ,
 };
 pub use db_ts::DbTs;
 pub use period::{local_day_bounds_utc, local_period_keys, quota_day_key_with_cutover, PeriodKeys};

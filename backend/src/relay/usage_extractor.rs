@@ -98,6 +98,11 @@ fn set_str_if_none(dst: &mut Option<String>, val: Option<&str>) {
     }
 }
 
+#[inline]
+fn set_res_field(dst: &mut Option<String>, node: Option<&Value>, key: &str) {
+    set_str_if_none(dst, node.and_then(|n| n.get(key)).and_then(|r| r.as_str()));
+}
+
 fn set_f64_if_none(dst: &mut Option<f64>, val: Option<f64>) {
     if dst.is_none() {
         if let Some(v) = val {
@@ -237,7 +242,6 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
     let mut has_video = false;
     let mut has_audio = false;
     let mut duration_seconds = None;
-    let mut resolution = None;
 
     // service_tier：根 / parameters；腾讯云 OffPeak=Enabled → flex
     let service_tier = body
@@ -314,48 +318,29 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
         &mut has_audio,
     );
 
-    // resolution / duration：根、final_result、task、parameters、OutputConfig、settings
-    for src in [
-        body,
-        body.get("final_result").unwrap_or(body),
-        body.get("task").unwrap_or(body),
-    ] {
-        set_str_if_none(
-            &mut resolution,
-            src.get("resolution").and_then(|r| r.as_str()),
-        );
+    // duration：根、task、parameters、OutputConfig、settings（分辨率见 extract_resolution）
+    set_f64_if_none(
+        &mut duration_seconds,
+        body.get("duration").and_then(parse_json_f64),
+    );
+    if let Some(task) = body.get("task") {
         set_f64_if_none(
             &mut duration_seconds,
-            src.get("duration").and_then(parse_json_f64),
+            task.get("duration").and_then(parse_json_f64),
         );
     }
     if let Some(params) = body.get("parameters") {
-        set_str_if_none(
-            &mut resolution,
-            params.get("resolution").and_then(|r| r.as_str()),
-        );
         set_f64_if_none(
             &mut duration_seconds,
             params.get("duration").and_then(|d| d.as_f64()),
         );
     }
     let output_config = body.get("OutputConfig");
-    set_str_if_none(
-        &mut resolution,
-        output_config
-            .and_then(|oc| oc.get("Resolution"))
-            .and_then(|r| r.as_str()),
-    );
     set_f64_if_none(
         &mut duration_seconds,
         output_config
             .and_then(|oc| oc.get("Duration"))
             .and_then(|d| d.as_f64()),
-    );
-    set_str_if_none(
-        &mut resolution,
-        body.pointer("/settings/resolution")
-            .and_then(|r| r.as_str()),
     );
     set_f64_if_none(
         &mut duration_seconds,
@@ -423,7 +408,7 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
         (count > 0).then_some(count)
     };
 
-    // usage / task.usage 覆盖时长、分辨率、输入图数
+    // usage / task.usage 覆盖时长、输入图数（分辨率统一走 extract_resolution）
     let mut input_images = None;
     if let Some(usage) = body
         .get("usage")
@@ -435,13 +420,6 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
             .or_else(|| usage.get("duration").and_then(parse_json_f64))
         {
             duration_seconds = Some(dur);
-        }
-        if let Some(sr) = usage.get("SR") {
-            if let Some(n) = sr.as_i64() {
-                resolution = Some(format!("{}p", n));
-            } else if let Some(s) = sr.as_str() {
-                resolution = Some(s.to_string());
-            }
         }
         if let Some(ii) = usage
             .get("input_images")
@@ -475,10 +453,6 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
                 });
             }
         }
-    }
-
-    if let Some(ref mut res) = resolution {
-        *res = normalize_resolution_label(res);
     }
 
     let size = body
@@ -530,11 +504,7 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
         .and_then(|v| v.as_str())
         .map(|s| s.to_lowercase());
 
-    if resolution.is_none() {
-        if let Some(ref s) = size {
-            resolution = parse_pixel_resolution(s);
-        }
-    }
+    let resolution = extract_resolution(body);
     if let Some(ii) = input_images {
         image_ref_count = Some(ii);
         if ii > 0 {
@@ -692,7 +662,7 @@ fn json_nonneg_count(v: &Value) -> Option<i32> {
         .map(|n| n as i32)
 }
 
-/// 上游官方成功张数：MiniMax `metadata.success_count` → usage.generated_images / image_count
+/// 上游官方成功张数：MiniMax `metadata.success_count` → usage.generated_images / output_image_count / image_count
 fn official_image_count(v: &Value) -> Option<i32> {
     v.pointer("/metadata/success_count")
         .and_then(json_nonneg_count)
@@ -700,6 +670,7 @@ fn official_image_count(v: &Value) -> Option<i32> {
             let usage = v.get("usage")?;
             usage
                 .get("generated_images")
+                .or_else(|| usage.get("output_image_count"))
                 .or_else(|| usage.get("image_count"))
                 .and_then(json_nonneg_count)
         })
@@ -793,6 +764,23 @@ fn count_images_from_arrays(v: &Value) -> Option<i32> {
     if total_count == 0 {
         if let Some(results) = v.pointer("/output/results").and_then(|r| r.as_array()) {
             total_count = results.iter().filter(|item| has_media(item)).count() as i32;
+        }
+    }
+
+    // 4b. DashScope multimodal: output.choices[].message.content[].image
+    if total_count == 0 {
+        if let Some(choices) = v.pointer("/output/choices").and_then(|c| c.as_array()) {
+            for choice in choices {
+                if let Some(parts) = choice
+                    .pointer("/message/content")
+                    .and_then(|c| c.as_array())
+                {
+                    total_count += parts
+                        .iter()
+                        .filter(|p| nonempty_str_field(p, "image"))
+                        .count() as i32;
+                }
+            }
         }
     }
 
@@ -966,14 +954,7 @@ pub fn parse_usage(response: &str) -> UsageTokens {
             u.cached = json_field_i32(usage, "cachedContentTokenCount");
             found = true;
         }
-        // 3. Volcengine Video (final_result.usage)
-        if let Some(fr) = v.get("final_result") {
-            if let Some(usage) = fr.get("usage") {
-                apply_usage_max(&mut u, usage);
-                found = true;
-            }
-        }
-        // 4. 包裹格式: { code, data: { usage: {...} } }
+        // 3. 包裹格式: { code, data: { usage: {...} } }
         if !found {
             if let Some(usage) = v.get("data").and_then(|d| d.get("usage")) {
                 apply_usage_max(&mut u, usage);
@@ -1018,10 +999,6 @@ pub fn extract_usage_json_string(response: &str) -> Option<String> {
         if let Some(usage) = v.get("response").and_then(|r| r.get("usage")) {
             return Some(serde_json::json!({ "usage": usage }).to_string());
         }
-        if let Some(usage) = v.get("final_result").and_then(|fr| fr.get("usage")) {
-            return Some(serde_json::json!({ "final_result": { "usage": usage } }).to_string());
-        }
-        // 包裹格式: { code, data: { usage: {...} } }
         if let Some(usage) = v.get("data").and_then(|d| d.get("usage")) {
             return Some(serde_json::json!({ "usage": usage }).to_string());
         }
@@ -1130,12 +1107,54 @@ fn parse_json_f64(v: &Value) -> Option<f64> {
 }
 
 /// 分辨率标签规范化：`720P`→`720p`，`1K`→`1k`，纯数字 `720`→`720p`。
-fn normalize_resolution_label(raw: &str) -> String {
+pub fn normalize_resolution_label(raw: &str) -> String {
     let mut res = raw.trim().to_lowercase().replace('*', "x");
     if !res.is_empty() && res.chars().all(|c| c.is_ascii_digit()) {
         res.push('p');
     }
     res
+}
+
+/// 从请求/响应体提取规范化分辨率（计费特征与模型别名映射共用唯一入口）。
+/// 来源：resolution / parameters / settings / OutputConfig / usage.SR，缺省时由 size→1k/2k/4k。
+pub fn extract_resolution(body: &Value) -> Option<String> {
+    let mut resolution = None;
+    set_res_field(&mut resolution, Some(body), "resolution");
+    set_res_field(&mut resolution, body.get("task"), "resolution");
+    set_res_field(&mut resolution, body.get("parameters"), "resolution");
+    set_res_field(&mut resolution, body.get("OutputConfig"), "Resolution");
+    set_str_if_none(
+        &mut resolution,
+        body.pointer("/settings/resolution").and_then(|r| r.as_str()),
+    );
+    if let Some(usage) = body
+        .get("usage")
+        .or_else(|| body.get("task").and_then(|t| t.get("usage")))
+    {
+        if let Some(sr) = usage.get("SR") {
+            if let Some(n) = sr.as_i64() {
+                resolution = Some(format!("{}p", n));
+            } else if let Some(s) = sr.as_str().filter(|s| !s.is_empty()) {
+                resolution = Some(s.to_string());
+            }
+        }
+    }
+    if let Some(res) = resolution {
+        let res = normalize_resolution_label(&res);
+        if !res.is_empty() {
+            return Some(res);
+        }
+    }
+    body.get("size")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            body.get("data")
+                .and_then(|d| d.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|item| item.get("size"))
+                .and_then(|s| s.as_str())
+        })
+        .and_then(parse_pixel_resolution)
 }
 
 /// 从像素尺寸字符串识别分辨率等级（从 forward.rs 移入本特征提取模块）。

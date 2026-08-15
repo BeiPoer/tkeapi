@@ -6,7 +6,7 @@
  */
 
 use super::proxy;
-use super::task::{execute_refund_tx, normalize_task_status, poll_task_result, PollTaskOpts};
+use super::task::{normalize_task_status, poll_task_result, PollTaskOpts};
 use crate::error::{AppError, AppResult};
 use crate::models::{BillingRule, Channel};
 use crate::relay::{forward, response_formatter};
@@ -221,15 +221,7 @@ pub(crate) fn cascade_check_resolution(
     )))
 }
 
-/// 目标分辨率 → 默认一级底座（未配置 res_base 时）
-fn cascade_clamp_base_resolution(target: &str) -> &'static str {
-    cascade_allowed_bases(target)
-        .first()
-        .copied()
-        .unwrap_or("720p")
-}
-
-/// 优先用转发规则 res_base[目标]；缺省/非法回退默认一级底座
+/// 优先用转发规则 res_base[目标]；缺省/非法回退默认一级底座（allowed 首项）
 pub(crate) fn cascade_resolve_base(
     target: &str,
     res_base: &HashMap<String, String>,
@@ -242,14 +234,14 @@ pub(crate) fn cascade_resolve_base(
             let b = configured.trim().to_ascii_lowercase();
             allowed.iter().copied().find(|a| a.eq_ignore_ascii_case(&b))
         })
-        .unwrap_or_else(|| cascade_clamp_base_resolution(&key))
+        .unwrap_or_else(|| allowed.first().copied().unwrap_or("720p"))
 }
 
 /// MediaKit 共用上下文（http + 增强渠道鉴权），避免裁剪/抽帧重复传参。
-pub(crate) struct CascadeMk<'a> {
-    pub http: &'a reqwest::Client,
-    pub ch: &'a Channel,
-    pub auth_type: &'a str,
+struct CascadeMk<'a> {
+    http: &'a reqwest::Client,
+    ch: &'a Channel,
+    auth_type: &'a str,
 }
 
 /// MediaKit 异步工具：POST → `poll_task_result`（5→1s）→ 取 `out_ptr`。
@@ -371,13 +363,22 @@ async fn cascade_ensure_standard_480p_video(
 
 /// S2 成功落库前：stage1 usage×res_mul；S1 有尾帧则对 S2 视频抽帧写入 `s2.last_frame_url`（不改 stage1）。
 pub(crate) async fn cascade_on_s2_succeeded(
-    mk: &CascadeMk<'_>,
+    http: &reqwest::Client,
+    ch: &Channel,
+    auth_type: &str,
     s1: &mut serde_json::Value,
     s2_raw: &mut String,
     res_mul: &HashMap<String, f64>,
     plugin_tag: &str,
 ) {
-    apply_cascade_res_mul_to_stage1(s1, res_mul, plugin_tag);
+    let mk = CascadeMk {
+        http,
+        ch,
+        auth_type,
+    };
+    // stage1 usage × 目标分辨率倍率（落库 stage1；对外展示另走 cascade_s1_with_s2_url）
+    let res = cascade_resolve_target_resolution(plugin_tag, "");
+    forward::scale_usage_in_json(s1, forward::lookup_res_mul(res_mul, &res));
 
     if response_formatter::find_last_frame_url(s1).is_none() {
         return;
@@ -391,7 +392,7 @@ pub(crate) async fn cascade_on_s2_succeeded(
         return;
     };
     let Some(frame) = cascade_mk_url(
-        mk,
+        &mk,
         "/api/v1/tools/extract-frames",
         serde_json::json!({
             "video_url": video_url,
@@ -402,7 +403,7 @@ pub(crate) async fn cascade_on_s2_succeeded(
     )
     .await
     else {
-        tracing::warn!("[Cascade S2] 尾帧抽帧失败，跳过");
+        tracing::warn!("[Cascade S2] 尾帧跳过");
         return;
     };
     if let Some(obj) = s2.as_object_mut() {
@@ -498,12 +499,6 @@ pub(crate) fn cascade_seal_s1_task_id(
     Some(cgt)
 }
 
-/// 阶段一轮询上游：优先 `s1_task_id`，旧单无字段则回退 logs/path 上的 id
-pub(crate) fn cascade_s1_upstream_task_id(plugin_tag: &str, fallback: &str) -> String {
-    cascade_json_ptr(plugin_tag, "/cascade/s1_task_id", false)
-        .unwrap_or_else(|| fallback.to_string())
-}
-
 /// 级联目标分辨率：plugin_tag.cascade.resolution → 请求体 resolution → 720p。
 fn cascade_resolve_target_resolution(plugin_tag: &str, request_content: &str) -> String {
     cascade_json_str(plugin_tag, "/cascade/resolution")
@@ -582,7 +577,8 @@ fn cascade_s1_with_s2_url(
     }
 
     let target_res = cascade_resolve_target_resolution(plugin_tag, "");
-    let fps = cascade_s2_fps(s2).unwrap_or(60);
+    // 与 S2 提交 payload 默认 fps:24 对齐；有回包字段则用回包
+    let fps = cascade_s2_fps(s2).unwrap_or(24);
     patch_json_fields_by_key(
         &mut out,
         &[("resolution", target_res.as_str())],
@@ -650,10 +646,8 @@ pub(crate) fn cascade_scrub_plugin_tag_for_user(plugin_tag: &mut Option<String>)
     changed
 }
 
-/// 普通用户日志级联字段脱敏（仅 response / post_response；上游出参接口层已不返回）。
-/// - 未完成级联：响应改为处理中形态，硬保证无产物 URL
-/// - 已完成级联：折叠 stage，合并 S2 产物 URL
-/// - 非级联：仅在有 cascade 配置时修补 resolution
+/// 用户日志级联脱敏（仅 response/post）：
+/// 未完成→处理中；成功叠 S2 URL；失败不露 S1；非级联仅在有 cascade 时补 resolution
 pub(crate) fn cascade_sanitize_for_user(
     response: &mut Option<String>,
     post_resp: &mut Option<String>,
@@ -661,6 +655,7 @@ pub(crate) fn cascade_sanitize_for_user(
     is_completed: bool,
     task_id: &str,
     request_content: Option<&str>,
+    status_code: i32,
 ) {
     fn parse_cascade(s: &str) -> Option<(serde_json::Value, serde_json::Value)> {
         let v: serde_json::Value = serde_json::from_str(s).ok()?;
@@ -709,12 +704,20 @@ pub(crate) fn cascade_sanitize_for_user(
             || response.as_deref().and_then(parse_cascade).is_some());
 
     if cascade_inflight {
-        let s1_ack = post_resp
-            .as_deref()
-            .and_then(|s| {
-                parse_cascade(s)
-                    .map(|(s1, _)| s1)
-                    .or_else(|| serde_json::from_str(s).ok())
+        // 优先 response（含轮询元数据），否则 post；有 stage1 用 stage1
+        let s1_ack = [response.as_deref(), post_resp.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(|s| {
+                let v: serde_json::Value = serde_json::from_str(s).ok()?;
+                let s1 = v
+                    .get("stage1")
+                    .filter(|x| x.as_object().is_some_and(|m| !m.is_empty()))
+                    .cloned()
+                    .unwrap_or(v);
+                s1.as_object()
+                    .is_some_and(|m| !m.is_empty())
+                    .then_some(s1)
             })
             .unwrap_or_else(|| serde_json::json!({}));
         let tid = if !task_id.is_empty() {
@@ -739,11 +742,30 @@ pub(crate) fn cascade_sanitize_for_user(
     if is_completed {
         take_map(response, |raw| {
             let mut out = if let Some((s1, s2)) = parse_cascade(&raw) {
-                let mut merged = cascade_s1_with_s2_url(&s1, &s2, plugin_tag.unwrap_or(""));
-                if let Some(ref res) = s2_resolution(&s2).or_else(|| target_res.clone()) {
-                    patch_json_fields_by_key(&mut merged, &[("resolution", res)], &[]);
+                // S2 无产物/失败：勿回退 S1 成片
+                if status_code != 200 || response_formatter::find_urls(&s2).is_empty() {
+                    let err = cascade_stage2_err_text(&s2, "增强失败");
+                    serde_json::json!({
+                        "id": task_id,
+                        "status": "failed",
+                        "error": { "message": err }
+                    })
+                    .to_string()
+                } else {
+                    let mut merged = cascade_s1_with_s2_url(&s1, &s2, plugin_tag.unwrap_or(""));
+                    if let Some(ref res) = s2_resolution(&s2).or_else(|| target_res.clone()) {
+                        patch_json_fields_by_key(&mut merged, &[("resolution", res)], &[]);
+                    }
+                    merged.to_string()
                 }
-                merged.to_string()
+            } else if status_code != 200 && has_cascade {
+                // 非 combined 失败：不露底座 URL
+                serde_json::json!({
+                    "id": task_id,
+                    "status": "failed",
+                    "error": { "message": "增强失败" }
+                })
+                .to_string()
             } else if let Some(ref res) = target_res {
                 apply_resolution(&raw, res)
             } else {
@@ -845,7 +867,7 @@ fn cascade_stage2_poll_target(
     (ch, res, final_model)
 }
 
-/// 用户端「处理中」响应：POST ack 骨架，补 model/resolution，硬保证无产物 URL。
+/// 用户端处理中：POST ack + model/resolution；剥产物字段
 fn cascade_user_processing_response(
     stage1_submit: &serde_json::Value,
     task_id: &str,
@@ -857,10 +879,6 @@ fn cascade_user_processing_response(
         .map(|_| stage1_submit.to_string())
         .unwrap_or_default();
     cascade_apply_processing_status(&mut s, task_id, false);
-    let trimmed = s.trim();
-    if trimmed.is_empty() || trimmed == "{}" {
-        s = serde_json::json!({"id": task_id, "status": "running"}).to_string();
-    }
     if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&s) {
         if let Some(obj) = v.as_object_mut() {
             if let Some(model) = request_content
@@ -875,16 +893,10 @@ fn cascade_user_processing_response(
             s = serde_json::to_string(&v).unwrap_or(s);
         }
     }
-    if serde_json::from_str::<serde_json::Value>(&s)
-        .map(|v| !response_formatter::find_urls(&v).is_empty())
-        .unwrap_or(false)
-    {
-        return serde_json::json!({"id": task_id, "status": "running"}).to_string();
-    }
     s
 }
 
-/// 写入对外任务号，并将终态/空 status 改为处理中；去掉 content/usage 等产物字段。
+/// 写入对外任务号，终态/空 status→处理中；去掉产物字段（防 S1 成片）。
 fn cascade_apply_processing_status(s: &mut String, task_id: &str, openai_compatible: bool) {
     response_formatter::force_json_task_id(s, task_id);
     let Ok(mut v) = serde_json::from_str::<serde_json::Value>(s) else {
@@ -904,7 +916,7 @@ fn cascade_apply_processing_status(s: &mut String, task_id: &str, openai_compati
             }),
         );
     }
-    for k in ["content", "output", "usage", "results", "data"] {
+    for k in ["content", "data", "usage"] {
         obj.remove(k);
     }
     if let Ok(out) = serde_json::to_string(&v) {
@@ -912,14 +924,14 @@ fn cascade_apply_processing_status(s: &mut String, task_id: &str, openai_compati
     }
 }
 
-/// 级联阶段二进行中：对外返回阶段一 POST 提交态（处理中）。
-/// 禁止返回 S1 成功产物（含视频 URL）或 S2 增强接口原始响应。
+/// S2 进行中：对外 S1 态（apply_format 区分 OpenAI/官方）；剥产物，禁成片
 pub(crate) fn cascade_s2_client_processing(
     raw_path: &str,
     category: &str,
     stage1_submit: &serde_json::Value,
     task_id: &str,
 ) -> String {
+    let openai = response_formatter::is_openai_compatible_path(raw_path);
     let mut s = response_formatter::apply_format(
         raw_path,
         category,
@@ -927,15 +939,7 @@ pub(crate) fn cascade_s2_client_processing(
         false,
         Some(task_id),
     );
-    let trimmed = s.trim();
-    if trimmed.is_empty() || trimmed == "{}" {
-        return serde_json::json!({"id": task_id, "status": "running"}).to_string();
-    }
-    cascade_apply_processing_status(
-        &mut s,
-        task_id,
-        response_formatter::is_openai_compatible_path(raw_path),
-    );
+    cascade_apply_processing_status(&mut s, task_id, openai);
     s
 }
 
@@ -943,16 +947,6 @@ pub(crate) fn cascade_s2_client_processing(
 pub(crate) fn cascade_combine_stages(s1: &serde_json::Value, s2_raw: &str) -> String {
     let s2: serde_json::Value = serde_json::from_str(s2_raw).unwrap_or(serde_json::json!(s2_raw));
     serde_json::json!({ "stage1": s1, "stage2": s2 }).to_string()
-}
-
-/// 阶段二成功：stage1 usage × res_mul
-fn apply_cascade_res_mul_to_stage1(
-    s1: &mut serde_json::Value,
-    res_mul: &HashMap<String, f64>,
-    plugin_tag: &str,
-) {
-    let res = cascade_resolve_target_resolution(plugin_tag, "");
-    forward::scale_usage_in_json(s1, forward::lookup_res_mul(res_mul, &res));
 }
 
 /// 级联阶段二提交结果：Submitted=已提交超分；InProgress=他处正在裁剪/提交
@@ -972,10 +966,18 @@ pub(crate) fn cascade_stage_num(is_cascade: bool, post: &serde_json::Value) -> u
     }
 }
 
-/// 落库 response_content 是否为级联 combined（stage1+stage2）
+/// 有 stage1 或 stage2 → 级联落库形态
 #[inline]
 pub(crate) fn cascade_is_combined_resp(v: &serde_json::Value) -> bool {
-    v.get("stage1").is_some() && v.get("stage2").is_some()
+    v.get("stage1").is_some() || v.get("stage2").is_some()
+}
+
+/// plugin_tag 含 cascade（S1 扁平体时靠此识别）
+#[inline]
+pub(crate) fn cascade_plugin_tag_present(plugin_tag: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(plugin_tag)
+        .ok()
+        .is_some_and(|v| v.get("cascade").is_some())
 }
 
 /// 从级联 stage2 节点提取失败文案（字符串 / 错误体 / 兜底）
@@ -991,30 +993,63 @@ pub(crate) fn cascade_stage2_err_text(stage2: &serde_json::Value, fallback: &str
     proxy::sanitize_error_message(&raw)
 }
 
-/// 解析阶段二轮询目标。
-/// - `Ok(None)`：非阶段二
-/// - `Ok(Some((channel, s2_task_id, resolved, model)))`：可轮询
-/// - `Err(err_text)`：stage2 无有效任务 ID（调用方结案退费）
-pub(crate) fn cascade_resolve_s2_poll(
+/// 上游轮询目标（手动 GET / 后台轮询共用）
+pub(crate) struct CascadePollTarget<'a> {
+    pub channel: std::borrow::Cow<'a, Channel>,
+    pub resolved: std::borrow::Cow<'a, forward::ResolvedForward>,
+    pub task_id: std::borrow::Cow<'a, str>,
+    pub model: std::borrow::Cow<'a, str>,
+}
+
+/// 上游轮询目标（含 S1/S2）。Err=(文案, status)：S2 无有效 id；status 优先从 stage2 体推断，无法识别才 500
+pub(crate) fn cascade_poll_target<'a>(
     cascade_stage: u8,
     post_resp: &serde_json::Value,
-    channel: &Channel,
-    resolved: &forward::ResolvedForward,
+    channel: &'a Channel,
+    resolved: &'a forward::ResolvedForward,
     plugin_tag: &str,
-) -> Result<Option<(Channel, String, forward::ResolvedForward, String)>, String> {
-    if cascade_stage != 2 {
-        return Ok(None);
+    user_task_id: &'a str,
+    model_name: &'a str,
+) -> Result<CascadePollTarget<'a>, (String, u16)> {
+    if cascade_stage == 2 {
+        let stage2_val = &post_resp["stage2"];
+        let s2_id = response_formatter::find_id(stage2_val);
+        if s2_id.is_empty() {
+            let msg = cascade_stage2_err_text(stage2_val, "S2 无任务 ID");
+            return Err((msg, status_from_stage2_body(stage2_val)));
+        }
+        let (ch, res, model) = cascade_stage2_poll_target(channel, resolved, plugin_tag, &s2_id);
+        return Ok(CascadePollTarget {
+            channel: std::borrow::Cow::Owned(ch),
+            resolved: std::borrow::Cow::Owned(res),
+            task_id: std::borrow::Cow::Owned(s2_id),
+            model: std::borrow::Cow::Owned(model),
+        });
     }
-    let stage2_val = &post_resp["stage2"];
-    let s2_id = response_formatter::find_id(stage2_val);
-    if s2_id.is_empty() {
-        return Err(cascade_stage2_err_text(
-            stage2_val,
-            "级联阶段二提交失败，无有效任务ID",
-        ));
+    // 非级联 / S1：优先 plugin_tag.cascade.s1_task_id，否则用户侧 id
+    let task_id = cascade_json_ptr(plugin_tag, "/cascade/s1_task_id", false)
+        .map(std::borrow::Cow::Owned)
+        .unwrap_or(std::borrow::Cow::Borrowed(user_task_id));
+    Ok(CascadePollTarget {
+        channel: std::borrow::Cow::Borrowed(channel),
+        resolved: std::borrow::Cow::Borrowed(resolved),
+        task_id,
+        model: std::borrow::Cow::Borrowed(model_name),
+    })
+}
+
+/// 从 stage2 落库体推断 HTTP 码；空/无法识别 → 500
+fn status_from_stage2_body(stage2: &serde_json::Value) -> u16 {
+    match stage2 {
+        serde_json::Value::Null => 500,
+        serde_json::Value::String(s) if s.trim().is_empty() => 500,
+        serde_json::Value::String(s) => proxy::infer_error_status_code_from_str(s),
+        serde_json::Value::Object(m) if m.is_empty() => 500,
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+            proxy::infer_error_status_code(stage2)
+        }
+        _ => 500,
     }
-    let (ch, res, model) = cascade_stage2_poll_target(channel, resolved, plugin_tag, &s2_id);
-    Ok(Some((ch, s2_id, res, model)))
 }
 
 /// 阶段二成功对外体：S1 骨架换 S2 URL → apply_format → 固定用户侧 task_id
@@ -1059,37 +1094,38 @@ impl Drop for CascadeS2InflightGuard<'_> {
     }
 }
 
-/// 级联阶段二提交：阶段一底座成功后向画质增强提交超分（GET / 后台共用）。
-/// `crop_480p`：仅目标 720p 且底座 480 时是否走 MediaKit 裁剪（转发规则同名字段，缺省 true）。
+/// S2 提交入参（手动 GET / 后台共用，避免 10+ 散参）
+pub(crate) struct CascadeS2SubmitCtx<'a> {
+    pub task_id: &'a str,
+    pub log_id: i64,
+    pub post_response: &'a str,
+    pub request_content: &'a str,
+    pub upstream_req: &'a str,
+    pub channel: &'a Channel,
+    pub base_video_url: &'a str,
+    pub plugin_tag: &'a str,
+    pub stage1_response: &'a str,
+    /// 仅目标 720p 且底座 480 时是否 MediaKit 裁剪（转发规则同名字段，缺省 true）
+    pub crop_480p: bool,
+}
+
+/// S2 提交超分（GET/后台共用）。失败只落库；退费由调用方 settle_failure(stage=2)
 pub(crate) async fn cascade_stage2_submit(
     state: &Arc<AppState>,
-    user_id: &str,
-    token_id: Option<i64>,
-    task_id: &str,
-    db_log_id: i64,
-    log_post_response: &str,
-    log_request_content: &str,
-    log_upstream_req: &str,
-    pre_deduction: f64,
-    pre_deduct_gift: f64,
-    stage1_channel: &Channel,
-    base_video_url: &str,
-    log_plugin_tag: &str,
-    stage1_response: &str,
-    crop_480p: bool,
-) -> Result<CascadeS2SubmitOutcome, String> {
-    let Some(_guard) = CascadeS2InflightGuard::try_acquire(&state.cascade_s2_inflight, db_log_id)
+    ctx: &CascadeS2SubmitCtx<'_>,
+) -> Result<CascadeS2SubmitOutcome, (String, u16)> {
+    let Some(_guard) = CascadeS2InflightGuard::try_acquire(&state.cascade_s2_inflight, ctx.log_id)
     else {
-        tracing::info!("[Cascade S2] skip log_id={db_log_id}（并发互斥）");
+        tracing::info!("[Cascade S2] 跳过 log_id={}（忙）", ctx.log_id);
         return Ok(CascadeS2SubmitOutcome::InProgress);
     };
 
     let post_resp: serde_json::Value =
-        serde_json::from_str(log_post_response).unwrap_or(serde_json::json!({}));
+        serde_json::from_str(ctx.post_response).unwrap_or(serde_json::json!({}));
 
     let mut updated_tag_opt: Option<String> = None;
-    if !log_plugin_tag.is_empty() {
-        if let Ok(mut pt) = serde_json::from_str::<serde_json::Value>(log_plugin_tag) {
+    if !ctx.plugin_tag.is_empty() {
+        if let Ok(mut pt) = serde_json::from_str::<serde_json::Value>(ctx.plugin_tag) {
             if let Some(cascade) = pt.get_mut("cascade").and_then(|v| v.as_object_mut()) {
                 if cascade.remove("api_key").is_some() {
                     updated_tag_opt = Some(pt.to_string());
@@ -1098,8 +1134,8 @@ pub(crate) async fn cascade_stage2_submit(
         }
     }
     // S1 轮询成功体：根 id 换成用户侧 cgt 再落库（后续 combine/展示同源）
-    let mut s1_body = stage1_response.to_string();
-    response_formatter::force_json_task_id(&mut s1_body, task_id);
+    let mut s1_body = ctx.stage1_response.to_string();
+    response_formatter::force_json_task_id(&mut s1_body, ctx.task_id);
     let s1_json: serde_json::Value =
         serde_json::from_str(&s1_body).unwrap_or(serde_json::json!({}));
 
@@ -1117,7 +1153,7 @@ pub(crate) async fn cascade_stage2_submit(
             serde_json::from_str(s2_raw).unwrap_or(serde_json::json!(s2_raw));
         let resp_content = serde_json::json!({"stage1": s1, "stage2": s2_json}).to_string();
         let tag = tag.clone();
-        let db_id = db_log_id;
+        let db_id = ctx.log_id;
         async move {
             let _ = sqlx::query(&state.db.format_query(
                 "UPDATE logs SET post_response = ?, response_content = ?, error_message = ?, plugin_tag = COALESCE(?, plugin_tag), upstream_req_content = COALESCE(?, upstream_req_content) WHERE id = ?"
@@ -1125,20 +1161,9 @@ pub(crate) async fn cascade_stage2_submit(
         }
     };
 
-    if base_video_url.is_empty() {
+    if ctx.base_video_url.is_empty() {
+        // 底座无直链：非上游 HTTP 体，无法推断 → 500
         let err_msg = "底座视频生成成功但未能获取到视频直链地址";
-        execute_refund_tx(
-            state,
-            db_log_id,
-            user_id,
-            token_id,
-            Some(stage1_channel.id),
-            pre_deduction,
-            pre_deduct_gift,
-            err_msg,
-            500,
-        )
-        .await;
         write_error(
             state,
             err_msg,
@@ -1149,7 +1174,7 @@ pub(crate) async fn cascade_stage2_submit(
             None,
         )
         .await;
-        return Err(err_msg.to_string());
+        return Err((err_msg.to_string(), 500));
     }
 
     let seed_resolved = forward::ResolvedForward {
@@ -1159,18 +1184,18 @@ pub(crate) async fn cascade_stage2_submit(
         ..Default::default()
     };
     let (enhance_ch, mut volc_resolved, final_model) =
-        cascade_stage2_poll_target(stage1_channel, &seed_resolved, log_plugin_tag, task_id);
+        cascade_stage2_poll_target(ctx.channel, &seed_resolved, ctx.plugin_tag, ctx.task_id);
     let volc_model_mid = volc_resolved
         .mid
         .get_or_insert_with(|| "vve-sd".to_string())
         .clone();
 
-    let target_resolution = cascade_resolve_target_resolution(log_plugin_tag, log_request_content);
-    let base_video_url = if crop_480p {
+    let target_resolution = cascade_resolve_target_resolution(ctx.plugin_tag, ctx.request_content);
+    let base_video_url = if ctx.crop_480p {
         let req_hint: serde_json::Value =
-            serde_json::from_str(log_request_content).unwrap_or(serde_json::json!({}));
+            serde_json::from_str(ctx.request_content).unwrap_or(serde_json::json!({}));
         let up_hint: serde_json::Value =
-            serde_json::from_str(log_upstream_req).unwrap_or(serde_json::json!({}));
+            serde_json::from_str(ctx.upstream_req).unwrap_or(serde_json::json!({}));
         let mk = CascadeMk {
             http: &state.http_client,
             ch: &enhance_ch,
@@ -1178,14 +1203,14 @@ pub(crate) async fn cascade_stage2_submit(
         };
         cascade_ensure_standard_480p_video(
             &mk,
-            base_video_url,
+            ctx.base_video_url,
             &s1_json,
             &target_resolution,
             &[&up_hint, &req_hint],
         )
         .await
     } else {
-        base_video_url.to_string()
+        ctx.base_video_url.to_string()
     };
 
     let volc_url = forward::build_upstream_url(
@@ -1204,7 +1229,7 @@ pub(crate) async fn cascade_stage2_submit(
     if let Some(tv) = forward::volc_enhance_tool_version(&volc_model_mid) {
         volc_payload["tool_version"] = serde_json::json!(tv);
         if tv == "standard" {
-            let scene = cascade_json_str(log_plugin_tag, "/cascade/scene")
+            let scene = cascade_json_str(ctx.plugin_tag, "/cascade/scene")
                 .and_then(|s| cascade_scene_pair(&s))
                 .unwrap_or("common");
             volc_payload["scene"] = serde_json::json!(scene);
@@ -1242,10 +1267,10 @@ pub(crate) async fn cascade_stage2_submit(
                             let err =
                                 match response_formatter::extract_error_message_from_value(&post) {
                                     Some(m) if !m.is_empty() => format!(
-                                        "火山增强提交失败: {}",
+                                        "增强失败: {}",
                                         proxy::sanitize_error_message(&m)
                                     ),
-                                    _ => "火山增强提交失败（业务错误，无任务 ID）".to_string(),
+                                    _ => "增强失败（无任务 ID）".to_string(),
                                 };
                             (false, err, proxy::infer_error_status_code(&post), text)
                         }
@@ -1253,14 +1278,20 @@ pub(crate) async fn cascade_stage2_submit(
                             let snippet: String = text.chars().take(240).collect();
                             tracing::warn!(
                                 "[Cascade S2 POST] HTTP200 无任务ID log_id={} url={} body={}",
-                                db_log_id,
+                                ctx.log_id,
                                 volc_url,
                                 snippet
                             );
+                            // 有响应体则推断；空体无法识别 → 500
+                            let st = if text.trim().is_empty() {
+                                500
+                            } else {
+                                proxy::infer_error_status_code_from_str(&text)
+                            };
                             (
                                 false,
                                 "火山增强提交成功但未能解析到超分任务 ID".to_string(),
-                                500,
+                                st,
                                 text,
                             )
                         }
@@ -1268,7 +1299,7 @@ pub(crate) async fn cascade_stage2_submit(
                 } else {
                     let err_text_raw = proxy::extract_error_message(&text);
                     let err_text = proxy::sanitize_error_message(&if err_text_raw.is_empty() {
-                        format!("火山增强提交失败 HTTP {}", status)
+                        format!("增强失败 HTTP {}", status)
                     } else {
                         err_text_raw
                     });
@@ -1293,7 +1324,7 @@ pub(crate) async fn cascade_stage2_submit(
             }
             Err(e) => (
                 true,
-                proxy::sanitize_error_message(&format!("火山增强接口提交连接失败: {:?}", e)),
+                proxy::sanitize_error_message(&format!("增强连接失败: {:?}", e)),
                 502,
                 String::new(),
             ),
@@ -1312,25 +1343,13 @@ pub(crate) async fn cascade_stage2_submit(
         } else {
             let err_status = proxy::normalize_error_http_status(err_status);
             tracing::error!(
-                "[Cascade S2 POST] 终态失败 ({}/{}): log_id={}, status={}, err={}",
+                "[Cascade S2 POST] 失败 ({}/{}) log_id={} status={} err={}",
                 attempt,
                 max_attempts,
-                db_log_id,
+                ctx.log_id,
                 err_status,
                 err_msg
             );
-            execute_refund_tx(
-                state,
-                db_log_id,
-                user_id,
-                token_id,
-                Some(stage1_channel.id),
-                pre_deduction,
-                pre_deduct_gift,
-                &err_msg,
-                err_status,
-            )
-            .await;
             write_error(
                 state,
                 &err_msg,
@@ -1338,22 +1357,22 @@ pub(crate) async fn cascade_stage2_submit(
                 &s1_json,
                 &raw_text,
                 &updated_tag_opt,
-                cascade_upstream_req_combined(log_upstream_req, &volc_payload),
+                cascade_upstream_req_combined(ctx.upstream_req, &volc_payload),
             )
             .await;
-            return Err(err_msg);
+            return Err((err_msg, err_status));
         }
     };
 
     let updated = serde_json::json!({"stage1": post_resp, "stage2": post_json}).to_string();
-    let upstream_combined = cascade_upstream_req_combined(log_upstream_req, &volc_payload);
+    let upstream_combined = cascade_upstream_req_combined(ctx.upstream_req, &volc_payload);
     let _ = sqlx::query(&state.db.format_query("UPDATE logs SET post_response = ?, response_content = ?, upstream_req_content = COALESCE(?, upstream_req_content) WHERE id = ?"))
-        .bind(&updated).bind(&s1_body).bind(&upstream_combined).bind(db_log_id).execute(&state.db.pool).await;
+        .bind(&updated).bind(&s1_body).bind(&upstream_combined).bind(ctx.log_id).execute(&state.db.pool).await;
 
     tracing::info!(
         "[Cascade S2] 级联提交成功 日志ID={} 阶段1={} 阶段2={} MID={} 分辨率={} 渠道={}",
-        db_log_id,
-        task_id,
+        ctx.log_id,
+        ctx.task_id,
         stage2_id,
         volc_model_mid,
         target_resolution,

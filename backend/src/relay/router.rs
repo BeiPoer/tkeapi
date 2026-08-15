@@ -116,7 +116,7 @@ pub async fn select_channel(
         model_clause, exclude_clause
     );
 
-    let (tz_name, _) = crate::relay::get_cached_config(state).await;
+    let tz_name = crate::relay::relay_settings::get_cached_site_timezone(&state.db).await;
     let (now_day, now_week, now_month) = crate::models::quota_period_keys(&tz_name);
 
     let formatted_sql = state.db.format_query(&sql);
@@ -359,6 +359,7 @@ pub async fn select_channel(
 
     // 5. 画质增强凭证集成：从 config 中的凭证 ID 实时查询最新密钥（保证插件端修改凭证后渠道分组数据一致）
     apply_volcengine_credential(state, &mut ch).await;
+    apply_comfyui_channel(state, &mut ch).await;
 
     tracing::info!(
         "[SelectChannel] 选中 渠道id={} 上游YID={} 名称='{}' 类型={} 子渠标识={:?} 地址={}",
@@ -477,6 +478,7 @@ async fn hydrate_for_reload(
         {
             apply_reload_cfg(ch, &cfg);
             apply_volcengine_credential(state, ch).await;
+            apply_comfyui_channel(state, ch).await;
             return;
         }
     }
@@ -494,29 +496,109 @@ async fn hydrate_for_reload(
         }
     }
     apply_volcengine_credential(state, ch).await;
+    apply_comfyui_channel(state, ch).await;
 }
 
-/// 解析最终上游请求使用的模型名称（全站映射唯一入口）
-/// 优先级：渠道映射（最高）> 模型表别名 > 原始 model_id（兜底）
-/// 返回 (映射后的模型名, 映射来源标签) — 来源为 None 时表示无映射
+/// 解析最终上游模型名（全站唯一入口）。
+/// 优先级：分辨率映射 > 渠道映射（含 HA 子渠明文）> 模型表别名 > 原始 id。
+/// `resolution`：已规范化更佳；`None` 则跳过分辨率映射。
 pub fn resolve_model(
     channel: &Channel,
     requested_model: &str,
     db_model: Option<&crate::models::Model>,
-) -> (String, Option<&'static str>) {
-    let resolved = channel.resolve_model(requested_model);
-    // 渠道有映射则直接返回（最高优先级）
-    if resolved != requested_model {
-        return (resolved, Some("渠道映射"));
-    }
-    // 渠道无映射，检查模型表别名（次级优先级）
-    if let Some(m) = db_model {
-        if !m.model_id_alias.is_empty() {
-            return (m.model_id_alias.clone(), Some("模型映射"));
+    resolution: Option<&str>,
+) -> (String, Option<String>) {
+    if let Some(res) = resolution {
+        if let Some((alias, res_key)) = resolve_res_alias(channel, requested_model, res) {
+            let src = format!("分辨率映射@{}", res_key);
+            tracing::debug!("[ModelMap] {} {} → {}", src, requested_model, alias);
+            return (alias, Some(src));
         }
     }
-    // 兜底：返回原始 model_id
+    let resolved = channel.resolve_model(requested_model);
+    if resolved != requested_model {
+        return (resolved, Some("渠道映射".into()));
+    }
+    if let Some(m) = db_model {
+        if !m.model_id_alias.is_empty() {
+            return (m.model_id_alias.clone(), Some("模型映射".into()));
+        }
+    }
     (resolved, None)
+}
+
+/// 图片/视频请求入口：从 body 抽分辨率后走 [`resolve_model`]（聊天/语音等勿用）
+#[inline]
+pub fn resolve_model_body(
+    channel: &Channel,
+    requested_model: &str,
+    db_model: Option<&crate::models::Model>,
+    body: Option<&serde_json::Value>,
+) -> (String, Option<String>) {
+    let res = body.and_then(crate::relay::usage_extractor::extract_resolution);
+    resolve_model(channel, requested_model, db_model, res.as_deref())
+}
+
+/// 结算等场景：仅图片/视频类别才带上已提取分辨率做映射
+#[inline]
+pub fn mapping_resolution<'a>(
+    category: Option<&str>,
+    resolution: Option<&'a str>,
+) -> Option<&'a str> {
+    category
+        .filter(|c| c.contains("图片") || c.contains("视频"))
+        .and(resolution)
+}
+
+/// `config.res_model_mapping`: `{ model_id: { "default"|sub_id: { "480p"|"1k": alias } } }`
+/// 回退：子渠该档 → 默认别名该档 →（未命中则走明文别名）
+fn resolve_res_alias(
+    channel: &Channel,
+    requested_model: &str,
+    resolution: &str,
+) -> Option<(String, String)> {
+    let config: serde_json::Value = serde_json::from_str(&channel.config).ok()?;
+    let scopes = config
+        .get("res_model_mapping")?
+        .get(requested_model)?
+        .as_object()?;
+    let res_key = crate::relay::usage_extractor::normalize_resolution_label(resolution);
+    if res_key.is_empty() {
+        return None;
+    }
+    let pick = |scope: &str| -> Option<String> {
+        let map = scopes.get(scope)?.as_object()?;
+        res_alias_in_map(map, &res_key)
+    };
+    if let Some(sid) = crate::relay::ha::ha_config_id_from_aid(channel) {
+        if let Some(alias) = pick(&sid.to_string()) {
+            return Some((alias, res_key));
+        }
+    }
+    pick("default").map(|alias| (alias, res_key))
+}
+
+#[inline]
+fn res_alias_in_map(
+    map: &serde_json::Map<String, serde_json::Value>,
+    res_key: &str,
+) -> Option<String> {
+    if let Some(a) = map
+        .get(res_key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(a.to_string());
+    }
+    // 兼容历史未规范 key（如 "480" / "720P"）
+    map.iter().find_map(|(k, v)| {
+        if crate::relay::usage_extractor::normalize_resolution_label(k) != res_key {
+            return None;
+        }
+        v.as_str()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    })
 }
 
 /// 画质增强凭证集成：根据 config 中的凭证 ID 实时查询 plugin_configs 表获取最新密钥并覆盖到渠道
@@ -563,3 +645,44 @@ pub(crate) async fn apply_volcengine_credential(
         }
     }
 }
+
+#[cfg(feature = "plugin_comfyui")]
+pub(crate) async fn apply_comfyui_channel(state: &crate::AppState, ch: &mut crate::models::Channel) {
+    if ch.provider_type != "comfyui" {
+        return;
+    }
+    let cfg = serde_json::from_str::<serde_json::Value>(&ch.config).unwrap_or(serde_json::Value::Null);
+    let server_id = crate::relay::forward::parse_comfyui_server_ids(&cfg)
+        .first()
+        .copied();
+    let workflow_id = cfg.get("comfyui_workflow_id").and_then(|v| v.as_i64());
+    let url: Option<String> = if let Some(sid) = server_id {
+        sqlx::query_scalar(&state.db.format_query(
+            "SELECT base_url FROM comfyui_servers WHERE id = ? AND is_active = 1",
+        ))
+        .bind(sid)
+        .fetch_optional(&state.db.pool)
+        .await
+        .ok()
+        .flatten()
+    } else if let Some(wid) = workflow_id {
+        sqlx::query_scalar(&state.db.format_query(
+            "SELECT s.base_url FROM comfyui_workflows w \
+             INNER JOIN comfyui_servers s ON s.id = w.server_id \
+             WHERE w.id = ? AND w.is_active = 1 AND s.is_active = 1",
+        ))
+        .bind(wid)
+        .fetch_optional(&state.db.pool)
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+    if let Some(u) = url {
+        ch.base_url = u;
+    }
+}
+
+#[cfg(not(feature = "plugin_comfyui"))]
+pub(crate) async fn apply_comfyui_channel(_: &crate::AppState, _: &mut crate::models::Channel) {}

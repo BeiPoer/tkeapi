@@ -5,14 +5,16 @@
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
-import React, { useState, useEffect } from 'react';
-import { Table, Button, Space, message, Card, Typography, Grid, Tag, Popconfirm } from 'antd';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Table, Button, Space, message, Card, Typography, Grid, Tag, Popconfirm, Input } from 'antd';
 import MobileCardList, { MobileCard, CardRow, CardActions } from '../../components/MobileCardList';
-import { PlusOutlined, EditOutlined, DeleteOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, DeleteOutlined, SafetyCertificateOutlined, SyncOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
+import { fetchActivePlugins } from '../../utils/activePlugins';
 import { formatApiDateTime } from '../../utils/timedisplay';
 import useSettingsStore from '../../store/settings';
+import { useTranslation } from 'react-i18next';
 import type { AdminGroup } from '../../types';
 import {
   ADMIN_MENU_PERMISSIONS,
@@ -21,7 +23,7 @@ import {
   getAdminMenuPermissionLabel,
 } from '../../constants/adminMenuPermissions';
 
-const { Text } = Typography;
+const { Title, Text } = Typography;
 const { useBreakpoint } = Grid;
 
 const ALL_BASIC_PERMISSION_VALUES = flattenAdminMenuPermissions();
@@ -30,8 +32,10 @@ const AdminGroups: React.FC = () => {
   const [groups, setGroups] = useState<AdminGroup[]>([]);
   const [loading, setLoading] = useState(false);
   const [activePlugins, setActivePlugins] = useState<any[]>([]);
+  const [searchKeyword, setSearchKeyword] = useState('');
   const screens = useBreakpoint();
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const { settings } = useSettingsStore();
   const adminPath = settings?.site?.admin_path || 'admin1688';
 
@@ -47,9 +51,9 @@ const AdminGroups: React.FC = () => {
     }
   };
 
-  const fetchActivePlugins = async () => {
+  const loadActivePlugins = async () => {
     try {
-      const response = await (request.get('/plugins/active') as any);
+      const response = await fetchActivePlugins();
       if (response.active_plugins) {
         setActivePlugins(response.active_plugins);
       }
@@ -60,8 +64,21 @@ const AdminGroups: React.FC = () => {
 
   useEffect(() => {
     fetchGroups();
-    fetchActivePlugins();
+    loadActivePlugins();
   }, []);
+
+  const filteredGroups = useMemo(() => {
+    if (!searchKeyword.trim()) return groups;
+    const kw = searchKeyword.trim().toLowerCase();
+    return groups.filter((g) => {
+      const matchName = g.name?.toLowerCase().includes(kw);
+      const matchId = g.id?.toString().includes(kw);
+      const matchPadId = `id: ${g.id.toString().padStart(4, '0')}`.toLowerCase().includes(kw) ||
+                         g.id.toString().padStart(4, '0').includes(kw);
+      const matchDesc = g.description?.toLowerCase().includes(kw);
+      return matchName || matchId || matchPadId || matchDesc;
+    });
+  }, [groups, searchKeyword]);
 
   const handleCreate = () => {
     navigate(`/${adminPath}/admin-groups/new`);
@@ -100,7 +117,7 @@ const AdminGroups: React.FC = () => {
       return (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
           <Tag color="success" style={{ fontSize: '11px', margin: 0, padding: '0 4px', fontWeight: 'bold' }}>
-            全部功能
+            {t('admin_perm.all_features')}
           </Tag>
         </div>
       );
@@ -126,13 +143,13 @@ const AdminGroups: React.FC = () => {
       if (p.startsWith('plugin:')) {
         const pName = p.substring(7);
         const foundPlugin = activePlugins.find((ap) => ap.name === pName);
-        return `插件: ${foundPlugin ? (foundPlugin.title || pName) : pName}`;
+        return `${t('admin_perm.plugin_prefix')}${foundPlugin ? t(`plugin_titles.${pName}`, { defaultValue: foundPlugin.title || pName }) : pName}`;
       }
-      return getAdminMenuPermissionLabel(p);
+      return getAdminMenuPermissionLabel(p, (k, def) => (def !== undefined ? t(k, { defaultValue: def }) : t(k)));
     });
 
     if (permLabels.length === 0) {
-      return <Text type="secondary" style={{ fontSize: '11px' }}>未配置权限</Text>;
+      return <Text type="secondary" style={{ fontSize: '11px' }}>{t('admin_perm.none')}</Text>;
     }
 
     return (
@@ -147,8 +164,23 @@ const AdminGroups: React.FC = () => {
   };
 
   const columns = [
-    { title: '名称', dataIndex: 'name', key: 'name', width: 150 },
-    { title: '用户数', dataIndex: 'user_count', key: 'user_count', width: 80, render: (val: number) => <Tag color="blue">{val || 0}</Tag> },
+    { 
+      title: '名称', 
+      dataIndex: 'name', 
+      key: 'name', 
+      width: 180, 
+      sorter: (a: AdminGroup, b: AdminGroup) => a.name.localeCompare(b.name, 'zh'),
+      render: (text: string, record: AdminGroup) => (
+        <Space align="center" size={6}>
+          <SafetyCertificateOutlined style={{ color: '#1677ff' }} />
+          <Text strong style={{ fontSize: 13 }}>{text}</Text>
+          <Tag bordered={false} style={{ margin: 0, background: 'rgba(22,119,255,0.1)', color: '#1677ff', borderRadius: 4, fontSize: 11, lineHeight: '18px', padding: '0 5px' }}>
+            ID: {record.id.toString().padStart(4, '0')}
+          </Tag>
+        </Space>
+      ),
+    },
+    { title: '用户数', dataIndex: 'user_count', key: 'user_count', width: 80, sorter: (a: AdminGroup, b: AdminGroup) => (a.user_count || 0) - (b.user_count || 0), render: (val: number) => <Tag color="blue">{val || 0}</Tag> },
     { 
       title: '权限详细', 
       key: 'permissions_detail', 
@@ -156,8 +188,18 @@ const AdminGroups: React.FC = () => {
       render: (_: any, record: AdminGroup) => renderPermissionsTags(record.permissions)
     },
     { title: '描述', dataIndex: 'description', key: 'description' },
-    { title: '排序', dataIndex: 'sort_order', key: 'sort_order', width: 80 },
-    { title: '创建时间', dataIndex: 'created_at', key: 'created_at', render: (text: string) => formatApiDateTime(text) },
+    { title: '排序', dataIndex: 'sort_order', key: 'sort_order', width: 80, sorter: (a: AdminGroup, b: AdminGroup) => (a.sort_order || 0) - (b.sort_order || 0) },
+    { 
+      title: '创建时间', 
+      dataIndex: 'created_at', 
+      key: 'created_at', 
+      sorter: (a: AdminGroup, b: AdminGroup) => {
+        const timeA = a.created_at ? new Date(a.created_at).getTime() : 0;
+        const timeB = b.created_at ? new Date(b.created_at).getTime() : 0;
+        return timeA - timeB;
+      },
+      render: (text: string) => formatApiDateTime(text) 
+    },
     { 
       title: '操作', 
       key: 'action', 
@@ -174,28 +216,42 @@ const AdminGroups: React.FC = () => {
   ];
 
   return (
-    <Card 
-      title={
-        <Space>
-          <SafetyCertificateOutlined />
-          <span>管理员权限等级</span>
+    <Card bordered={false}>
+      <div style={{ display: 'flex', flexDirection: screens.xs ? 'column' : 'row', justifyContent: 'space-between', marginBottom: 12, gap: 12 }}>
+        <Title level={screens.xs ? 4 : 2} style={{ margin: 0 }}>管理员等级</Title>
+        <Space wrap>
+          <Input.Search
+            placeholder="搜索等级名称 / 等级 ID"
+            allowClear
+            value={searchKeyword}
+            onChange={(e) => setSearchKeyword(e.target.value)}
+            onSearch={(val) => setSearchKeyword(val)}
+            style={{ width: screens.xs ? '100%' : 220 }}
+          />
+          <Button icon={<SyncOutlined />} onClick={fetchGroups}>刷新</Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>
+            添加管理员等级
+          </Button>
         </Space>
-      }
-      extra={
-        <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>
-          添加管理员等级
-        </Button>
-      }
-    >
+      </div>
+
       {screens.xs ? (
         <MobileCardList
-          dataSource={groups}
+          dataSource={filteredGroups}
           loading={loading}
           rowKey="id"
           pagination={false}
           renderCard={(record: any) => (
             <MobileCard
-              title={<Text strong>{record.name}</Text>}
+              title={
+                <Space align="center" size={8} wrap>
+                  <SafetyCertificateOutlined style={{ color: '#1677ff' }} />
+                  <Text strong>{record.name}</Text>
+                  <Tag bordered={false} style={{ margin: 0, background: 'rgba(22,119,255,0.1)', color: '#1677ff', borderRadius: 4 }}>
+                    ID: {record.id.toString().padStart(4, '0')}
+                  </Tag>
+                </Space>
+              }
               extra={null}
             >
               <CardRow label="权限详细">{renderPermissionsTags(record.permissions)}</CardRow>
@@ -215,9 +271,13 @@ const AdminGroups: React.FC = () => {
       ) : (
         <Table 
           columns={columns} 
-          dataSource={groups} 
+          dataSource={filteredGroups} 
           rowKey="id" 
           loading={loading}
+          pagination={false}
+          size="small"
+          scroll={{ x: 'max-content' }}
+          showSorterTooltip={false}
         />
       )}
     </Card>

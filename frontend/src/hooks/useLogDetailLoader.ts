@@ -14,6 +14,7 @@ export type LogDetailFields = {
   post_response?: string | null;
   upstream_req_content?: string | null;
   billing_detail?: string | null;
+  plugin_tag?: string | null;
 };
 
 /** 列表展开详情：缓存/去重；刷新清空后对仍展开行自动重拉 detail。 */
@@ -42,6 +43,7 @@ export function useLogDetailLoader(rowIds: number[]) {
         post_response: detail.post_response ?? null,
         upstream_req_content: detail.upstream_req_content ?? null,
         billing_detail: detail.billing_detail ?? null,
+        plugin_tag: detail.plugin_tag ?? null,
       };
       cacheRef.current = { ...cacheRef.current, [id]: mapped };
       setDetailCache((prev) => ({ ...prev, [id]: mapped }));

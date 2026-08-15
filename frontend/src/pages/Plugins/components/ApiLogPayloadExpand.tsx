@@ -23,11 +23,12 @@ function safeParse(str?: string | null) {
   }
 }
 
-/** 素材资产中心「接口日志」同款：Request / Response JSON 树展开 */
+/** 素材资产中心「接口日志」同款：Request / 上游 / Response JSON 树展开 */
 const ApiLogPayloadExpand: React.FC<{
   request?: string | null;
+  upstream?: string | null;
   response?: string | null;
-}> = ({ request, response }) => {
+}> = ({ request, upstream, response }) => {
   const { themeMode } = useThemeStore();
   const { token } = theme.useToken();
   const isLight = themeMode === 'light';
@@ -60,6 +61,14 @@ const ApiLogPayloadExpand: React.FC<{
     </div>
   );
 
+  const items = [
+    { title: '📤 Request Payload', color: token.colorPrimary, payload: request },
+    ...(upstream
+      ? [{ title: '📡 上游请求', color: token.colorSuccess, payload: upstream }]
+      : []),
+    { title: '📥 Response Payload', color: token.colorWarning, payload: response },
+  ];
+
   return (
     <div
       style={{
@@ -69,8 +78,7 @@ const ApiLogPayloadExpand: React.FC<{
         borderRadius: 8,
       }}
     >
-      {block('📤 Request Payload', token.colorPrimary, request)}
-      {block('📥 Response Payload', token.colorWarning, response, true)}
+      {items.map((it, i) => block(it.title, it.color, it.payload, i === items.length - 1))}
     </div>
   );
 };

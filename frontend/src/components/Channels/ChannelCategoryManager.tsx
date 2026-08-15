@@ -100,6 +100,7 @@ const ChannelCategoryManager: React.FC<ChannelCategoryManagerProps> = ({
       title: t('common.name'),
       dataIndex: 'name',
       key: 'name',
+      sorter: (a: ChannelCategory, b: ChannelCategory) => (a.name || '').localeCompare(b.name || '', 'zh'),
       render: (_: any, record: ChannelCategory) => (
         <Space>
           <span>{isEn && record.name_en ? record.name_en : record.name}</span>
@@ -112,15 +113,17 @@ const ChannelCategoryManager: React.FC<ChannelCategoryManagerProps> = ({
       dataIndex: 'sort_order',
       key: 'sort_order',
       width: 100,
+      sorter: (a: ChannelCategory, b: ChannelCategory) => (a.sort_order || 0) - (b.sort_order || 0),
     },
     {
       title: t('common.status'),
       dataIndex: 'is_active',
       key: 'is_active',
+      width: 100,
+      sorter: (a: ChannelCategory, b: ChannelCategory) => (Number(a.is_active || 0)) - (Number(b.is_active || 0)),
       render: (active: number | boolean) => (
         <Switch checked={!!active} disabled />
       ),
-      width: 100,
     },
     {
       title: t('common.actions'),

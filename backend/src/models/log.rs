@@ -81,6 +81,10 @@ pub struct RequestLog {
     #[sqlx(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_nickname: Option<String>,
+    /// 用户管理员备注（仅管理端列表展示）
+    #[sqlx(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_admin_remark: Option<String>,
     #[sqlx(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_group: Option<String>,
@@ -127,7 +131,7 @@ pub struct RequestLog {
     /// 预扣费中从赠送余额扣除的金额，用于退款时精准归还
     #[sqlx(default)]
     pub pre_deduct_gift: f64,
-    /// 插件标记JSON，如快乐小马的路由信息
+    /// 插件标记 JSON（列表/仪表盘不返回；仅详情接口）
     #[sqlx(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin_tag: Option<String>,
@@ -195,6 +199,9 @@ pub struct LogDetailContent {
     pub post_response: Option<String>,
     pub upstream_req_content: Option<String>,
     pub billing_detail: Option<String>,
+    /// 列表不查；展开按需。用户端已白名单投影。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_tag: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]

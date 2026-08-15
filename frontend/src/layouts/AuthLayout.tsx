@@ -12,7 +12,7 @@ import { Terminal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useThemeStore } from '../store/theme';
 import useSettingsStore from '../store/settings';
-import { persistUserLanguagePreference } from '../utils/language';
+import { persistUserLanguagePreference, LANG_NAME_MAP } from '../utils/language';
 import { GridStarsEffect } from '../components/GridStarsEffect';
 
 export interface AuthMethodOption {
@@ -40,12 +40,20 @@ interface AuthLayoutProps {
 }
 
 /** 规范化标题链接：相对路径原样保留，无协议的外链补 https:// */
-const normalizeTitleHref = (raw?: string | null): string | null => {
+export const normalizeTitleHref = (raw?: string | null): string | null => {
   const href = (raw || '').trim();
   if (!href) return null;
   if (href.startsWith('/') || href.startsWith('#') || href.startsWith('?')) return href;
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href)) return href;
   return `https://${href}`;
+};
+
+/** 登录页标题链接：优先 login_title_url，留空则回退 logo_title_url */
+const resolveLoginTitleHref = (site?: {
+  login_title_url?: string | null;
+  logo_title_url?: string | null;
+} | null): string | null => {
+  return normalizeTitleHref(site?.login_title_url) || normalizeTitleHref(site?.logo_title_url);
 };
 
 const AuthLayout: React.FC<AuthLayoutProps> = ({
@@ -87,12 +95,6 @@ const AuthLayout: React.FC<AuthLayoutProps> = ({
   const enableThemeToggle = settings?.site?.enable_theme_toggle !== false;
   const enableMultilingual = settings?.site?.enable_multilingual !== false;
 
-  const langNameMap: Record<string, string> = {
-    zh: '简体中文', en: 'English', ja: '日本語', ko: '한국어', vi: 'Tiếng Việt',
-    fr: 'Français', de: 'Deutsch', es: 'Español', pt: 'Português',
-    ru: 'Русский', ar: 'العربية',
-  };
-
   const supportedLanguages = settings?.site?.supported_languages?.length ? settings.site.supported_languages : ['zh', 'en'];
   const implementedLangs = i18n.options.resources ? Object.keys(i18n.options.resources) : ['zh', 'en'];
 
@@ -100,7 +102,7 @@ const AuthLayout: React.FC<AuthLayoutProps> = ({
     .filter(lng => implementedLangs.includes(lng))
     .map(lng => ({
       key: lng,
-      label: langNameMap[lng] || lng,
+      label: LANG_NAME_MAP[lng] || lng,
       onClick: () => {
         i18n.changeLanguage(lng);
         persistUserLanguagePreference(lng);
@@ -108,7 +110,7 @@ const AuthLayout: React.FC<AuthLayoutProps> = ({
     }));
 
   const getLanguageLabel = () => {
-    return langNameMap[i18n.language] || i18n.language.toUpperCase();
+    return LANG_NAME_MAP[i18n.language] || i18n.language.toUpperCase();
   };
 
   const renderIconBtn = (method: AuthMethodOption) => {
@@ -141,7 +143,9 @@ const AuthLayout: React.FC<AuthLayoutProps> = ({
     return '"The next-generation LLM API gateway, empowering teams with agile control and granular management of large language models."';
   };
 
-  const rawHref = titleHref !== undefined ? titleHref : settings?.site?.login_title_url;
+  const rawHref = titleHref !== undefined && titleHref !== null && String(titleHref).trim() !== ''
+    ? titleHref
+    : resolveLoginTitleHref(settings?.site);
   const href = normalizeTitleHref(rawHref);
 
   return (
@@ -175,7 +179,7 @@ const AuthLayout: React.FC<AuthLayoutProps> = ({
                   <Terminal className="w-4 h-4" />
                 </div>
               )}
-              <span>{settings?.site?.name || 'TokensByte'}</span>
+              <span>{settings?.site?.name || 'Tkeapi'}</span>
             </a>
           ) : (
             <div className="relative z-20 flex items-center gap-2.5 text-lg font-semibold tracking-tight">
@@ -186,7 +190,7 @@ const AuthLayout: React.FC<AuthLayoutProps> = ({
                   <Terminal className="w-4 h-4" />
                 </div>
               )}
-              <span>{settings?.site?.name || 'TokensByte'}</span>
+              <span>{settings?.site?.name || 'Tkeapi'}</span>
             </div>
           )}
 
@@ -198,7 +202,7 @@ const AuthLayout: React.FC<AuthLayoutProps> = ({
               </p>
               <footer className="text-sm text-zinc-400 flex items-center gap-2">
                 <span className="h-px w-4 bg-zinc-600 inline-block" />
-                <span>{settings?.site?.name || 'TokensByte'} Team</span>
+                <span>{settings?.site?.name || 'Tkeapi'} Team</span>
               </footer>
             </blockquote>
           </div>
@@ -256,7 +260,7 @@ const AuthLayout: React.FC<AuthLayoutProps> = ({
                 <Terminal className="w-4 h-4" />
               </div>
             )}
-            <span className="font-semibold tracking-tight text-base text-foreground">{settings?.site?.name || 'TokensByte'}</span>
+            <span className="font-semibold tracking-tight text-base text-foreground">{settings?.site?.name || 'Tkeapi'}</span>
           </a>
         ) : (
           <div className={`flex ${loginStyle === 'split' ? 'lg:hidden' : ''} items-center justify-center gap-2 mb-4 select-none`}>
@@ -267,7 +271,7 @@ const AuthLayout: React.FC<AuthLayoutProps> = ({
                 <Terminal className="w-4 h-4" />
               </div>
             )}
-            <span className="font-semibold tracking-tight text-base text-foreground">{settings?.site?.name || 'TokensByte'}</span>
+            <span className="font-semibold tracking-tight text-base text-foreground">{settings?.site?.name || 'Tkeapi'}</span>
           </div>
         )}
 

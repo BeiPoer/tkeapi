@@ -1,7 +1,7 @@
 # TokensByte Relay 中枢开发规范
 
 > **适用范围**: `backend/src/relay/` 目录下的所有模块。  
-> **最后更新**: 2026-08-07  
+> **最后更新**: 2026-08-12  
 > **目的**: 确保模型转发、计费、日志、异步任务、HA 逻辑一致，防止扩展时引入遗漏。
 
 ---
@@ -45,6 +45,8 @@
 | 任务轮询 | `task.rs` | `/v1/tasks/{id}` + 后台定时 |
 
 **凡改 Usage / 计费 / 特征 / 预扣费 / 日志 / 异步判定，必须同时审查兼容层与 Native 层。**
+
+改因遵循全项目规范（agent.md / `fix-root-cause-not-fallback.mdc`）。例：logs 短路先 status 再级联。
 
 ---
 
@@ -154,10 +156,12 @@ POST 冻结（`billing_detail` 含「冻结」）→ GET 成功结算 / 失败�
 - Usage：`usage_extractor::parse_usage`（OpenAI / Gemini / 火山 / SSE）
 - 转发：`forward.rs`（`ResolvedForward`、`target_type`、白名单透传）
 - 素材：`asset_convert.rs`（仅 `asset_convert==true`；失败不阻塞主请求）
-- 异步任务：`poll_task_result` + `PollTaskOpts`（查询前 5→4→3→2→1s，`POLL_FAIL_LIMIT=15`）；级联裁剪/抽帧经 `CascadeMk`→`cascade_mk_url`；增强状态仍由 GET/TaskPoller
+- 异步任务：`poll_task_result` + `PollTaskOpts`（查询前 5→1s，`POLL_FAIL_LIMIT=15`）；级联裁剪/抽帧经内部 `CascadeMk`→`cascade_mk_url`；增强状态仍由 GET/TaskPoller；后台周期见 `RelaySettings.poll_tick_secs`（缓存）
 - 级联增强：S2 成功走 `cascade_on_s2_succeeded`（usage×res_mul + 按需抽帧写 stage2）；对外/用户端经 `cascade_s1_with_s2_url` 叠尾帧；落库 stage1 保持原尾帧
+- 级联出片不变量：S2 完成前禁止展示 S1 成片（剥 content/data/video_url 等）；失败勿回退空 URL；logs 短路先 status 再级联；处理中无 `{id,status}` 空壳兜底
+- 结算：`cascade_stage2_submit` 只落库错误态，退费由 task `settle_failure` / `try_cascade_stage2_submit` 统一结案
 - 级联裁剪：`crop_480p`（缺省 true）控制 720p←480 是否 MediaKit 裁剪；其它分辨率忽略
-- 宽日志查询（>16 列）：用 `TaskRelayLogRow` + `FromRow` 一次查出，禁止拆成二次 query / 超长元组
+- 宽日志查询（>16 列）：用 `TaskRelayLogRow` + `FromRow` 一次查出，禁止拆成二次 query / 超长元组；轮询 SELECT 列与结构体字段对齐（`action_type AS category`，不查无用 `endpoint`）
 
 ---
 

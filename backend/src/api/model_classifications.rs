@@ -22,7 +22,7 @@ pub async fn list_providers(
     let providers = sqlx::query_as(
         &state
             .db
-            .format_query("SELECT * FROM model_providers ORDER BY sort_order DESC, id ASC"),
+            .format_query("SELECT p.*, COUNT(m.id) as model_count FROM model_providers p LEFT JOIN models m ON p.id = m.provider_id GROUP BY p.id, p.name, p.name_en, p.sort_order, p.is_active, p.is_system, p.remark, p.logo, p.created_at, p.updated_at ORDER BY p.sort_order DESC, p.id ASC"),
     )
     .fetch_all(&state.db.pool)
     .await?;
@@ -162,7 +162,7 @@ pub async fn list_api_providers(
     let providers = sqlx::query_as(
         &state
             .db
-            .format_query("SELECT * FROM model_api_providers ORDER BY sort_order DESC, id ASC"),
+            .format_query("SELECT p.*, COUNT(m.id) as model_count FROM model_api_providers p LEFT JOIN models m ON p.id = m.api_provider_id GROUP BY p.id, p.name, p.name_en, p.sort_order, p.is_active, p.is_system, p.remark, p.logo, p.created_at, p.updated_at ORDER BY p.sort_order DESC, p.id ASC"),
     )
     .fetch_all(&state.db.pool)
     .await?;
@@ -264,13 +264,22 @@ pub async fn delete_api_provider(
 // --- Types ---
 
 pub async fn list_types(State(state): State<Arc<AppState>>) -> AppResult<Json<Vec<ModelType>>> {
-    let types = sqlx::query_as(
-        &state
-            .db
-            .format_query("SELECT * FROM model_types ORDER BY sort_order DESC, id ASC"),
+    let plugin_enabled: i32 = sqlx::query_scalar(
+        "SELECT CAST(is_enabled AS INTEGER) FROM plugins WHERE name = 'volcengine_enhance' LIMIT 1",
     )
-    .fetch_all(&state.db.pool)
-    .await?;
+    .fetch_optional(&state.db.pool)
+    .await?
+    .unwrap_or(0);
+
+    let query_str = if plugin_enabled == 1 {
+        "SELECT t.*, COUNT(m.id) as model_count FROM model_types t LEFT JOIN models m ON t.id = m.type_id GROUP BY t.id, t.name, t.name_en, t.sort_order, t.is_active, t.is_system, t.logo, t.default_features, t.created_at, t.updated_at ORDER BY t.sort_order DESC, t.id ASC"
+    } else {
+        "SELECT t.*, COUNT(m.id) as model_count FROM model_types t LEFT JOIN models m ON t.id = m.type_id WHERE t.name != '视频增强' GROUP BY t.id, t.name, t.name_en, t.sort_order, t.is_active, t.is_system, t.logo, t.default_features, t.created_at, t.updated_at ORDER BY t.sort_order DESC, t.id ASC"
+    };
+
+    let types = sqlx::query_as(&state.db.format_query(query_str))
+        .fetch_all(&state.db.pool)
+        .await?;
     Ok(Json(types))
 }
 
@@ -402,6 +411,8 @@ pub struct StatsQuery {
     pub provider_id: Option<i64>,
     pub api_provider_id: Option<i64>,
     pub type_id: Option<i64>,
+    /// `system` | `custom`；缺省或 `all` 为全部
+    pub source: Option<String>,
 }
 
 /// 分类统计接口 — 每个维度的 count 基于"排除自身、保留其他维度"的交叉筛选
@@ -419,12 +430,15 @@ pub async fn get_classifications_stats(
            LEFT JOIN models m ON p.id = m.provider_id"#
         .to_string();
 
-    let mut p_conds = vec![];
+    let mut p_conds: Vec<&str> = vec![];
     if query.api_provider_id.is_some() {
         p_conds.push("m.api_provider_id = ?");
     }
     if query.type_id.is_some() {
         p_conds.push("m.type_id = ?");
+    }
+    if let Some(pred) = crate::db::preset_models::source_join_predicate(query.source.as_deref()) {
+        p_conds.push(pred);
     }
     if !p_conds.is_empty() {
         p_sql.push_str(" AND ");
@@ -448,12 +462,15 @@ pub async fn get_classifications_stats(
            LEFT JOIN models m ON p.id = m.api_provider_id"#
         .to_string();
 
-    let mut ap_conds = vec![];
+    let mut ap_conds: Vec<&str> = vec![];
     if query.provider_id.is_some() {
         ap_conds.push("m.provider_id = ?");
     }
     if query.type_id.is_some() {
         ap_conds.push("m.type_id = ?");
+    }
+    if let Some(pred) = crate::db::preset_models::source_join_predicate(query.source.as_deref()) {
+        ap_conds.push(pred);
     }
     if !ap_conds.is_empty() {
         ap_sql.push_str(" AND ");
@@ -477,12 +494,15 @@ pub async fn get_classifications_stats(
            LEFT JOIN models m ON t.id = m.type_id"#
         .to_string();
 
-    let mut t_conds = vec![];
+    let mut t_conds: Vec<&str> = vec![];
     if query.provider_id.is_some() {
         t_conds.push("m.provider_id = ?");
     }
     if query.api_provider_id.is_some() {
         t_conds.push("m.api_provider_id = ?");
+    }
+    if let Some(pred) = crate::db::preset_models::source_join_predicate(query.source.as_deref()) {
+        t_conds.push(pred);
     }
     if !t_conds.is_empty() {
         t_sql.push_str(" AND ");

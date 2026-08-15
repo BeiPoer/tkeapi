@@ -6,14 +6,14 @@
  */
 
 import React, { useEffect, useState, useMemo, useRef } from 'react';
-import { Table, Button, Space, Tag, Modal, Form, Input, InputNumber, message, Popconfirm, Card, Typography, Select, Row, Col, Switch, Grid, Radio, Empty, Pagination, Tooltip, Checkbox } from 'antd';
+import { Table, Button, Space, Tag, Modal, Form, Input, InputNumber, message, Popconfirm, Card, Typography, Select, Row, Col, Switch, Grid, Radio, Empty, Pagination, Tooltip, Checkbox, Segmented } from 'antd';
 import MobileCardList, { MobileCard, CardRow, CardActions } from '../../components/MobileCardList';
 import { PlusOutlined, EditOutlined, DeleteOutlined, SearchOutlined, RightOutlined, ArrowLeftOutlined, ArrowRightOutlined, CloseOutlined, FilterOutlined, FolderOutlined, UnorderedListOutlined, SettingOutlined, CheckSquareOutlined, CheckCircleOutlined, StopOutlined, FileTextOutlined, FileOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import request from '../../utils/request';
 import { QueryGuard, isRequestAborted } from '../../utils/queryGuard';
 import { modelMatchesKeyword } from '../../utils/modelKeywordMatch';
-import { buildClassificationParams } from '../../utils/classificationParams';
+import { buildClassificationParams, type ModelSourceFilter } from '../../utils/classificationParams';
 import useSettingsStore from '../../store/settings';
 import { type ModelModel } from '../../types';
 import ClassificationFilter from '../../components/Models/ClassificationFilter';
@@ -604,13 +604,15 @@ const Models: React.FC = () => {
   const [isApiProviderManagerVisible, setIsApiProviderManagerVisible] = useState(false);
   const [isTypeManagerVisible, setIsTypeManagerVisible] = useState(false);
   const [searchKeyword, setSearchKeyword] = useState('');
+  const [sourceFilter, setSourceFilter] = useState<ModelSourceFilter>('all');
   type ActiveRightPanel = 'billing' | 'forwarding' | 'provider' | 'api_provider' | 'type' | 'billing_rule' | 'forward_rules';
   const [activeRightPanel, setActiveRightPanel] = useState<ActiveRightPanel | null>('provider');
   const [billingTypeFilter, setBillingTypeFilter] = useState<string>('all');
   const [billingSearchKeyword, setBillingSearchKeyword] = useState<string>('');
   const [forwardRuleSearchKeyword, setForwardRuleSearchKeyword] = useState<string>('');
   const [forwardRuleCategoryFilter, setForwardRuleCategoryFilter] = useState<string>('all');
-  const [sortType, setSortType] = useState<string>('time_desc');
+  const [sortType, setSortType] = useState<string>('name_asc');
+  const [recentlyAddedId, setRecentlyAddedId] = useState<number | null>(null);
   const [tableBillingTypeFilter, setTableBillingTypeFilter] = useState<string>('all');
   const [tableStatusFilter, setTableStatusFilter] = useState<string>('all');
   const modelsQueryGuard = useRef(new QueryGuard());
@@ -621,7 +623,7 @@ const Models: React.FC = () => {
     const signal = modelsQueryGuard.current.begin();
     setLoading(true);
     try {
-      const params = buildClassificationParams(selectedProvider, selectedApiProvider, selectedType);
+      const params = buildClassificationParams(selectedProvider, selectedApiProvider, selectedType, sourceFilter);
       const resp = await (request.get('/models', { params, signal }) as unknown as Promise<{ data: ModelModel[] }>);
       if (!modelsQueryGuard.current.isCurrent(signal)) return;
       setModels(Array.isArray(resp?.data) ? resp.data : []);
@@ -637,7 +639,7 @@ const Models: React.FC = () => {
   const fetchClassificationsStats = async () => {
     const signal = statsQueryGuard.current.begin();
     try {
-      const params = buildClassificationParams(selectedProvider, selectedApiProvider, selectedType);
+      const params = buildClassificationParams(selectedProvider, selectedApiProvider, selectedType, sourceFilter);
       const resp = await (request.get('/classifications/stats', { params, signal }) as any);
       if (!statsQueryGuard.current.isCurrent(signal)) return;
       setProvidersStats(resp.providers || []);
@@ -671,11 +673,11 @@ const Models: React.FC = () => {
   useEffect(() => {
     fetchModels();
     fetchClassificationsStats();
-  }, [selectedProvider, selectedApiProvider, selectedType]);
+  }, [selectedProvider, selectedApiProvider, selectedType, sourceFilter]);
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [selectedProvider, selectedApiProvider, selectedType, searchKeyword]);
+  }, [selectedProvider, selectedApiProvider, selectedType, searchKeyword, sourceFilter]);
 
   useEffect(() => {
     fetchAllClassifications();
@@ -778,7 +780,9 @@ const Models: React.FC = () => {
       if (editingModel) {
         await request.put(`/models/${editingModel.id}`, values);
       } else {
-        await request.post('/models', values);
+        const created = await request.post('/models', values) as ModelModel;
+        setRecentlyAddedId(created?.id ?? null);
+        setCurrentPage(1);
       }
       message.success(t('common.success'));
       setIsModalVisible(false);
@@ -848,13 +852,24 @@ const Models: React.FC = () => {
 
   const handleBatchDelete = async () => {
     if (selectedRowKeys.length === 0) return;
+    const systemIds = new Set(models.filter(m => m.is_system === 1).map(m => m.id));
+    const toDelete = selectedRowKeys.filter(id => !systemIds.has(Number(id)));
+    const skipped = selectedRowKeys.length - toDelete.length;
+    if (toDelete.length === 0) {
+      message.warning(t('models.cannot_delete_system'));
+      return;
+    }
     setBatchLoading(true);
     try {
       await Promise.all(
-        selectedRowKeys.map(id => request.delete(`/models/${id}`))
+        toDelete.map(id => request.delete(`/models/${id}`))
       );
-      message.success(`已成功删除 ${selectedRowKeys.length} 个模型`);
-      const deletedSet = new Set(selectedRowKeys);
+      message.success(
+        skipped > 0
+          ? `已删除 ${toDelete.length} 个模型，跳过 ${skipped} 个系统预设`
+          : `已成功删除 ${toDelete.length} 个模型`
+      );
+      const deletedSet = new Set(toDelete);
       setModels(prev => prev.filter(m => !deletedSet.has(m.id)));
       setSelectedRowKeys([]);
       fetchClassificationsStats();
@@ -1011,6 +1026,7 @@ const Models: React.FC = () => {
         <div style={{ padding: 8 }}>
           <Radio.Group 
             onChange={(e) => {
+              setRecentlyAddedId(null);
               setSortType(e.target.value);
               setSelectedKeys([e.target.value]);
               confirm();
@@ -1018,15 +1034,15 @@ const Models: React.FC = () => {
             value={sortType}
             style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
           >
-            <Radio value="time_desc">按添加时间 (最新)</Radio>
-            <Radio value="time_asc">按添加时间 (最早)</Radio>
             <Radio value="name_asc">按名称 (A-Z)</Radio>
             <Radio value="name_desc">按名称 (Z-A)</Radio>
+            <Radio value="time_desc">按添加时间 (最新)</Radio>
+            <Radio value="time_asc">按添加时间 (最早)</Radio>
           </Radio.Group>
         </div>
       ),
       filterIcon: () => (
-        <FilterOutlined style={{ color: sortType !== 'time_desc' ? '#1677ff' : undefined }} />
+        <FilterOutlined style={{ color: sortType !== 'name_asc' ? '#1677ff' : undefined }} />
       ),
       render: (text: string, record: ModelModel) => {
         const providerName = record.provider_id ? getProviderName(record.provider_id) : null;
@@ -1044,6 +1060,11 @@ const Models: React.FC = () => {
               >
                 {text}
               </span>
+              {record.is_system === 1 && (
+                <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px', width: 'fit-content' }}>
+                  {t('models.source_system')}
+                </Tag>
+              )}
               <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, lineHeight: 1.2, color: 'var(--text-secondary, #8c8c8c)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 {parts.map((part, idx) => (
                   <React.Fragment key={idx}>
@@ -1260,9 +1281,15 @@ const Models: React.FC = () => {
       render: (_: unknown, record: ModelModel) => (
         <Space size={4}>
           <Button icon={<EditOutlined />} onClick={() => handleEdit(record)} />
-          <Popconfirm title={t('common.confirm_delete')} onConfirm={() => handleDelete(record.id)}>
-            <Button icon={<DeleteOutlined />} danger />
-          </Popconfirm>
+          {record.is_system === 1 ? (
+            <Tooltip title={t('models.cannot_delete_system')}>
+              <Button icon={<DeleteOutlined />} disabled />
+            </Tooltip>
+          ) : (
+            <Popconfirm title={t('common.confirm_delete')} onConfirm={() => handleDelete(record.id)}>
+              <Button icon={<DeleteOutlined />} danger />
+            </Popconfirm>
+          )}
         </Space>
       ),
     },
@@ -1326,19 +1353,23 @@ const Models: React.FC = () => {
     }
 
     list.sort((a, b) => {
-      if (sortType === 'name_asc') {
-        return (a.name || '').localeCompare(b.name || '');
-      } else if (sortType === 'name_desc') {
-        return (b.name || '').localeCompare(a.name || '');
-      } else if (sortType === 'time_asc') {
+      if (recentlyAddedId != null) {
+        if (a.id === recentlyAddedId) return -1;
+        if (b.id === recentlyAddedId) return 1;
+      }
+      if (sortType === 'name_desc') {
+        return (b.name || '').localeCompare(a.name || '', 'zh', { sensitivity: 'base', numeric: true });
+      }
+      if (sortType === 'time_asc') {
         return a.id - b.id;
-      } else if (sortType === 'time_desc') {
+      }
+      if (sortType === 'time_desc') {
         return b.id - a.id;
       }
-      return 0;
+      return (a.name || '').localeCompare(b.name || '', 'zh', { sensitivity: 'base', numeric: true });
     });
     return list;
-  }, [models, searchKeyword, sortType, tableBillingTypeFilter, tableStatusFilter, allBillingRules]);
+  }, [models, searchKeyword, sortType, tableBillingTypeFilter, tableStatusFilter, allBillingRules, recentlyAddedId]);
 
   // ===== 获取所有真实模型组 =====
   const allModelGroups = useMemo(() => {
@@ -1534,7 +1565,21 @@ const Models: React.FC = () => {
       {!isModalVisible ? (
         <>
         <div style={{ display: 'flex', flexDirection: screens.xs ? 'column' : 'row', justifyContent: 'space-between', marginBottom: 12, gap: 12 }}>
-          <Title level={4} style={{ margin: 0, fontSize: screens.xs ? 18 : 20, fontWeight: 600 }}>{t('models.title')}</Title>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+            <Title level={4} style={{ margin: 0, fontSize: screens.xs ? 18 : 20, fontWeight: 600 }}>{t('models.title')}</Title>
+            <Space size={8} wrap align="center">
+              <Text type="secondary" style={{ fontSize: 13, whiteSpace: 'nowrap' }}>{t('models.source_category')}</Text>
+              <Segmented
+                value={sourceFilter}
+                onChange={(val) => setSourceFilter(val as ModelSourceFilter)}
+                options={[
+                  { label: t('models.source_all'), value: 'all' },
+                  { label: t('models.source_system'), value: 'system' },
+                  { label: t('models.source_custom'), value: 'custom' },
+                ]}
+              />
+            </Space>
+          </div>
           <Space wrap size={6}>
             <Input
               prefix={<SearchOutlined />}
@@ -1737,7 +1782,12 @@ const Models: React.FC = () => {
                     </div>
                   </div>
                 }
-                extra={<Tag color={record.is_active ? 'success' : 'error'}>{record.is_active ? t('common.active') : t('common.disabled')}</Tag>}
+                extra={
+                  <Space size={4}>
+                    {record.is_system === 1 && <Tag color="blue">{t('models.source_system')}</Tag>}
+                    <Tag color={record.is_active ? 'success' : 'error'}>{record.is_active ? t('common.active') : t('common.disabled')}</Tag>
+                  </Space>
+                }
               >
                 <CardRow label="模型(MID)">
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
@@ -1840,9 +1890,15 @@ const Models: React.FC = () => {
                 )}
                 <CardActions>
                   <Button size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)} />
-                  <Popconfirm title={t('common.confirm_delete')} onConfirm={() => handleDelete(record.id)}>
-                    <Button size="small" icon={<DeleteOutlined />} danger />
-                  </Popconfirm>
+                  {record.is_system === 1 ? (
+                    <Tooltip title={t('models.cannot_delete_system')}>
+                      <Button size="small" icon={<DeleteOutlined />} disabled />
+                    </Tooltip>
+                  ) : (
+                    <Popconfirm title={t('common.confirm_delete')} onConfirm={() => handleDelete(record.id)}>
+                      <Button size="small" icon={<DeleteOutlined />} danger />
+                    </Popconfirm>
+                  )}
                 </CardActions>
               </MobileCard>
             );

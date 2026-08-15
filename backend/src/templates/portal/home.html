@@ -7,7 +7,7 @@
 
 {% extends "base.html" %}
 {% set current_page = "home" %}
-{% block title %}{{ seo.meta_title | default(value="TokensByte") }} - 统一 AI 模型 API 接入平台{% endblock %}
+{% block title %}{{ seo.meta_title | default(value="Tkeapi") }} - 统一 AI 模型 API 接入平台{% endblock %}
 {% block content %}
 
 <style>
@@ -705,7 +705,7 @@
           <span class="dot yellow"></span>
           <span class="dot green"></span>
         </div>
-        <div class="terminal-title">tokensbyte_playground.sh</div>
+        <div class="terminal-title">tkeapi_playground.sh</div>
         <button class="terminal-run-btn" onclick="runTerminalCode(this)">
           <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" style="margin-right:4px;"><path d="M8 5v14l11-7z"/></svg>
           <span class="run-btn-text">Run</span>
@@ -721,7 +721,7 @@
   -H <span class="t-str">"Authorization: Bearer sk-arts..."</span> \
   -d '{
     <span class="t-key">"model"</span>: <span class="t-val">"deepseek-chat"</span>,
-    <span class="t-key">"messages"</span>: [{"role": "user", "content": "介绍一下 TokensByte"}]
+    <span class="t-key">"messages"</span>: [{"role": "user", "content": "介绍一下 Tkeapi"}]
   }'</code></pre>
         <pre class="term-code" id="term-js" style="display:none;"><code><span class="t-kwd">import</span> OpenAI <span class="t-kwd">from</span> <span class="t-str">"openai"</span>;
 const openai = <span class="t-kwd">new</span> OpenAI({
@@ -730,7 +730,7 @@ const openai = <span class="t-kwd">new</span> OpenAI({
 });
 const res = <span class="t-kwd">await</span> openai.chat.completions.create({
   model: <span class="t-str">"claude-3-5-sonnet"</span>,
-  messages: [{"role": "user", "content": "介绍一下 TokensByte"}]
+  messages: [{"role": "user", "content": "介绍一下 Tkeapi"}]
 });</code></pre>
         <pre class="term-code" id="term-py" style="display:none;"><code><span class="t-kwd">from</span> openai <span class="t-kwd">import</span> OpenAI
 client = OpenAI(
@@ -739,7 +739,7 @@ client = OpenAI(
 )
 resp = client.chat.completions.create(
   model=<span class="t-str">"gpt-4o"</span>,
-  messages=[{"role": "user", "content": "介绍一下 TokensByte"}]
+  messages=[{"role": "user", "content": "介绍一下 Tkeapi"}]
 )</code></pre>
         
         <!-- Simulated Output Screen -->
@@ -1329,8 +1329,8 @@ resp = client.chat.completions.create(
     
     let isZh = (document.documentElement.lang || 'zh').startsWith('zh');
     
-    const zhText = "你好！我是 TokensByte 统一 API 服务。目前您的账号已成功接入我们平台！\n\n我们现已启用包括 DeepSeek-R1、GPT-4o、Claude 3.5 Sonnet、Gemini Pro 等在内的数百个主流 AI 模型。\n\n使用本平台您的优势在于：\n1. 一站式调用：无需多方充值，单个 API 密钥覆盖全球主流大模型。\n2. 智能主备路由：如果主渠道出现拥堵或故障，我们将毫秒级自动无感容灾，确保您的业务不中断。\n3. 极致性价比：提供更优的价格政策，提供 Base64 数据隐私脱敏保障。\n\n祝您开发愉快！";
-    const enText = "Hello! I am the TokensByte Unified API assistant. We have currently integrated hundreds of leading AI models, including DeepSeek-R1, GPT-4o, Claude 3.5 Sonnet, Gemini Pro, and more.\n\nOur core advantages:\n1. Unified Access: Access global models with a single API Key and unified balance.\n2. Smart Routing: High availability with millisecond-level disaster recovery retry.\n3. Secure & Privacy: Base64 data desensitization and end-to-end encryption.\n\nHappy coding!";
+    const zhText = "你好！我是 Tkeapi 统一 API 服务。目前您的账号已成功接入我们平台！\n\n我们现已启用包括 DeepSeek-R1、GPT-4o、Claude 3.5 Sonnet、Gemini Pro 等在内的数百个主流 AI 模型。\n\n使用本平台您的优势在于：\n1. 一站式调用：无需多方充值，单个 API 密钥覆盖全球主流大模型。\n2. 智能主备路由：如果主渠道出现拥堵或故障，我们将毫秒级自动无感容灾，确保您的业务不中断。\n3. 极致性价比：提供更优的价格政策，提供 Base64 数据隐私脱敏保障。\n\n祝您开发愉快！";
+    const enText = "Hello! I am the Tkeapi Unified API assistant. We have currently integrated hundreds of leading AI models, including DeepSeek-R1, GPT-4o, Claude 3.5 Sonnet, Gemini Pro, and more.\n\nOur core advantages:\n1. Unified Access: Access global models with a single API Key and unified balance.\n2. Smart Routing: High availability with millisecond-level disaster recovery retry.\n3. Secure & Privacy: Base64 data desensitization and end-to-end encryption.\n\nHappy coding!";
     
     const textToType = isZh ? zhText : enText;
     

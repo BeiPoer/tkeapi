@@ -5,31 +5,51 @@
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
-#![allow(dead_code)]
+use base64::Engine;
 use hmac::{Hmac, Mac};
+use md5::Md5;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::future::Future;
+use std::sync::OnceLock;
 use std::time::Duration;
-type HmacSha256 = Hmac<Sha256>;
 
-/// 内部 HMAC-SHA256 签名辅助函数（供 list_folder / generate_presigned_put_url 共用）
-fn hmac_sign(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key error");
-    mac.update(data);
-    mac.finalize().into_bytes().to_vec()
+fn tos_http() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
 }
 
-use async_trait::async_trait;
-use futures::future::BoxFuture;
-use tokio::runtime::Handle;
-use ve_tos_rust_sdk::asynchronous::bucket::BucketAPI;
-use ve_tos_rust_sdk::asynchronous::object::ObjectAPI;
-use ve_tos_rust_sdk::asynchronous::tos;
-use ve_tos_rust_sdk::asynchronous::tos::AsyncRuntime;
-use ve_tos_rust_sdk::bucket::ListBucketsInput;
-use ve_tos_rust_sdk::object::DeleteObjectInput;
-use ve_tos_rust_sdk::object::PutObjectFromBufferInput;
+type HmacSha256 = Hmac<Sha256>;
+
+/// TOS4 空 body SHA256；Authorization 签名恒用此值（对齐 SDK sign_header，非预签名）
+const EMPTY_PAYLOAD_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+fn hmac_sign(key: &[u8], data: &[u8]) -> [u8; 32] {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key error");
+    mac.update(data);
+    mac.finalize().into_bytes().into()
+}
+
+/// TOS4 派生签名（Authorization / 预签名共用）
+fn tos4_signature(
+    secret_key: &str,
+    date_short: &str,
+    region: &str,
+    string_to_sign: &str,
+) -> String {
+    let k_date = hmac_sign(secret_key.as_bytes(), date_short.as_bytes());
+    let k_region = hmac_sign(&k_date, region.as_bytes());
+    let k_service = hmac_sign(&k_region, b"tos");
+    let k_signing = hmac_sign(&k_service, b"request");
+    hex::encode(hmac_sign(&k_signing, string_to_sign.as_bytes()))
+}
+
+/// 去掉 http(s):// 与尾部 `/`，得到 host 或裸域名
+fn endpoint_host(endpoint: &str) -> &str {
+    let ep = endpoint.trim().trim_end_matches('/');
+    ep.strip_prefix("https://")
+        .or_else(|| ep.strip_prefix("http://"))
+        .unwrap_or(ep)
+}
 
 /// TOS 存储配置
 #[derive(Debug, Clone)]
@@ -94,29 +114,37 @@ impl TosConfig {
         self.official_request_target(key).2
     }
 
-    /// 直传专用：官方 endpoint 的 `(host, path, url)`，忽略自定义域名
-    /// 保证签名 host 与浏览器 PUT Host 一致，并规避 CDN 改写 Host
-    fn official_request_target(&self, key: &str) -> (String, String, String) {
-        let ep = self.endpoint.trim().trim_end_matches('/');
-        let ep_domain = if let Some(h) = ep.strip_prefix("https://") {
-            h
-        } else if let Some(h) = ep.strip_prefix("http://") {
-            h
-        } else {
-            ep
-        };
-
-        // Bucket 名含点号时用 Path-Style，避免 SSL 证书与 Virtual-Hosted 不匹配
-        let (host, path) = if self.bucket.contains('.') {
-            (ep_domain.to_string(), format!("/{}/{}", self.bucket, key))
+    /// Virtual-Hosted / Path-Style（桶名含 `.` 时走 Path-Style，避免证书不匹配）
+    /// `object_key` 为空时为桶级路径（ListBuckets 对象列表等）
+    fn request_host_path(&self, object_key: &str) -> (String, String) {
+        let ep = endpoint_host(&self.endpoint);
+        if self.bucket.contains('.') {
+            let path = if object_key.is_empty() {
+                format!("/{}", self.bucket)
+            } else {
+                format!("/{}/{}", self.bucket, object_key)
+            };
+            (ep.to_string(), path)
+        } else if object_key.is_empty() {
+            (format!("{}.{}", self.bucket, ep), "/".to_string())
         } else {
             (
-                format!("{}.{}", self.bucket, ep_domain),
-                format!("/{}", key),
+                format!("{}.{}", self.bucket, ep),
+                format!("/{}", object_key),
             )
-        };
+        }
+    }
+
+    /// 直传专用：官方 endpoint 的 `(host, path, url)`，忽略自定义域名
+    fn official_request_target(&self, key: &str) -> (String, String, String) {
+        let (host, path) = self.request_host_path(key);
         let url = format!("https://{}{}", host, path);
         (host, path, url)
+    }
+
+    /// ListObjects 等桶级路径：`/` 或 `/{bucket}`
+    fn bucket_request_target(&self) -> (String, String) {
+        self.request_host_path("")
     }
 
     /// 生成完整的 object key（含路径前缀）
@@ -130,7 +158,6 @@ impl TosConfig {
     }
 
     /// 从 file_url 反推 object key
-    /// 优先按当前 file_url 规则匹配；若开启了自定义域名，再回退官方 endpoint（兼容历史官方 URL）
     pub fn extract_object_key(&self, file_url: &str) -> Option<String> {
         let try_base = |base: &str| -> Option<String> {
             let prefix = format!("{}/", base.trim_end_matches('/'));
@@ -147,62 +174,224 @@ impl TosConfig {
     }
 }
 
-/// Tokio 运行时适配器
-#[derive(Debug, Default)]
-pub struct TokioRuntime {}
+/// 额外重试次数（总尝试 = 1 + N）；对齐旧 SDK 常用 max_retry_count(2)
+const TOS_MAX_RETRY: u32 = 2;
 
-#[async_trait]
-impl AsyncRuntime for TokioRuntime {
-    type JoinError = tokio::task::JoinError;
+#[inline]
+fn tos_retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 429) || status.is_server_error()
+}
 
-    async fn sleep(&self, duration: Duration) {
-        tokio::time::sleep(duration).await;
+/// 构造 TOS URL：`query_pairs` 须已按 key 字母序；编码与签名共用同一 `Url`，避免 `/`↔`%2F` 不一致。
+fn tos_request_url(
+    host: &str,
+    path: &str,
+    query_pairs: &[(&str, &str)],
+) -> Result<reqwest::Url, String> {
+    let path = if path.is_empty() { "/" } else { path };
+    let mut url = reqwest::Url::parse(&format!("https://{}{}", host, path))
+        .map_err(|e| format!("TOS URL 无效: {}", e))?;
+    if !query_pairs.is_empty() {
+        let mut q = url.query_pairs_mut();
+        for &(k, v) in query_pairs {
+            q.append_pair(k, v);
+        }
     }
+    Ok(url)
+}
 
-    fn spawn<'a, F>(&self, future: F) -> BoxFuture<'a, Result<F::Output, Self::JoinError>>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        Box::pin(Handle::current().spawn(future))
-    }
-
-    fn block_on<F: Future>(&self, future: F) -> F::Output {
-        Handle::current().block_on(future)
+/// TOS4 签名请求（list/put/delete/tagging 共用）。
+/// SignedHeaders：host / content-type / x-tos-*；payload 恒 empty hash。
+/// 网络错与 408/429/5xx 短退避重试，预签名不走此路径。
+async fn signed_request(
+    config: &TosConfig,
+    method: reqwest::Method,
+    host: &str,
+    path: &str,
+    query_pairs: &[(&str, &str)],
+    extra_headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<reqwest::Response, String> {
+    let url = tos_request_url(host, path, query_pairs)?;
+    let mut attempt = 0u32;
+    loop {
+        if attempt > 0 {
+            let ms = (100u64 << (attempt - 1)).min(1000);
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+        }
+        match signed_request_once(
+            config,
+            method.clone(),
+            url.clone(),
+            extra_headers,
+            body,
+            timeout,
+        )
+        .await
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() || !tos_retryable_status(status) || attempt >= TOS_MAX_RETRY
+                {
+                    return Ok(resp);
+                }
+                let _ = resp.bytes().await;
+            }
+            Err(e) if attempt >= TOS_MAX_RETRY => return Err(e),
+            Err(_) => {}
+        }
+        attempt += 1;
     }
 }
 
-/// 测试 TOS 连接
-pub async fn test_connection(config: &TosConfig) -> Result<String, String> {
-    let client = tos::builder::<TokioRuntime>()
-        .connection_timeout(5000)
-        .request_timeout(10000)
-        .max_retry_count(2)
-        .ak(&config.access_key)
-        .sk(&config.secret_key)
-        .region(&config.region)
-        .endpoint(&config.endpoint)
-        .build()
-        .map_err(|e| format!("创建 TOS 客户端失败: {:?}", e))?;
+async fn signed_request_once(
+    config: &TosConfig,
+    method: reqwest::Method,
+    url: reqwest::Url,
+    extra_headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<reqwest::Response, String> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| "TOS URL 缺少 host".to_string())?
+        .to_string();
+    let path = url.path().to_string();
+    let query = url.query().unwrap_or("").to_string();
 
-    match client.list_buckets(&ListBucketsInput::new()).await {
-        Ok(output) => {
-            let names: Vec<String> = output
-                .buckets()
-                .iter()
-                .map(|b| b.name().to_string())
-                .collect();
-            if names.contains(&config.bucket) {
-                Ok(format!("连接成功，已找到目标 Bucket: {}", config.bucket))
-            } else {
-                Ok(format!(
-                    "连接成功，但未找到 Bucket '{}'，可用: {:?}",
-                    config.bucket, names
-                ))
+    let now = chrono::Utc::now();
+    let date_str = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let date_short = now.format("%Y%m%d").to_string();
+
+    let mut sign_hdrs: Vec<(String, String)> = vec![
+        ("host".into(), host.clone()),
+        ("x-tos-date".into(), date_str.clone()),
+    ];
+    for (k, v) in extra_headers {
+        let lk = k.to_ascii_lowercase();
+        if lk == "content-type" || lk.starts_with("x-tos-") {
+            sign_hdrs.push((lk, (*v).to_string()));
+        }
+    }
+    sign_hdrs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let signed_headers = sign_hdrs
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .collect::<Vec<_>>()
+        .join(";");
+    let mut canonical_headers = String::new();
+    for (k, v) in &sign_hdrs {
+        canonical_headers.push_str(k);
+        canonical_headers.push(':');
+        canonical_headers.push_str(v.trim());
+        canonical_headers.push('\n');
+    }
+
+    let canonical_request = format!(
+        "{method}\n{path}\n{query}\n{canonical_headers}\n{signed_headers}\n{payload}",
+        method = method.as_str(),
+        payload = EMPTY_PAYLOAD_HASH,
+    );
+    let credential_scope = format!("{}/{}/tos/request", date_short, config.region);
+    let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
+    let string_to_sign = format!(
+        "TOS4-HMAC-SHA256\n{}\n{}\n{}",
+        date_str, credential_scope, canonical_hash
+    );
+    let signature = tos4_signature(
+        &config.secret_key,
+        &date_short,
+        &config.region,
+        &string_to_sign,
+    );
+
+    let auth = format!(
+        "TOS4-HMAC-SHA256 Credential={}/{},SignedHeaders={},Signature={}",
+        config.access_key, credential_scope, signed_headers, signature
+    );
+
+    let mut builder = tos_http()
+        .request(method, url)
+        .header("Host", &host)
+        .header("x-tos-date", &date_str)
+        .header("Authorization", &auth)
+        .timeout(timeout);
+    for (k, v) in extra_headers {
+        builder = builder.header(*k, *v);
+    }
+    if let Some(b) = body {
+        builder = builder.body(b.to_vec());
+    }
+
+    builder
+        .send()
+        .await
+        .map_err(|e| format!("TOS 请求失败: {}", e))
+}
+
+/// 测试 TOS 连接（ListBuckets，对齐原 SDK）
+pub async fn test_connection(config: &TosConfig) -> Result<String, String> {
+    let host = endpoint_host(&config.endpoint);
+    let resp = signed_request(
+        config,
+        reqwest::Method::GET,
+        host,
+        "/",
+        &[],
+        &[],
+        None,
+        Duration::from_secs(10),
+    )
+    .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("连接失败 ({}): {}", status, body));
+    }
+
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败: {}", e))?;
+
+    let names = parse_bucket_names(&body);
+    if names.contains(&config.bucket) {
+        Ok(format!("连接成功，已找到目标 Bucket: {}", config.bucket))
+    } else {
+        Ok(format!(
+            "连接成功，但未找到 Bucket '{}'，可用: {:?}",
+            config.bucket, names
+        ))
+    }
+}
+
+/// ListBuckets：REST 为 XML；若体以 `{` 开头再按 JSON `Buckets[].Name` 解析（旧 SDK 形态）
+fn parse_bucket_names(body: &str) -> Vec<String> {
+    let trimmed = body.trim_start();
+    if trimmed.starts_with('{') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(arr) = v.get("Buckets").and_then(|b| b.as_array()) {
+                return arr
+                    .iter()
+                    .filter_map(|b| {
+                        b.get("Name")
+                            .and_then(|n| n.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .collect();
             }
         }
-        Err(e) => Err(format!("连接失败: {:?}", e)),
     }
+    let mut names = Vec::new();
+    for block in body.split("<Bucket>").skip(1) {
+        if let Some(name) = extract_xml_value(block, "Name") {
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// 上传文件到 TOS（显式设置 x-tos-acl: default 继承桶 ACL）
@@ -213,71 +402,225 @@ pub async fn upload_file(
     content_type: &str,
     tags: Option<&str>,
 ) -> Result<String, String> {
-    let client = tos::builder::<TokioRuntime>()
-        .connection_timeout(5000)
-        .request_timeout(60000)
-        .max_retry_count(3)
-        .ak(&config.access_key)
-        .sk(&config.secret_key)
-        .region(&config.region)
-        .endpoint(&config.endpoint)
-        .build()
-        .map_err(|e| format!("创建 TOS 客户端失败: {:?}", e))?;
+    let key = object_key.trim_start_matches('/');
+    let (host, path, _) = config.official_request_target(key);
 
-    let mut input = PutObjectFromBufferInput::new_with_content(&config.bucket, object_key, data);
+    let mut extras: Vec<(String, String)> = vec![("x-tos-acl".into(), "default".into())];
     if !content_type.is_empty() {
-        input.set_content_type(content_type);
+        extras.push(("Content-Type".into(), content_type.to_string()));
     }
-    if let Some(t) = tags {
-        input.set_tagging(t);
+    // 对齐 SDK set_tagging → header x-tos-tagging
+    if let Some(t) = tags.filter(|s| !s.is_empty()) {
+        extras.push(("x-tos-tagging".into(), t.to_string()));
     }
-    // 显式设置 x-tos-acl: default 继承桶 ACL（SDK 的 ACLType 枚举不含 default，故通过自定义请求头注入）
-    let mut extra_headers = std::collections::HashMap::new();
-    extra_headers.insert("x-tos-acl".to_string(), "default".to_string());
-    input.set_request_header(extra_headers);
+    let extra_refs: Vec<(&str, &str)> = extras
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
 
-    client
-        .put_object_from_buffer(&input)
-        .await
-        .map_err(|e| format!("上传失败: {:?}", e))?;
+    let resp = signed_request(
+        config,
+        reqwest::Method::PUT,
+        &host,
+        &path,
+        &[],
+        &extra_refs,
+        Some(&data),
+        Duration::from_secs(60),
+    )
+    .await?;
 
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("上传失败 ({}): {}", status, body));
+    }
     Ok(config.file_url(object_key))
 }
 
-/// 删除 TOS 文件
+/// 删除 TOS 文件（对象不存在视为成功，便于幂等清理）
 pub async fn delete_file(config: &TosConfig, object_key: &str) -> Result<(), String> {
-    let client = tos::builder::<TokioRuntime>()
-        .connection_timeout(5000)
-        .request_timeout(10000)
-        .max_retry_count(2)
-        .ak(&config.access_key)
-        .sk(&config.secret_key)
-        .region(&config.region)
-        .endpoint(&config.endpoint)
-        .build()
-        .map_err(|e| format!("创建 TOS 客户端失败: {:?}", e))?;
-
-    let input = DeleteObjectInput::new(&config.bucket, object_key);
-    client
-        .delete_object(&input)
-        .await
-        .map_err(|e| format!("删除失败: {:?}", e))?;
-
-    Ok(())
+    delete_file_inner(config, object_key).await.map(|_| ())
 }
 
-/// 生成预签名 PUT URL（前端直传 TOS 专用）
-/// - 有效期 expires_secs 秒，足够完成单次上传，降低 URL 泄露窗口
-/// - 仅签名 host header（TOS 预签名 URL 规范），Content-Type 由前端上传时携带但不参与签名
-/// - Object Key 路径已含用户 uid/project_id，即使 URL 泄露也只能写入该用户目录
-/// - 直传 URL 始终使用官方 endpoint（与自定义域名/CDN 解耦），公开访问仍走 file_url 自定义域名
-/// 注意：canonical request 中的 X-Tos-SignedHeaders 必须与 query string 中的值严格一致，否则 403
+/// Ok(true)=已删除；Ok(false)=本来就不存在(404)
+async fn delete_file_inner(config: &TosConfig, object_key: &str) -> Result<bool, String> {
+    let key = object_key.trim_start_matches('/');
+    let (host, path, _) = config.official_request_target(key);
+
+    let resp = signed_request(
+        config,
+        reqwest::Method::DELETE,
+        &host,
+        &path,
+        &[],
+        &[],
+        None,
+        Duration::from_secs(10),
+    )
+    .await?;
+
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(true);
+    }
+    if status.as_u16() == 404 {
+        return Ok(false);
+    }
+    let body = resp.text().await.unwrap_or_default();
+    Err(format!("删除失败 ({}): {}", status, body))
+}
+
+/// `purge_prefix` 结果：`success` = list 成功且无删除失败（list=0 仍可 success）。
+#[derive(Debug)]
+struct PurgeReport {
+    prefix: String,
+    listed: Option<usize>,
+    deleted_ok: usize,
+    missing: usize,
+    fail: usize,
+    errs: Vec<String>,
+}
+
+impl PurgeReport {
+    fn success(&self) -> bool {
+        self.fail == 0 && self.listed.is_some()
+    }
+}
+
+impl std::fmt::Display for PurgeReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "prefix={}", self.prefix)?;
+        match self.listed {
+            Some(n) => write!(f, " list={n}")?,
+            None => write!(f, " list=ERR")?,
+        }
+        write!(
+            f,
+            " deleted_ok={} missing={} fail={}",
+            self.deleted_ok, self.missing, self.fail
+        )?;
+        if !self.errs.is_empty() {
+            write!(f, " errs={}", self.errs.join(" | "))?;
+        }
+        Ok(())
+    }
+}
+
+fn purge_push_key(keys: &mut std::collections::HashSet<String>, key: &str) {
+    let key = key.trim().trim_start_matches('/');
+    if !key.is_empty() {
+        keys.insert(key.to_string());
+    }
+}
+
+/// 清理相对前缀：合并 `extra_keys` + list 残留 + `.keep`，再并行删除。
+async fn purge_prefix(
+    config: &TosConfig,
+    relative_prefix: &str,
+    extra_keys: Vec<String>,
+) -> PurgeReport {
+    let prefix = relative_prefix.trim().trim_matches('/').to_string();
+    let mut report = PurgeReport {
+        prefix: config.full_key(&format!("{prefix}/")),
+        listed: None,
+        deleted_ok: 0,
+        missing: 0,
+        fail: 0,
+        errs: Vec::new(),
+    };
+    let mut keys = std::collections::HashSet::<String>::new();
+
+    for key in &extra_keys {
+        purge_push_key(&mut keys, key);
+    }
+
+    match list_folder(config, &format!("{prefix}/")).await {
+        Ok((objects, _)) => {
+            report.listed = Some(objects.len());
+            for obj in &objects {
+                purge_push_key(&mut keys, &obj.key);
+            }
+        }
+        Err(e) => {
+            report.fail += 1;
+            report.errs.push(format!("list: {e}"));
+        }
+    }
+
+    purge_push_key(&mut keys, &config.full_key(&format!("{prefix}/.keep")));
+
+    let key_list: Vec<String> = keys.into_iter().collect();
+    let results =
+        futures::future::join_all(key_list.iter().map(|k| delete_file_inner(config, k))).await;
+    for (key, res) in key_list.iter().zip(results) {
+        match res {
+            Ok(true) => report.deleted_ok += 1,
+            Ok(false) => report.missing += 1,
+            Err(e) => {
+                report.fail += 1;
+                if report.errs.len() < 5 {
+                    report.errs.push(format!("{key}: {e}"));
+                }
+            }
+        }
+    }
+    report
+}
+
+/// 从 object_key / file_url 收集待删 key（去重）
+pub fn collect_object_keys(
+    config: &TosConfig,
+    keys_and_urls: impl IntoIterator<Item = (String, String)>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (key, url) in keys_and_urls {
+        for candidate in [key, url] {
+            let k = candidate.trim().trim_start_matches('/');
+            if k.is_empty() {
+                continue;
+            }
+            let resolved = if k.contains("://") {
+                let Some(r) = config.extract_object_key(k).filter(|s| !s.is_empty()) else {
+                    continue;
+                };
+                r
+            } else {
+                k.to_string()
+            };
+            if seen.insert(resolved.clone()) {
+                out.push(resolved);
+            }
+        }
+    }
+    out
+}
+
+/// 后台清理并打真实成功/失败日志（创作中心项目/工作流共用）。
+pub fn spawn_purge(
+    config: TosConfig,
+    relative_prefix: String,
+    extra_keys: Vec<String>,
+    label: &'static str,
+    id: i64,
+) {
+    tokio::spawn(async move {
+        let report = purge_prefix(&config, &relative_prefix, extra_keys).await;
+        if report.success() {
+            tracing::info!("{} {} TOS 清理成功 {}", label, id, report);
+        } else {
+            tracing::warn!("{} {} TOS 清理异常 {}", label, id, report);
+        }
+    });
+}
+
+/// 生成预签名 PUT URL（前端直传；仅签 host，走官方 endpoint）
 pub fn generate_presigned_put_url(
     config: &TosConfig,
     object_key: &str,
     expires_secs: u64,
 ) -> String {
-    // 签名 host ≡ 浏览器 PUT 的 Host（官方域名）；避免自定义域名签名/URL 分裂及 CDN 改写 Host
     let (host, path, base_url) = config.official_request_target(object_key.trim_start_matches('/'));
 
     let now = chrono::Utc::now();
@@ -285,12 +628,9 @@ pub fn generate_presigned_put_url(
     let date_short = now.format("%Y%m%d").to_string();
 
     let credential_scope = format!("{}/{}/tos/request", date_short, config.region);
-    // Credential 值需要 URL 编码（含 / 符号）
     let credential_val = format!("{}/{}", config.access_key, credential_scope);
     let credential_encoded = urlencoding::encode(&credential_val).to_string();
 
-    // Query String 参数严格按字母序排列（TOS 规范要求）
-    // X-Tos-SignedHeaders 只包含 host，与下方 canonical request 完全一致
     let signed_headers = "host";
     let query = format!(
         "X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Credential={cred}&X-Tos-Date={date}&X-Tos-Expires={exp}&X-Tos-SignedHeaders={sh}",
@@ -300,68 +640,63 @@ pub fn generate_presigned_put_url(
         sh = signed_headers,
     );
 
-    // Canonical Request：signed headers 仅含 host，与 X-Tos-SignedHeaders 严格对应
     let canonical_request = format!(
         "PUT\n{}\n{}\nhost:{}\n\n{}\nUNSIGNED-PAYLOAD",
         path, query, host, signed_headers
     );
-
     let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
     let string_to_sign = format!(
         "TOS4-HMAC-SHA256\n{}\n{}\n{}",
         date_str, credential_scope, canonical_hash
     );
-
-    let k_date = hmac_sign(config.secret_key.as_bytes(), date_short.as_bytes());
-    let k_region = hmac_sign(&k_date, config.region.as_bytes());
-    let k_service = hmac_sign(&k_region, b"tos");
-    let k_signing = hmac_sign(&k_service, b"request");
-    let signature = hex::encode(hmac_sign(&k_signing, string_to_sign.as_bytes()));
+    let signature = tos4_signature(
+        &config.secret_key,
+        &date_short,
+        &config.region,
+        &string_to_sign,
+    );
 
     format!("{}?{}&X-Tos-Signature={}", base_url, query, signature)
 }
 
-use ve_tos_rust_sdk::common::{Tag, TagSet};
-use ve_tos_rust_sdk::object::PutObjectTaggingInput;
-
-/// 更新 TOS 文件标签
+/// 更新 TOS 文件标签（对齐 SDK：PUT ?tagging + JSON TagSet + Content-MD5）
 pub async fn update_object_tags(
     config: &TosConfig,
     object_key: &str,
     tags: HashMap<String, String>,
 ) -> Result<(), String> {
-    let client = tos::builder::<TokioRuntime>()
-        .connection_timeout(5000)
-        .request_timeout(10000)
-        .max_retry_count(2)
-        .ak(&config.access_key)
-        .sk(&config.secret_key)
-        .region(&config.region)
-        .endpoint(&config.endpoint)
-        .build()
-        .map_err(|e| format!("创建 TOS 客户端失败: {:?}", e))?;
+    let key = object_key.trim_start_matches('/');
+    let (host, path, _) = config.official_request_target(key);
 
-    let tag_list: Vec<Tag> = tags
+    let tag_list: Vec<serde_json::Value> = tags
         .into_iter()
-        .map(|(k, v)| {
-            let mut t = Tag::default();
-            t.set_key(k);
-            t.set_value(v);
-            t
-        })
+        .map(|(k, v)| serde_json::json!({"Key": k, "Value": v}))
         .collect();
+    let body = serde_json::json!({"TagSet": {"Tags": tag_list}}).to_string();
+    let body_bytes = body.into_bytes();
 
-    let mut tag_set = TagSet::default();
-    tag_set.set_tags(tag_list);
+    let content_md5 = base64::engine::general_purpose::STANDARD.encode(Md5::digest(&body_bytes));
 
-    let mut input = PutObjectTaggingInput::new(&config.bucket, object_key);
-    input.set_tag_set(tag_set);
+    let resp = signed_request(
+        config,
+        reqwest::Method::PUT,
+        &host,
+        &path,
+        &[("tagging", "")],
+        &[
+            ("Content-Type", "application/json"),
+            ("Content-MD5", &content_md5),
+        ],
+        Some(&body_bytes),
+        Duration::from_secs(10),
+    )
+    .await?;
 
-    client
-        .put_object_tagging(&input)
-        .await
-        .map_err(|e| format!("设置标签失败: {:?}", e))?;
-
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("设置标签失败 ({}): {}", status, text));
+    }
     Ok(())
 }
 
@@ -373,134 +708,114 @@ pub struct TosObject {
     pub last_modified: String,
 }
 
-/// 列出 TOS 文件夹下的所有文件（通过 S3 兼容 REST API）
-/// 返回文件列表和总大小
+/// ListObjectsV2 单页上限；超过则用 continuation-token 续页
+const TOS_LIST_PAGE_SIZE: &str = "1000";
+/// 防异常死循环（1000×100 = 10 万对象）
+const TOS_LIST_MAX_PAGES: usize = 100;
+
+/// 列出 TOS 文件夹下的所有文件（ListObjectsV2，自动续页）
 pub async fn list_folder(
     config: &TosConfig,
     folder_prefix: &str,
 ) -> Result<(Vec<TosObject>, i64), String> {
     let full_prefix = config.full_key(folder_prefix);
-    // 确保 prefix 以 / 结尾
     let prefix = if full_prefix.ends_with('/') {
         full_prefix
     } else {
         format!("{}/", full_prefix)
     };
 
-    let ep = config.endpoint.trim_end_matches('/');
-    let ep_domain = if ep.starts_with("https://") {
-        &ep[8..]
-    } else if ep.starts_with("http://") {
-        &ep[7..]
-    } else {
-        ep
-    };
-
-    let host = if config.bucket.contains('.') {
-        ep_domain.to_string()
-    } else {
-        format!("{}.{}", config.bucket, ep_domain)
-    };
-
-    let path = if config.bucket.contains('.') {
-        format!("/{}", config.bucket)
-    } else {
-        "/".to_string()
-    };
-
-    let now = chrono::Utc::now();
-    let date_str = now.format("%Y%m%dT%H%M%SZ").to_string();
-    let date_short = now.format("%Y%m%d").to_string();
-
-    // S3/TOS 签名要求 query string 必须按字母顺序排序: list-type, max-keys, prefix
-    let query_string = format!(
-        "list-type=2&max-keys=1000&prefix={}",
-        urlencoding::encode(&prefix)
-    );
-
-    // 构造 CanonicalRequest
-    let canonical_request = format!(
-        "GET\n{}\n{}\nhost:{}\nx-tos-date:{}\n\nhost;x-tos-date\n{}",
-        path,
-        query_string,
-        host,
-        date_str,
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // empty body hash
-    );
-
-    let credential_scope = format!("{}/{}/tos/request", date_short, config.region);
-    let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
-    let string_to_sign = format!(
-        "TOS4-HMAC-SHA256\n{}\n{}\n{}",
-        date_str, credential_scope, canonical_hash
-    );
-
-    // 计算签名（使用模块级 hmac_sign 函数）
-    let k_date = hmac_sign(config.secret_key.as_bytes(), date_short.as_bytes());
-    let k_region = hmac_sign(&k_date, config.region.as_bytes());
-    let k_service = hmac_sign(&k_region, b"tos");
-    let k_signing = hmac_sign(&k_service, b"request");
-    let signature = hex::encode(hmac_sign(&k_signing, string_to_sign.as_bytes()));
-
-    let auth_header = format!(
-        "TOS4-HMAC-SHA256 Credential={}/{},SignedHeaders=host;x-tos-date,Signature={}",
-        config.access_key, credential_scope, signature
-    );
-
-    let url = format!("https://{}{}?{}", host, path, query_string);
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(&url)
-        .header("Host", &host)
-        .header("x-tos-date", &date_str)
-        .header("Authorization", &auth_header)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| format!("TOS 请求失败: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("TOS ListObjects 失败 ({}): {}", status, body));
-    }
-
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取响应失败: {}", e))?;
-
-    // 解析 XML 响应
+    let (host, path) = config.bucket_request_target();
     let mut objects = Vec::new();
-    let mut total_size: i64 = 0;
+    let mut continuation: Option<String> = None;
 
-    // 简单 XML 解析（提取 <Key>, <Size>, <LastModified>）
-    for content_block in body.split("<Contents>").skip(1) {
-        if let Some(end) = content_block.find("</Contents>") {
-            let block = &content_block[..end];
-            let key = extract_xml_value(block, "Key").unwrap_or_default();
-            let size_str = extract_xml_value(block, "Size").unwrap_or_default();
-            let last_modified = extract_xml_value(block, "LastModified").unwrap_or_default();
+    for _ in 0..TOS_LIST_MAX_PAGES {
+        // 按字母序组装（continuation-token < list-type < max-keys < prefix）
+        let mut query: Vec<(&str, &str)> = Vec::with_capacity(4);
+        if let Some(token) = continuation.as_deref() {
+            query.push(("continuation-token", token));
+        }
+        query.push(("list-type", "2"));
+        query.push(("max-keys", TOS_LIST_PAGE_SIZE));
+        query.push(("prefix", prefix.as_str()));
 
-            let size: i64 = size_str.parse().unwrap_or(0);
-            // 跳过文件夹标记（0字节且以/结尾的key）
-            if size == 0 && key.ends_with('/') {
-                continue;
-            }
-            total_size += size;
-            objects.push(TosObject {
-                key,
-                size,
-                last_modified,
-            });
+        let resp = signed_request(
+            config,
+            reqwest::Method::GET,
+            &host,
+            &path,
+            &query,
+            &[],
+            None,
+            Duration::from_secs(10),
+        )
+        .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("TOS ListObjects 失败 ({}): {}", status, body));
+        }
+
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
+
+        objects.extend(parse_list_objects(&body));
+
+        let truncated = extract_xml_value(&body, "IsTruncated")
+            .map(|s| s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if !truncated {
+            break;
+        }
+        match extract_xml_value(&body, "NextContinuationToken") {
+            Some(token) if !token.is_empty() => continuation = Some(token),
+            _ => break,
         }
     }
+
+    let mut total_size: i64 = 0;
+    objects.retain(|o| {
+        // 跳过零字节目录占位（非真实对象）
+        if o.size == 0 && o.key.ends_with('/') {
+            false
+        } else {
+            total_size += o.size;
+            true
+        }
+    });
 
     Ok((objects, total_size))
 }
 
-/// 辅助：从 XML 中提取标签值
+fn parse_list_objects(body: &str) -> Vec<TosObject> {
+    let mut objects = Vec::new();
+    for content_block in body.split("<Contents").skip(1) {
+        let Some((_, body_part)) = content_block.split_once('>') else {
+            continue;
+        };
+        let Some(end) = body_part.find("</Contents>") else {
+            continue;
+        };
+        let block = &body_part[..end];
+        let Some(key) = extract_xml_value(block, "Key").filter(|k| !k.is_empty()) else {
+            continue;
+        };
+        let size = extract_xml_value(block, "Size")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let last_modified = extract_xml_value(block, "LastModified").unwrap_or_default();
+        objects.push(TosObject {
+            key,
+            size,
+            last_modified,
+        });
+    }
+    objects
+}
+
 fn extract_xml_value(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{}>", tag);
     let close = format!("</{}>", tag);

@@ -10,6 +10,7 @@ import { initReactI18next } from 'react-i18next';
 
 import en from './locales/en.json';
 import zh from './locales/zh.json';
+import zhTW from './locales/zh-TW.json';
 import ja from './locales/ja.json';
 import ko from './locales/ko.json';
 import vi from './locales/vi.json';
@@ -46,6 +47,7 @@ const pluginNs = Object.keys(pluginLocales);
 const resources: Record<string, Record<string, any>> = {
   en: { translation: en },
   zh: { translation: zh },
+  'zh-TW': { translation: zhTW },
   ja: { translation: ja },
   ko: { translation: ko },
   vi: { translation: vi },
@@ -64,7 +66,10 @@ i18n.use(initReactI18next).init({
   resources,
   ns: ['translation', ...pluginNs],
   defaultNS: 'translation',
-  fallbackLng: 'zh',
+  fallbackLng: {
+    'zh-TW': ['zh'],
+    default: ['zh'],
+  },
   lng: getUserLanguagePreference() || 'zh',
   interpolation: {
     escapeValue: false, // react already safes from xss

@@ -220,7 +220,7 @@ const PortalManager: React.FC = () => {
         <Text style={labelStyle}>Logo 点击跳转链接</Text>
         <Input value={navConfig.logo_link || ''} onChange={e => setNavConfig({ ...navConfig, logo_link: e.target.value })} placeholder="例如：/home 或 https://..." style={{ marginBottom: 12 }} />
         <Text style={labelStyle}>Logo 文字</Text>
-        <Input value={navConfig.logo_text || ''} onChange={e => setNavConfig({ ...navConfig, logo_text: e.target.value })} placeholder="TokensByte" style={{ marginBottom: 12 }} />
+        <Input value={navConfig.logo_text || ''} onChange={e => setNavConfig({ ...navConfig, logo_text: e.target.value })} placeholder="Tkeapi" style={{ marginBottom: 12 }} />
         <Divider style={{ borderColor: _isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.06)', margin: '14px 0' }} />
         <Text style={labelStyle}>登录按钮文字 / 链接</Text>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
@@ -330,7 +330,7 @@ const PortalManager: React.FC = () => {
       <div style={cardStyle}>
         <Text strong style={{ color: _isLight ? '#1f2937' : '#fff', fontSize: 14, display: 'block', marginBottom: 12 }}>品牌与简介</Text>
         <Text style={labelStyle}>底部品牌名称（支持 中文|English）</Text>
-        <Input value={footerConfig.brand_name || ''} onChange={e => setFooterConfig({ ...footerConfig, brand_name: e.target.value })} placeholder="TokensByte" style={{ marginBottom: 8 }} />
+        <Input value={footerConfig.brand_name || ''} onChange={e => setFooterConfig({ ...footerConfig, brand_name: e.target.value })} placeholder="Tkeapi" style={{ marginBottom: 8 }} />
         <Text style={labelStyle}>品牌简介（支持 中文|English）</Text>
         <Input.TextArea value={footerConfig.description || ''} onChange={e => setFooterConfig({ ...footerConfig, description: e.target.value })} rows={3} style={{ marginBottom: 8 }} />
         <Divider style={{ margin: '16px 0' }} />
@@ -364,7 +364,7 @@ const PortalManager: React.FC = () => {
         <Divider style={{ margin: '16px 0' }} />
         <Text strong style={{ color: _isLight ? '#1f2937' : '#fff', fontSize: 14, display: 'block', marginBottom: 12 }}>公司与法律信息</Text>
         <Text style={labelStyle}>版权信息</Text>
-        <Input value={footerConfig.copyright || ''} onChange={e => setFooterConfig({ ...footerConfig, copyright: e.target.value })} placeholder="© 2026 TokensByte. All rights reserved." style={{ marginBottom: 8 }} />
+        <Input value={footerConfig.copyright || ''} onChange={e => setFooterConfig({ ...footerConfig, copyright: e.target.value })} placeholder="© 2026 TkeAPI. All rights reserved." style={{ marginBottom: 8 }} />
         <Text style={labelStyle}>公司名称</Text>
         <Input value={footerConfig.company_name || ''} onChange={e => setFooterConfig({ ...footerConfig, company_name: e.target.value })} style={{ marginBottom: 8 }} />
         <Text style={labelStyle}>公司地址</Text>

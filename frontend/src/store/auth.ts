@@ -7,7 +7,10 @@
 
 import { create } from 'zustand';
 import type { User } from '../types';
+import { consumeSessionAuthHandoff } from '../utils/authTabHandoff';
 
+// 新标签打开工作流前会写入短时 handoff；须在读取 token 之前消费
+consumeSessionAuthHandoff();
 
 interface AuthState {
   user: User | null;

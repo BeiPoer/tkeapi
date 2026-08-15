@@ -55,7 +55,7 @@ async fn enrich_token_period_usage(state: &AppState, tokens: &mut [ApiToken]) {
     if tokens.is_empty() {
         return;
     }
-    let (site_tz, _) = crate::relay::get_cached_config(state).await;
+    let site_tz = crate::relay::relay_settings::get_cached_site_timezone(&state.db).await;
     let mut user_td_cache: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     for token in tokens.iter() {
@@ -74,7 +74,7 @@ async fn enrich_token_period_usage(state: &AppState, tokens: &mut [ApiToken]) {
         let tz = user_td_cache
             .get(&token.user_id)
             .map(|s| s.as_str())
-            .unwrap_or(site_tz.as_str());
+            .unwrap_or(site_tz.as_ref());
         let (now_day, now_week, now_month) = crate::models::quota_period_keys(tz);
         token.fill_current_period_usage(&now_day, &now_week, &now_month);
     }

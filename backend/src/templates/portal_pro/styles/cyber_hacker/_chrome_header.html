@@ -4,11 +4,11 @@
     <div class="header-inner">
       <a href="{{ nav.logo_link | default(value='/home-pro') | safe }}" class="brand-logo glow-text">
         {% if nav.logo_url %}
-        <img src="{{ nav.logo_url | safe }}" alt="{{ nav.logo_text | default(value='TokensByte') }}">
+        <img src="{{ nav.logo_url | safe }}" alt="{{ nav.logo_text | default(value='Tkeapi') }}">
         {% else %}
         <span class="brand-mark" aria-hidden="true"></span>
         {% endif %}
-        <span data-i18n-dynamic="{{ nav.logo_text | default(value='TokensByte') }}">{{ nav.logo_text | default(value="TokensByte") }}</span>
+        <span data-i18n-dynamic="{{ nav.logo_text | default(value='Tkeapi') }}">{{ nav.logo_text | default(value="Tkeapi") }}</span>
       </a>
 
       <nav class="cyber-site-nav">

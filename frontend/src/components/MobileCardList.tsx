@@ -41,7 +41,7 @@ function MobileCardList<T extends Record<string, any>>({
 }: MobileCardListProps<T>) {
   const [currentPage, setCurrentPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(
-    pagination && typeof pagination === 'object' && pagination.pageSize || 10
+    (pagination && typeof pagination === 'object' && pagination.pageSize) || 10
   );
 
   const getKey = (item: T, index: number): string | number => {
@@ -49,15 +49,36 @@ function MobileCardList<T extends Record<string, any>>({
     return item[rowKey] ?? index;
   };
 
-  // Client-side pagination if no external onChange
-  const isClientPagination = pagination !== false && !(pagination && pagination.onChange);
-  const displayData = isClientPagination 
-    ? dataSource.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+  const isControlled = pagination && typeof pagination === 'object' && pagination.current !== undefined;
+  const isPageSizeControlled = pagination && typeof pagination === 'object' && pagination.pageSize !== undefined;
+
+  const activeCurrent = isControlled ? pagination.current! : currentPage;
+  const activePageSize = isPageSizeControlled ? pagination.pageSize! : pageSize;
+
+  React.useEffect(() => {
+    if (!isControlled) {
+      const maxPage = Math.max(1, Math.ceil((dataSource?.length || 0) / activePageSize));
+      if (currentPage > maxPage) {
+        setCurrentPage(1);
+      }
+    }
+  }, [dataSource?.length, activePageSize, currentPage, isControlled]);
+
+  // Client-side pagination if data is not server-paginated
+  const isServerPagination = Boolean(
+    pagination && typeof pagination === 'object' && pagination.total && pagination.total !== dataSource.length
+  );
+  const displayData = pagination !== false && !isServerPagination
+    ? dataSource.slice((activeCurrent - 1) * activePageSize, activeCurrent * activePageSize)
     : dataSource;
 
   const handlePageChange = (page: number, size: number) => {
-    setCurrentPage(page);
-    setPageSize(size);
+    if (!isControlled) {
+      setCurrentPage(page);
+    }
+    if (!isPageSizeControlled) {
+      setPageSize(size);
+    }
     if (pagination && typeof pagination === 'object' && pagination.onChange) {
       pagination.onChange(page, size);
     }
@@ -84,12 +105,12 @@ function MobileCardList<T extends Record<string, any>>({
           </div>
         ))}
       </div>
-      {pagination !== false && dataSource.length > pageSize && (
+      {pagination !== false && dataSource.length > 0 && (
         <div style={{ textAlign: 'center', marginTop: 16 }}>
           <Pagination
             size="small"
-            current={currentPage}
-            pageSize={pageSize}
+            current={activeCurrent}
+            pageSize={activePageSize}
             total={pagination && pagination.total ? pagination.total : dataSource.length}
             onChange={handlePageChange}
             showSizeChanger={pagination && pagination.showSizeChanger}

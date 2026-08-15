@@ -248,9 +248,9 @@ pub async fn image_generations(
                 }
             };
 
-        // 模型表别名映射：渠道无映射时回落到 db_model.model_id_alias
+        // 模型映射：图片走分辨率档（resolve_model_body）
         let (resolved_model, mapping_source) =
-            router::resolve_model(&channel, model, db_model.as_ref());
+            router::resolve_model_body(&channel, model, db_model.as_ref(), Some(&body));
 
         let is_stream = body["stream"].as_bool().unwrap_or(false);
 
@@ -380,7 +380,7 @@ pub async fn image_generations(
                 );
 
                 let builder = if is_multipart {
-                    let auth_headers = forward::build_auth_headers(&resolved, &channel.api_key);
+                    let auth_headers = forward::build_auth_headers(&resolved, &channel.api_key, true);
                     let mut b = state.http_client.post(&url);
                     for (k, v) in &auth_headers {
                         b = b.header(k, v);

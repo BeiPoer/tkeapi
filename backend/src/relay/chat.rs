@@ -77,9 +77,9 @@ pub async fn chat_completions(
                 }
             };
 
-        // 模型表别名映射：渠道无映射时回落到 db_model.model_id_alias
+        // 模型映射：聊天无分辨率档，跳过 body 解析
         let (resolved_model, mapping_source) =
-            router::resolve_model(&channel, model, db_model.as_ref());
+            router::resolve_model(&channel, model, db_model.as_ref(), None);
 
         // 3. 解析转发规则（复用 db_model 避免重查 models 表）
         let resolved = match forward::resolve_forward_rule(
@@ -130,7 +130,7 @@ pub async fn chat_completions(
             &resolved_model,
             &channel.api_key,
         );
-        let auth_headers = forward::build_auth_headers(&resolved, &channel.api_key);
+        let auth_headers = forward::build_auth_headers(&resolved, &channel.api_key, true);
 
         tracing::info!(
             "[Chat] 尝试={} 模型={} 目标类型={} 鉴权={} 地址={} 渠道id={}",
@@ -690,8 +690,9 @@ pub async fn responses_create(
                     break;
                 }
             };
+        // 模型映射：Responses 无分辨率档，跳过 body 解析
         let (resolved_model, mapping_source) =
-            router::resolve_model(&channel, model, db_model.as_ref());
+            router::resolve_model(&channel, model, db_model.as_ref(), None);
 
         // 解析转发规则：复用聊天类别，兜底使用 /v1/responses 路径
         let resolved = match forward::resolve_forward_rule(
@@ -728,7 +729,7 @@ pub async fn responses_create(
             &resolved_model,
             &channel.api_key,
         );
-        let auth_headers = forward::build_auth_headers(&resolved, &channel.api_key);
+        let auth_headers = forward::build_auth_headers(&resolved, &channel.api_key, true);
 
         tracing::info!(
             "[Responses] 模型={} 映射模型={} URL={}",
@@ -759,7 +760,7 @@ pub async fn responses_create(
             let db_model = db_model.clone();
             let ctx = ctx.clone();
             let raw_path = raw_path.to_string();
-            let mapping_source = mapping_source.map(|s| s.to_string());
+            let mapping_source = mapping_source;
             async move {
                 let existing_pending = pending_log_id;
 

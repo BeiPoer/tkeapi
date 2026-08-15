@@ -9,82 +9,91 @@
 
 export type AdminMenuPermChild = {
   label: string;
+  labelKey: string;
   value: string;
 };
 
 export type AdminMenuPermNode = {
   label: string;
+  labelKey: string;
   value: string;
   children?: AdminMenuPermChild[];
 };
 
 export const ADMIN_MENU_PERMISSIONS: AdminMenuPermNode[] = [
-  { label: '仪表盘 (Dashboard)', value: 'dashboard' },
-  { label: '中转网关 (Relay API)', value: 'relay_api' },
-  { label: '令牌管理 (Tokens)', value: 'tokens' },
+  { label: '控制台', labelKey: 'menu.dashboard', value: 'dashboard' },
+  { label: 'API教程', labelKey: 'menu.relay_api', value: 'relay_api' },
+  { label: '令牌管理', labelKey: 'menu.tokens', value: 'tokens' },
   {
-    label: '日志管理 (Logs)',
+    label: '日志记录',
+    labelKey: 'menu.logs',
     value: 'logs',
     children: [
-      { label: '使用日志', value: 'logs.usage' },
-      { label: '任务列表', value: 'logs.tasks' },
+      { label: '日志记录', labelKey: 'menu.usage_logs', value: 'logs.usage' },
+      { label: '任务列表', labelKey: 'menu.task_logs', value: 'logs.tasks' },
     ],
   },
   {
-    label: '渠道管理 (Channels)',
+    label: '渠道管理',
+    labelKey: 'menu.channels',
     value: 'channels',
     children: [
-      { label: '模型渠道分组', value: 'channels.groups' },
-      { label: '上游渠道配置', value: 'channels.configs' },
+      { label: '模型渠道分组', labelKey: 'menu.channel_groups', value: 'channels.groups' },
+      { label: '上游渠道配置', labelKey: 'menu.channel_configs', value: 'channels.configs' },
     ],
   },
   {
-    label: '模型管理 (Models)',
+    label: '模型管理',
+    labelKey: 'menu.models',
     value: 'models',
     children: [
-      { label: '模型列表', value: 'models.list' },
-      { label: '计费规则', value: 'models.billing_rules' },
-      { label: '转发规则', value: 'models.forward_rules' },
+      { label: '模型列表', labelKey: 'menu.model_list', value: 'models.list' },
+      { label: '计费配置', labelKey: 'menu.billing_rules', value: 'models.billing_rules' },
+      { label: '转发规则', labelKey: 'menu.forward_rules', value: 'models.forward_rules' },
     ],
   },
   {
-    label: '营销管理 (Marketing)',
+    label: '营销管理',
+    labelKey: 'menu.marketing',
     value: 'marketing',
     children: [
-      { label: '兑换码', value: 'marketing.redemptions' },
-      { label: '注册赠送', value: 'marketing.registration_gifts' },
-      { label: '提示通知', value: 'marketing.announcements' },
+      { label: '兑换管理', labelKey: 'menu.redemptions', value: 'marketing.redemptions' },
+      { label: '注册好礼', labelKey: 'menu.registration_gifts', value: 'marketing.registration_gifts' },
+      { label: '提示通知', labelKey: 'menu.announcements', value: 'marketing.announcements' },
     ],
   },
   {
-    label: '用户管理 (Users)',
+    label: '用户管理',
+    labelKey: 'menu.users',
     value: 'users',
     children: [
-      { label: '用户列表', value: 'users.list' },
-      { label: '管理员列表', value: 'users.admins' },
-      { label: '用户等级', value: 'users.levels' },
-      { label: '权限分组管理', value: 'admin_groups' },
+      { label: '普通用户列表', labelKey: 'menu.user_list', value: 'users.list' },
+      { label: '管理员列表', labelKey: 'menu.admin_list', value: 'users.admins' },
+      { label: '用户等级', labelKey: 'menu.user_levels', value: 'users.levels' },
+      { label: '管理员等级', labelKey: 'menu.admin_groups', value: 'admin_groups' },
     ],
   },
   {
-    label: '财务管理 (Finance)',
+    label: '财务管理',
+    labelKey: 'menu.finance',
     value: 'finance',
     children: [
-      { label: '充值记录', value: 'finance.recharges' },
-      { label: '赠送记录', value: 'finance.gifts' },
-      { label: '订单记录', value: 'finance.orders' },
-      { label: '财务数据分析', value: 'finance.analysis' },
+      { label: '系统资金明细', labelKey: 'menu.finance_recharges', value: 'finance.recharges' },
+      { label: '赠送金明细', labelKey: 'menu.finance_gifts', value: 'finance.gifts' },
+      { label: '在线充值明细', labelKey: 'menu.finance_orders', value: 'finance.orders' },
+      { label: '财务数据分析', labelKey: 'menu.finance_analysis', value: 'finance.analysis' },
     ],
   },
   {
-    label: '系统设置 (Settings)',
+    label: '站点设置',
+    labelKey: 'menu.settings',
     value: 'settings',
     children: [
-      { label: '基础设置', value: 'settings.basic' },
-      { label: '支付设置', value: 'settings.payment' },
-      { label: '消息通知', value: 'settings.message_notification' },
-      { label: 'OAuth 设置', value: 'settings.oauth' },
-      { label: '数据库设置', value: 'settings.database' },
+      { label: '基础设置', labelKey: 'menu.basic_settings', value: 'settings.basic' },
+      { label: '支付设置', labelKey: 'menu.payment_settings', value: 'settings.payment' },
+      { label: '消息通知', labelKey: 'menu.message_notification', value: 'settings.message_notification' },
+      { label: '授权登录', labelKey: 'menu.oauth_settings', value: 'settings.oauth' },
+      { label: '存储设置', labelKey: 'menu.database_settings', value: 'settings.database' },
     ],
   },
 ];
@@ -136,11 +145,15 @@ export function normalizeAdminMenuPermissions(perms: string[]): string[] {
 }
 
 /** 权限标签展示用短名 */
-export function getAdminMenuPermissionLabel(value: string): string {
+export function getAdminMenuPermissionLabel(
+  value: string,
+  t?: (key: string, fallback?: string) => string,
+): string {
+  const tx = (key: string, fallback: string) => (t ? t(key, fallback) : fallback);
   for (const group of ADMIN_MENU_PERMISSIONS) {
-    if (group.value === value) return group.label.split(' (')[0];
+    if (group.value === value) return tx(group.labelKey, group.label);
     const child = group.children?.find((c) => c.value === value);
-    if (child) return `${group.label.split(' (')[0]} / ${child.label}`;
+    if (child) return `${tx(group.labelKey, group.label)} / ${tx(child.labelKey, child.label)}`;
   }
   return value;
 }

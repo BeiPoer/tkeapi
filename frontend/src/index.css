@@ -260,6 +260,23 @@ body[data-theme='dark'] .ant-radio-button-wrapper-checked:not(.ant-radio-button-
   border-color: #fafafa !important;
 }
 
+/* 修复 Tag.CheckableTag 选中态文字颜色（暗色下近白底 + 深色字；亮色下深底 + 浅色字） */
+body[data-theme='light'] .ant-tag-checkable-checked,
+body[data-theme='light'] .ant-tag-checkable-checked:hover,
+body[data-theme='light'] .ant-tag-checkable-checked:active,
+body[data-theme='light'] .ant-tag-checkable:active {
+  color: #ffffff !important;
+  background-color: #18181b !important;
+}
+
+body[data-theme='dark'] .ant-tag-checkable-checked,
+body[data-theme='dark'] .ant-tag-checkable-checked:hover,
+body[data-theme='dark'] .ant-tag-checkable-checked:active,
+body[data-theme='dark'] .ant-tag-checkable:active {
+  color: #18181b !important;
+  background-color: #fafafa !important;
+}
+
 /* 侧栏菜单选中：仅叶子项有背景；上级 submenu-title 无背景 */
 .custom-sider .ant-menu-light .ant-menu-item-selected {
   background-color: rgba(0, 0, 0, 0.06) !important;
@@ -706,12 +723,28 @@ body[data-theme='light'] .ant-switch.ant-switch-checked .ant-switch-handle::befo
 }
 
 /* 极致紧凑列表专用 */
-.compact-table .ant-table-cell {
+.compact-table .ant-table-cell:not(.ant-table-measure-row *) {
   padding: 4px 8px !important;
 }
 
-.compact-table .ant-table-tbody>tr>td {
+.compact-table .ant-table-tbody > tr:not(.ant-table-measure-row) > td {
   padding: 4px 8px !important;
+}
+
+/* 确保测量行高度和内边距严格为 0，防止在表头下方产生黑色空白间隙 */
+.ant-table-measure-row,
+.ant-table-measure-row td,
+.ant-table-measure-row th,
+tr.ant-table-measure-row,
+tr.ant-table-measure-row td,
+tr.ant-table-measure-row th,
+tr.ant-table-measure-row .ant-table-cell {
+  padding: 0 !important;
+  height: 0 !important;
+  font-size: 0 !important;
+  line-height: 0 !important;
+  border: none !important;
+  visibility: hidden !important;
 }
 
 /* 当左侧菜单处于折叠（图标显示）模式时，使菜单项和子菜单项背景区域为正方形并水平居中 */

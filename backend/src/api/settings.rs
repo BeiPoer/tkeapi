@@ -11,10 +11,10 @@ use crate::models::{
     AgreementSettings, AllSettings, CurrencySettings, DatabaseSettings, GoogleOAuthSettings,
     LoginSettings, MarketingSettings, PaymentAlipaySettings, PaymentAllinpaySettings,
     PaymentBonuspaySettings, PaymentChannelsUiSettings, PaymentGatewayEnableFlags,
-    PaymentHyperbcSettings, PaymentStripeSettings, PaymentWechatSettings, PublicMarketingSettings,
-    PublicNotificationSettings, PublicRegistrationSettings, PublicSettings, RegistrationSettings,
-    SMTPSettings, SiteSettings, SmsSettings, StorageSettings, UpdateSettingsRequest,
-    WechatOAuthSettings,
+    PaymentHyperbcSettings, PaymentStripeSettings, PaymentWechatSettings,
+    PublicMarketingSettings, PublicNotificationSettings, PublicRegistrationSettings,
+    PublicSettings, RegistrationSettings, RelaySettings, SMTPSettings, SiteSettings, SmsSettings,
+    StorageSettings, UpdateSettingsRequest, WechatOAuthSettings,
 };
 use crate::AppState;
 use axum::{extract::State, Json};
@@ -124,7 +124,7 @@ pub async fn get_public_settings(
 /// 管理员专属接口 — 返回完整设置（含所有密钥），需 admin_middleware 保护
 pub async fn get_settings(State(state): State<Arc<AppState>>) -> AppResult<Json<AllSettings>> {
     let mut all = load_all_settings(&state).await?;
-    // timesystem 固定 UTC；server_time 为 UTC 朴素字符串，前端按 timedisplay 渲染
+    // timesystem 固定 UTC，与站点 default_timezone（timedisplay）解耦
     all.server_timezone = Some(crate::time_system::TIMESYSTEM_TZ.to_string());
     all.server_time = Some(crate::time_system::utc_naive_string());
     Ok(Json(all))
@@ -136,7 +136,9 @@ pub async fn update_settings(
 ) -> AppResult<Json<AllSettings>> {
     let mut currency_or_site_changed = false;
     if let Some(v) = request.site {
-        merge_and_save_setting(&state, "site_settings", &v, default_site_settings()).await?;
+        let saved =
+            merge_and_save_setting(&state, "site_settings", &v, default_site_settings()).await?;
+        crate::relay::relay_settings::put_cached_site_timezone(saved.default_timezone);
         currency_or_site_changed = true;
     }
     if let Some(v) = request.currency {
@@ -194,92 +196,10 @@ pub async fn update_settings(
         )
         .await?;
     }
-    if let Some(ref v_json) = request.database {
-        let final_db_settings = merge_and_save_setting::<DatabaseSettings>(
-            &state,
-            "database_settings",
-            v_json,
-            default_database_settings(),
-        )
-        .await?;
-        let v = &final_db_settings;
-        // 1. 拼接新数据库的连接字符串
-        let ssl_mode = if v.ssl_mode { "require" } else { "disable" };
-        let mut url = format!("postgres://{}", urlencoding::encode(&v.username));
-        if !v.password.is_empty() {
-            url.push_str(&format!(":{}", urlencoding::encode(&v.password)));
-        }
-        url.push_str(&format!(
-            "@{}:{}/{}?sslmode={}",
-            v.host, v.port, v.database, ssl_mode
+    if request.database.is_some() {
+        return Err(AppError::BadRequest(
+            "数据库连接仅供查看，不能在后台修改。请设置环境变量 DATABASE_URL，或写入数据目录 .database_url 后重启。".to_string(),
         ));
-
-        // 2. 测试新数据库是否能正常连接
-        let pool = match PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(std::time::Duration::from_secs(5))
-            .connect(&url)
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                return Err(AppError::BadRequest(format!(
-                    "无法连接到新数据库，配置未保存: {}",
-                    e
-                )))
-            }
-        };
-
-        // 3. 在新数据库上执行迁移，创建表结构
-        if let Err(e) = crate::db::migrations::run_pg(&pool).await {
-            return Err(AppError::BadRequest(format!(
-                "新数据库初始化迁移失败: {}",
-                e
-            )));
-        }
-
-        // 5. 复制系统设置表记录（从当前数据库同步拷贝至新数据库）
-        if let Ok(current_settings) =
-            sqlx::query_as::<_, (String, String)>("SELECT key, value FROM settings")
-                .fetch_all(&state.db.pool)
-                .await
-        {
-            for (key, val) in current_settings {
-                let key_exists: i64 =
-                    sqlx::query_scalar("SELECT COUNT(*) FROM settings WHERE key = $1")
-                        .bind(&key)
-                        .fetch_one(&pool)
-                        .await
-                        .unwrap_or(0);
-                if key_exists == 0 || key == "database_settings" {
-                    let _ = sqlx::query("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value")
-                        .bind(&key)
-                        .bind(&val)
-                        .execute(&pool)
-                        .await;
-                }
-            }
-        }
-
-        // 也专门将新配置保存到新库的 database_settings 中
-        let val = serde_json::to_string(v).unwrap_or_default();
-        let _ = sqlx::query("INSERT INTO settings (key, value) VALUES ('database_settings', $1) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value")
-            .bind(&val)
-            .execute(&pool)
-            .await;
-
-        // 6. 写入持久化配置文件 `data/.database_url`
-        let db_url_file = format!("{}/.database_url", state.config.data_dir);
-        if let Err(e) = std::fs::write(&db_url_file, &url) {
-            return Err(AppError::Internal(format!("写入数据库配置文件失败: {}", e)));
-        }
-
-        // 7. 延时重启服务，使新连接生效
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            tracing::info!("🔄 数据库设置已变更，服务正在重启以应用新连接...");
-            std::process::exit(0);
-        });
     }
     if let Some(v) = request.payment_wechat {
         merge_and_save_setting::<PaymentWechatSettings>(
@@ -398,13 +318,18 @@ pub async fn update_settings(
         )
         .await?;
     }
+    if let Some(v) = request.relay {
+        let saved =
+            merge_and_save_setting(&state, "relay_settings", &v, default_relay_settings()).await?;
+        crate::relay::relay_settings::put_cached_relay_settings(saved);
+    }
 
     if currency_or_site_changed {
         crate::api::plugins::notify_marketplace_data_changed(&state).await;
     }
 
     let mut all = load_all_settings(&state).await?;
-    // timesystem 固定 UTC；server_time 为 UTC 朴素字符串，前端按 timedisplay 渲染
+    // timesystem 固定 UTC，与站点 default_timezone（timedisplay）解耦
     all.server_timezone = Some(crate::time_system::TIMESYSTEM_TZ.to_string());
     all.server_time = Some(crate::time_system::utc_naive_string());
     Ok(Json(all))
@@ -546,232 +471,317 @@ pub async fn test_low_balance_notification(
 }
 
 pub async fn verify_database(
-    State(_state): State<Arc<AppState>>,
-    Json(settings): Json<DatabaseSettings>,
+    State(state): State<Arc<AppState>>,
 ) -> AppResult<Json<serde_json::Value>> {
-    if settings.db_type == "postgres" {
-        let ssl_mode = if settings.ssl_mode {
-            "require"
-        } else {
-            "disable"
-        };
-        let mut url = format!("postgres://{}", urlencoding::encode(&settings.username));
-        if !settings.password.is_empty() {
-            url.push_str(&format!(":{}", urlencoding::encode(&settings.password)));
-        }
-        url.push_str(&format!(
-            "@{}:{}/{}?sslmode={}",
-            settings.host, settings.port, settings.database, ssl_mode
-        ));
-
-        match PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(std::time::Duration::from_secs(5))
-            .connect(&url)
-            .await
-        {
-            Ok(_) => Ok(Json(
-                serde_json::json!({"success": true, "message": "连接成功"}),
-            )),
-            Err(e) => Ok(Json(
-                serde_json::json!({"success": false, "message": format!("连接失败: {}", e)}),
-            )),
-        }
-    } else {
-        Ok(Json(
-            serde_json::json!({"success": false, "message": "仅支持 PostgreSQL"}),
-        ))
+    let url = match parse_postgres_url(&state.config.database_url) {
+        Some(settings) => build_postgres_url(&settings),
+        None => state.config.database_url.clone(),
+    };
+    match PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect(&url)
+        .await
+    {
+        Ok(_) => Ok(Json(
+            serde_json::json!({"success": true, "message": "连接成功"}),
+        )),
+        Err(e) => Ok(Json(
+            serde_json::json!({"success": false, "message": format!("连接失败: {}", e)}),
+        )),
     }
 }
 
-pub async fn initialize_database(
-    State(_state): State<Arc<AppState>>,
-    Json(settings): Json<DatabaseSettings>,
-) -> AppResult<Json<serde_json::Value>> {
-    if settings.db_type == "postgres" {
-        let ssl_mode = if settings.ssl_mode {
-            "require"
-        } else {
-            "disable"
-        };
-        let mut url = format!("postgres://{}", urlencoding::encode(&settings.username));
-        if !settings.password.is_empty() {
-            url.push_str(&format!(":{}", urlencoding::encode(&settings.password)));
-        }
-        url.push_str(&format!(
-            "@{}:{}/{}?sslmode={}",
-            settings.host, settings.port, settings.database, ssl_mode
-        ));
-
-        match PgPoolOptions::new().max_connections(1).connect(&url).await {
-            Ok(pool) => {
-                if let Err(e) = crate::db::migrations::run_pg(&pool).await {
-                    return Ok(Json(
-                        serde_json::json!({"success": false, "message": format!("数据库初始化失败: {}", e)}),
-                    ));
-                }
-                Ok(Json(
-                    serde_json::json!({"success": true, "message": "数据库初始化成功"}),
-                ))
-            }
-            Err(e) => Ok(Json(
-                serde_json::json!({"success": false, "message": format!("无法连接到数据库: {}", e)}),
-            )),
-        }
+fn format_uptime_zh(secs: i64) -> String {
+    let secs = secs.max(0);
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let minutes = (secs % 3_600) / 60;
+    if days > 0 {
+        format!("{days} 天 {hours} 小时 {minutes} 分钟")
+    } else if hours > 0 {
+        format!("{hours} 小时 {minutes} 分钟")
     } else {
-        Ok(Json(
-            serde_json::json!({"success": false, "message": "仅支持对 PostgreSQL 进行初始化"}),
-        ))
+        format!("{minutes} 分钟")
     }
+}
+
+fn cache_hit_pct(hit: i64, read: i64) -> Option<f64> {
+    let total = hit.saturating_add(read);
+    if total <= 0 {
+        None
+    } else {
+        Some((hit as f64 / total as f64) * 100.0)
+    }
+}
+
+/// 当前库状态：目录 + pg_stat_database 共享内存快照（按需一次查询，不扫业务表）
+#[derive(sqlx::FromRow)]
+struct DatabaseInfoRow {
+    database_name: String,
+    server_version: String,
+    started_at_utc: String,
+    uptime_secs: i64,
+    size_bytes: i64,
+    size_pretty: String,
+    table_count: i64,
+    encoding: String,
+    backends: i32,
+    max_connections: i32,
+    xact_commit: i64,
+    xact_rollback: i64,
+    blks_hit: i64,
+    blks_read: i64,
+    deadlocks: i64,
+    temp_bytes: i64,
+    stats_reset_utc: Option<String>,
+}
+
+pub async fn database_info(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<Json<serde_json::Value>> {
+    let row: DatabaseInfoRow = sqlx::query_as(
+        "SELECT \
+            current_database() AS database_name, \
+            current_setting('server_version') AS server_version, \
+            to_char(pg_postmaster_start_time() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS started_at_utc, \
+            EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))::bigint AS uptime_secs, \
+            s.size_bytes, \
+            pg_size_pretty(s.size_bytes) AS size_pretty, \
+            (SELECT count(*)::bigint \
+               FROM pg_catalog.pg_class c \
+               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+              WHERE n.nspname = 'public' AND c.relkind = 'r') AS table_count, \
+            pg_encoding_to_char(d.encoding) AS encoding, \
+            st.numbackends AS backends, \
+            current_setting('max_connections')::int AS max_connections, \
+            st.xact_commit::bigint AS xact_commit, \
+            st.xact_rollback::bigint AS xact_rollback, \
+            st.blks_hit::bigint AS blks_hit, \
+            st.blks_read::bigint AS blks_read, \
+            st.deadlocks::bigint AS deadlocks, \
+            st.temp_bytes::bigint AS temp_bytes, \
+            to_char(st.stats_reset AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS stats_reset_utc \
+         FROM pg_catalog.pg_database d \
+         CROSS JOIN LATERAL (SELECT pg_database_size(current_database()) AS size_bytes) s \
+         JOIN pg_catalog.pg_stat_database st ON st.datname = d.datname \
+         WHERE d.datname = current_database()",
+    )
+    .fetch_one(&state.db.pool)
+    .await
+    .map_err(|e| AppError::Internal(format!("读取数据库状态失败: {e}")))?;
+
+    let cache_hit = cache_hit_pct(row.blks_hit, row.blks_read);
+    let process_uptime_secs = crate::services::runtime_info::process_uptime_secs();
+
+    Ok(Json(serde_json::json!({
+        "database_name": row.database_name,
+        "server_version": row.server_version,
+        "started_at_utc": row.started_at_utc,
+        "uptime_secs": row.uptime_secs,
+        "uptime": format_uptime_zh(row.uptime_secs),
+        "size_bytes": row.size_bytes,
+        "size_pretty": row.size_pretty,
+        "table_count": row.table_count,
+        "encoding": row.encoding,
+        "backends": row.backends,
+        "max_connections": row.max_connections,
+        "xact_commit": row.xact_commit,
+        "xact_rollback": row.xact_rollback,
+        "cache_hit_pct": cache_hit.map(|v| (v * 10.0).round() / 10.0),
+        "deadlocks": row.deadlocks,
+        "temp_bytes": row.temp_bytes,
+        "temp_pretty": bytes_pretty(row.temp_bytes),
+        "stats_reset_utc": row.stats_reset_utc,
+        "process_started_at_utc": crate::services::runtime_info::process_started_at_utc(),
+        "process_uptime_secs": process_uptime_secs,
+        "process_uptime": format_uptime_zh(process_uptime_secs),
+        "pool_size": state.db.pool.size(),
+        "pool_idle": state.db.pool.num_idle(),
+    })))
+}
+
+fn bytes_pretty(bytes: i64) -> String {
+    const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
+    let mut n = bytes.max(0) as f64;
+    let mut i = 0;
+    while n >= 1024.0 && i < UNITS.len() - 1 {
+        n /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{} {}", bytes.max(0), UNITS[0])
+    } else {
+        format!("{n:.1} {}", UNITS[i])
+    }
+}
+
+const DB_RESET_CONFIRM: &str = "确认清空当前数据";
+
+fn is_db_reset_confirm(phrase: &str) -> bool {
+    phrase.trim() == DB_RESET_CONFIRM
+}
+
+pub async fn initialize_database(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> AppResult<Json<serde_json::Value>> {
+    let phrase = body
+        .get("confirm")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !is_db_reset_confirm(phrase) {
+        return Err(AppError::BadRequest(
+            "请输入确认文案：确认清空当前数据".to_string(),
+        ));
+    }
+
+    let rebuild_err = {
+        let mut conn = state.db.pool.acquire().await.map_err(|e| {
+            AppError::Internal(format!("无法获取数据库连接: {e}"))
+        })?;
+        let _ = sqlx::query(
+            r#"SELECT pg_terminate_backend(pid)
+               FROM pg_stat_activity
+               WHERE datname = current_database()
+                 AND pid <> pg_backend_pid()
+                 AND backend_type = 'client backend'"#,
+        )
+        .execute(&mut *conn)
+        .await;
+        sqlx::query("DROP SCHEMA IF EXISTS public CASCADE")
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| AppError::Internal(format!("清空数据库失败: {e}")))?;
+
+        let mut rebuild_err = sqlx::query("CREATE SCHEMA public")
+            .execute(&mut *conn)
+            .await
+            .err()
+            .map(|e| format!("重建 public schema 失败: {e}"));
+        if rebuild_err.is_none() {
+            if let Err(e) = sqlx::query("GRANT ALL ON SCHEMA public TO CURRENT_USER")
+                .execute(&mut *conn)
+                .await
+            {
+                rebuild_err = Some(format!("授权 schema 失败: {e}"));
+            } else {
+                let _ = sqlx::query("GRANT ALL ON SCHEMA public TO public")
+                    .execute(&mut *conn)
+                    .await;
+            }
+        }
+        rebuild_err
+    };
+
+    let migrate_err = if rebuild_err.is_none() {
+        crate::db::migrations::run_pg(&state.db.pool)
+            .await
+            .err()
+            .map(|e| e.to_string())
+    } else {
+        rebuild_err
+    };
+
+    if migrate_err.is_none() {
+        let _ = crate::sync_registration_settings(&state.db, state.config.register_enabled).await;
+    }
+    state.reset_runtime_after_db_wipe().await;
+
+    if let Some(e) = migrate_err {
+        return Err(AppError::Internal(format!(
+            "重新初始化表结构失败: {e}"
+        )));
+    }
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "当前数据库已清空并重建表结构。请重新设置超级管理员，流程与全新安装相同。"
+    })))
 }
 
 pub async fn backup_database(
     State(state): State<Arc<AppState>>,
 ) -> AppResult<Json<serde_json::Value>> {
-    // 尝试寻找备份脚本的位置，适应不同的后台启动路径（backend 目录或项目根目录）
-    let script_path = if std::path::Path::new("../backup_pgsql.sh").exists() {
-        Some("../backup_pgsql.sh")
-    } else if std::path::Path::new("backup_pgsql.sh").exists() {
-        Some("backup_pgsql.sh")
-    } else {
-        None
+    let parsed = match parse_postgres_url(&state.config.database_url) {
+        Some(s) => s,
+        None => {
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "message": "当前数据库连接地址无法解析，无法备份"
+            })));
+        }
     };
 
-    // 如果存在用户的自定义备份脚本，优先执行脚本
-    if let Some(path) = script_path {
-        let output = std::process::Command::new("bash").arg(path).output();
-
-        return match output {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                // 提取脚本输出的最后几行作为关键信息返回，避免过长
-                let msg = stdout
-                    .lines()
-                    .rev()
-                    .take(3)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                Ok(Json(
-                    serde_json::json!({"success": true, "message": format!("备份成功:\n{}", msg)}),
-                ))
-            }
-            Ok(out) => {
-                let err_str = String::from_utf8_lossy(&out.stderr);
-                Ok(Json(
-                    serde_json::json!({"success": false, "message": format!("备份脚本执行失败:\n{}", err_str)}),
-                ))
-            }
-            Err(e) => Ok(Json(
-                serde_json::json!({"success": false, "message": format!("执行备份脚本异常: {}", e)}),
-            )),
-        };
+    if parsed.host.starts_with('-')
+        || parsed.database.starts_with('-')
+        || parsed.username.starts_with('-')
+    {
+        return Ok(Json(serde_json::json!({
+            "success": false,
+            "message": "不合法的连接参数，拒绝执行备份"
+        })));
     }
 
-    let db_url = &state.config.database_url;
-    let now = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-    let file_name = format!("tb{}", now);
-
-    // Ensure data directory exists
-    if let Err(e) = std::fs::create_dir_all("data") {
-        return Ok(Json(
-            serde_json::json!({"success": false, "message": format!("无法创建备份目录: {}", e)}),
-        ));
+    let backup_dir = format!("{}/backups", state.config.data_dir);
+    if let Err(e) = tokio::fs::create_dir_all(&backup_dir).await {
+        return Ok(Json(serde_json::json!({
+            "success": false,
+            "message": format!("无法创建备份目录: {}", e)
+        })));
     }
 
-    if db_url.starts_with("postgres:") || db_url.starts_with("postgresql:") {
-        let output_path = format!("data/{}.sql", file_name);
+    let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let output_path = format!("{backup_dir}/postgres_{stamp}.sql");
+    let host = parsed.host.clone();
+    let port = parsed.port.to_string();
+    let username = parsed.username.clone();
+    let database = parsed.database.clone();
+    let password = parsed.password.clone();
+    let sslmode = if parsed.ssl_mode { "require" } else { "disable" };
+    let dump_path = output_path.clone();
 
-        // 严谨校验与解析，防止命令行注入或参数劫持
-        let parsed_url = match reqwest::Url::parse(db_url) {
-            Ok(url) => url,
-            Err(e) => {
-                return Ok(Json(
-                    serde_json::json!({"success": false, "message": format!("数据库连接地址格式错误: {}", e)}),
-                ))
-            }
-        };
-
-        let host = match parsed_url.host_str() {
-            Some(h) => h,
-            None => {
-                return Ok(Json(
-                    serde_json::json!({"success": false, "message": "数据库连接地址中缺少主机名"}),
-                ))
-            }
-        };
-
-        let port = parsed_url.port().unwrap_or(5432);
-        let username = parsed_url.username();
-        let database_name = parsed_url.path().trim_start_matches('/');
-        if database_name.is_empty() {
-            return Ok(Json(
-                serde_json::json!({"success": false, "message": "数据库连接地址中缺少数据库名称"}),
-            ));
-        }
-
-        // 对用户名和数据库名进行 URL 解码，防止特殊字符或空格 URL 编码导致鉴权/定位失败
-        let decoded_username = urlencoding::decode(username)
-            .map(|cow| cow.into_owned())
-            .unwrap_or_else(|_| username.to_string());
-
-        let decoded_database_name = urlencoding::decode(database_name)
-            .map(|cow| cow.into_owned())
-            .unwrap_or_else(|_| database_name.to_string());
-
-        // 防御以 - 开头的参数注入
-        if host.starts_with('-')
-            || decoded_database_name.starts_with('-')
-            || decoded_username.starts_with('-')
-        {
-            return Ok(Json(
-                serde_json::json!({"success": false, "message": "不合法的连接参数，拒绝执行备份"}),
-            ));
-        }
-
+    let result = tokio::task::spawn_blocking(move || {
         let mut cmd = std::process::Command::new("pg_dump");
         cmd.arg("-h")
-            .arg(host)
+            .arg(&host)
             .arg("-p")
-            .arg(port.to_string())
+            .arg(&port)
             .arg("-U")
-            .arg(&decoded_username)
+            .arg(&username)
             .arg("-d")
-            .arg(&decoded_database_name)
+            .arg(&database)
             .arg("-f")
-            .arg(&output_path);
-
-        if let Some(password) = parsed_url.password() {
-            // 对密码进行 URL 解码，防止密码中的特殊字符编码导致鉴权失败
-            let decoded_password = urlencoding::decode(password)
-                .map(|cow| cow.into_owned())
-                .unwrap_or_else(|_| password.to_string());
-            cmd.env("PGPASSWORD", decoded_password);
+            .arg(&dump_path)
+            .env("PGSSLMODE", sslmode)
+            .env("PGCONNECT_TIMEOUT", "15");
+        if !password.is_empty() {
+            cmd.env("PGPASSWORD", password);
         }
+        cmd.output()
+    })
+    .await;
 
-        // Execute pg_dump
-        let output = cmd.output();
-
-        match output {
-            Ok(out) if out.status.success() => Ok(Json(
-                serde_json::json!({"success": true, "message": format!("数据库备份成功，保存在 {}", output_path)}),
-            )),
-            Ok(out) => {
-                let err_str = String::from_utf8_lossy(&out.stderr);
-                Ok(Json(
-                    serde_json::json!({"success": false, "message": format!("pg_dump 执行失败: {}", err_str)}),
-                ))
-            }
-            Err(e) => Ok(Json(
-                serde_json::json!({"success": false, "message": format!("执行备份程序异常 (系统可能未安装 postgresql-client 命令行工具): {}", e)}),
-            )),
+    match result {
+        Ok(Ok(out)) if out.status.success() => Ok(Json(serde_json::json!({
+            "success": true,
+            "message": format!("数据库备份成功，保存在 {}", output_path)
+        }))),
+        Ok(Ok(out)) => {
+            let err_str = String::from_utf8_lossy(&out.stderr);
+            Ok(Json(serde_json::json!({
+                "success": false,
+                "message": format!("pg_dump 执行失败: {}", err_str)
+            })))
         }
-    } else {
-        Ok(Json(
-            serde_json::json!({"success": false, "message": "不支持的数据库类型，暂无法备份"}),
-        ))
+        Ok(Err(e)) => Ok(Json(serde_json::json!({
+            "success": false,
+            "message": format!("无法启动 pg_dump（需安装 postgresql-client）: {}", e)
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "success": false,
+            "message": format!("备份任务异常: {}", e)
+        }))),
     }
 }
 
@@ -799,6 +809,110 @@ pub async fn test_storage_connection(
 }
 
 // ======================== 内部工具函数 ========================
+
+fn postgres_host_for_url(host: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+fn build_postgres_url(settings: &DatabaseSettings) -> String {
+    let ssl_mode = if settings.ssl_mode {
+        "require"
+    } else {
+        "disable"
+    };
+    let port = if settings.port == 0 {
+        5432
+    } else {
+        settings.port
+    };
+    let mut url = format!("postgres://{}", urlencoding::encode(&settings.username));
+    if !settings.password.is_empty() {
+        url.push(':');
+        url.push_str(&urlencoding::encode(&settings.password));
+    }
+    url.push('@');
+    url.push_str(&postgres_host_for_url(&settings.host));
+    url.push(':');
+    url.push_str(&port.to_string());
+    url.push('/');
+    url.push_str(&urlencoding::encode(&settings.database));
+    url.push_str("?sslmode=");
+    url.push_str(ssl_mode);
+    url
+}
+
+fn parse_postgres_url(url: &str) -> Option<DatabaseSettings> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(trimmed).ok()?;
+    match parsed.scheme() {
+        "postgres" | "postgresql" => {}
+        _ => return None,
+    }
+    let host = parsed.host_str()?.to_string();
+    let port = parsed.port().unwrap_or(5432);
+    let raw_db = parsed.path().trim_start_matches('/');
+    if raw_db.is_empty() {
+        return None;
+    }
+    let database = urlencoding::decode(raw_db).ok()?.into_owned();
+    let username = urlencoding::decode(parsed.username()).ok()?.into_owned();
+    let password = match parsed.password() {
+        Some(p) => urlencoding::decode(p).ok()?.into_owned(),
+        None => String::new(),
+    };
+    let ssl_mode = parsed.query_pairs().any(|(k, v)| {
+        k == "sslmode" && matches!(v.as_ref(), "require" | "verify-ca" | "verify-full")
+    });
+    Some(DatabaseSettings {
+        db_type: "postgres".to_string(),
+        host,
+        port,
+        database,
+        username,
+        password,
+        ssl_mode,
+    })
+}
+
+#[cfg(test)]
+fn postgres_settings_eq(a: &DatabaseSettings, b: &DatabaseSettings) -> bool {
+    let port_a = if a.port == 0 { 5432 } else { a.port };
+    let port_b = if b.port == 0 { 5432 } else { b.port };
+    a.host.eq_ignore_ascii_case(&b.host)
+        && port_a == port_b
+        && a.database == b.database
+        && a.username == b.username
+        && a.password == b.password
+        && a.ssl_mode == b.ssl_mode
+}
+
+#[cfg(test)]
+fn normalize_database_settings(settings: DatabaseSettings) -> Result<DatabaseSettings, String> {
+    let mut s = settings;
+    if s.db_type.trim().is_empty() {
+        s.db_type = "postgres".to_string();
+    }
+    if s.db_type != "postgres" {
+        return Err("仅支持 PostgreSQL".to_string());
+    }
+    s.host = s.host.trim().to_string();
+    s.database = s.database.trim().to_string();
+    s.username = s.username.trim().to_string();
+    if s.host.is_empty() || s.database.is_empty() || s.username.is_empty() {
+        return Err("数据库地址、名称和用户名不能为空".to_string());
+    }
+    if s.port == 0 {
+        s.port = 5432;
+    }
+    Ok(s)
+}
 
 /// 加载全部设置（统一入口）
 pub async fn load_all_settings(state: &Arc<AppState>) -> AppResult<AllSettings> {
@@ -836,7 +950,12 @@ pub async fn load_all_settings(state: &Arc<AppState>) -> AppResult<AllSettings> 
         smtp: get_setting(state, "smtp_settings", default_smtp_settings()).await?,
         sms: get_setting(state, "sms_settings", None).await?,
         marketing: get_setting(state, "marketing_settings", default_marketing_settings()).await?,
-        database: get_setting(state, "database_settings", default_database_settings()).await?,
+        database: {
+            let stored =
+                get_setting(state, "database_settings", default_database_settings()).await?;
+            // 页面必须展示正在使用的连接（DATABASE_URL / data/.database_url），而不是从未保存过的默认值
+            parse_postgres_url(&state.config.database_url).unwrap_or(stored)
+        },
         payment_wechat,
         payment_alipay,
         payment_stripe,
@@ -860,6 +979,7 @@ pub async fn load_all_settings(state: &Arc<AppState>) -> AppResult<AllSettings> 
             .await?,
         ),
         notification: get_setting(state, "notification_settings", Default::default()).await?,
+        relay: get_setting(state, "relay_settings", default_relay_settings()).await?,
         server_timezone: None,
         server_time: None,
     })
@@ -960,14 +1080,32 @@ async fn merge_and_save_setting<T: serde::de::DeserializeOwned + serde::Serializ
 
 // ======================== 默认值函数 ========================
 
+/// 首次安装初始化管理员时，只写入站点默认业务时区（timedisplay）。
+/// 不改 timesystem：进程 TZ、数据库 TIME ZONE、`server_timezone` 仍固定 UTC。
+pub async fn apply_initial_site_timezone(
+    state: &Arc<AppState>,
+    timezone: Option<&str>,
+) -> AppResult<()> {
+    let Some(name) = timezone.and_then(crate::time_system::try_iana_timezone_name) else {
+        return Ok(());
+    };
+    let patch = serde_json::json!({ "default_timezone": name });
+    let saved =
+        merge_and_save_setting(state, "site_settings", &patch, default_site_settings()).await?;
+    crate::relay::relay_settings::put_cached_site_timezone(saved.default_timezone);
+    tracing::info!("Initial site default timezone set to {name}");
+    Ok(())
+}
+
 pub fn default_site_settings() -> SiteSettings {
     SiteSettings {
-        name: "TokensByte".to_string(),
-        title: "TokensByte - LLM API Gateway".to_string(),
+        name: "Tkeapi".to_string(),
+        title: "Tkeapi - LLM API Gateway".to_string(),
         keywords: "LLM, API, Gateway, Rust".to_string(),
         description: "Next-gen LLM API Distribution & Management Platform".to_string(),
         favicon: String::new(),
         logo: String::new(),
+        logo_title_url: String::new(),
         login_title: String::new(),
         login_title_url: String::new(),
         login_subtitle: String::new(),
@@ -975,17 +1113,21 @@ pub fn default_site_settings() -> SiteSettings {
         supported_languages: vec!["zh".to_string(), "en".to_string()],
         default_language: "zh".to_string(),
         default_timezone: iana_time_zone::get_timezone()
-            .unwrap_or_else(|_| "Asia/Shanghai".to_string()),
+            .unwrap_or_else(|_| crate::time_system::DEFAULT_TIMEDISPLAY.to_string()),
         show_timezone: true,
         enable_theme_toggle: true,
         default_theme: "dark".to_string(),
-        copyright: "© 2026 Tokensbyte. All rights reserved.".to_string(),
+        copyright: "© 2026 TkeAPI. All rights reserved.".to_string(),
         admin_path: "admin1688".to_string(),
         login_style: "split".to_string(),
         login_quote: String::new(),
         ip_blacklist_enabled: false,
         ip_blacklist: Vec::new(),
     }
+}
+
+pub fn default_relay_settings() -> RelaySettings {
+    RelaySettings::default()
 }
 
 pub fn default_currency_settings() -> CurrencySettings {
@@ -1055,7 +1197,7 @@ pub fn default_smtp_settings() -> SMTPSettings {
         username: "".to_string(),
         password: "".to_string(),
         from_address: "noreply@example.com".to_string(),
-        from_name: "TokensByte".to_string(),
+        from_name: "Tkeapi".to_string(),
     }
 }
 
@@ -1308,7 +1450,7 @@ pub fn default_menu_config_settings() -> crate::models::MenuConfigSettings {
             },
             crate::models::MenuItemConfig {
                 key: "/wallet".to_string(),
-                label_zh: "资产中心".to_string(),
+                label_zh: "我的钱包".to_string(),
                 label_en: "Wallet".to_string(),
                 icon: "WalletOutlined".to_string(),
                 enabled: true,
@@ -1558,7 +1700,7 @@ pub async fn repair_failed_logs(
         }
     }
 
-    let (site_tz, _) = crate::relay::get_cached_config(&state).await;
+    let site_tz = crate::relay::relay_settings::get_cached_site_timezone(&state.db).await;
 
     // 【第四步】按 token_id 排序后合并退回令牌额度（总额 + 当期日/周/月；按令牌所属用户 timedisplay）
     let mut sorted_token_ids: Vec<i64> = final_token_refunds.keys().cloned().collect();
@@ -1643,4 +1785,129 @@ pub async fn repair_failed_logs(
         "refunded_gift_balance": total_refund_gift,
         "details": details,
     })))
+}
+
+#[cfg(test)]
+mod postgres_url_tests {
+    use super::*;
+
+    fn sample() -> DatabaseSettings {
+        DatabaseSettings {
+            db_type: "postgres".to_string(),
+            host: "postgres".to_string(),
+            port: 5432,
+            database: "tokensapi".to_string(),
+            username: "tokensapi".to_string(),
+            password: "tokensapi".to_string(),
+            ssl_mode: false,
+        }
+    }
+
+    #[test]
+    fn parse_docker_compose_url() {
+        let parsed = parse_postgres_url(
+            "postgres://tokensapi:tokensapi@postgres:5432/tokensapi",
+        )
+        .expect("parse");
+        assert!(postgres_settings_eq(&parsed, &sample()));
+        assert!(!parsed.ssl_mode);
+    }
+
+    #[test]
+    fn missing_sslmode_equals_disable() {
+        let a = parse_postgres_url("postgres://tokensapi:tokensapi@postgres:5432/tokensapi")
+            .unwrap();
+        let b = parse_postgres_url(
+            "postgres://tokensapi:tokensapi@postgres:5432/tokensapi?sslmode=disable",
+        )
+        .unwrap();
+        assert!(postgres_settings_eq(&a, &b));
+    }
+
+    #[test]
+    fn build_roundtrip_and_special_password() {
+        let mut s = sample();
+        s.password = "p@ss:word/加".to_string();
+        s.ssl_mode = true;
+        let url = build_postgres_url(&s);
+        let parsed = parse_postgres_url(&url).expect("roundtrip");
+        assert!(postgres_settings_eq(&s, &parsed));
+        assert!(url.contains("sslmode=require"));
+    }
+
+    #[test]
+    fn ipv6_host_roundtrip() {
+        let mut s = sample();
+        s.host = "::1".to_string();
+        let url = build_postgres_url(&s);
+        assert!(url.contains("[::1]"));
+        let parsed = parse_postgres_url(&url).expect("ipv6");
+        assert_eq!(parsed.host, "::1");
+    }
+
+    #[test]
+    fn localhost_is_not_docker_postgres() {
+        let docker = sample();
+        let local = DatabaseSettings {
+            host: "localhost".to_string(),
+            database: "postgres".to_string(),
+            username: "postgres".to_string(),
+            password: "postgres".to_string(),
+            ..sample()
+        };
+        assert!(!postgres_settings_eq(&docker, &local));
+    }
+
+    #[test]
+    fn normalize_fills_defaults() {
+        let s = normalize_database_settings(DatabaseSettings {
+            db_type: String::new(),
+            host: "  postgres  ".to_string(),
+            port: 0,
+            database: "tokensapi".to_string(),
+            username: "tokensapi".to_string(),
+            password: String::new(),
+            ssl_mode: false,
+        })
+        .expect("ok");
+        assert_eq!(s.db_type, "postgres");
+        assert_eq!(s.host, "postgres");
+        assert_eq!(s.port, 5432);
+    }
+
+    #[test]
+    fn reset_confirm_requires_exact_phrase() {
+        assert!(is_db_reset_confirm("确认清空当前数据"));
+        assert!(is_db_reset_confirm("  确认清空当前数据  "));
+        assert!(!is_db_reset_confirm("确认清空"));
+        assert!(!is_db_reset_confirm(""));
+    }
+
+    #[test]
+    fn format_uptime_zh_parts() {
+        assert_eq!(format_uptime_zh(0), "0 分钟");
+        assert_eq!(format_uptime_zh(125), "2 分钟");
+        assert_eq!(format_uptime_zh(3700), "1 小时 1 分钟");
+        assert_eq!(format_uptime_zh(90_061), "1 天 1 小时 1 分钟");
+    }
+
+    #[test]
+    fn cache_hit_pct_from_shared_counters() {
+        assert_eq!(cache_hit_pct(0, 0), None);
+        assert_eq!(
+            cache_hit_pct(99, 1).map(|v| (v * 10.0).round() / 10.0),
+            Some(99.0)
+        );
+        assert_eq!(
+            cache_hit_pct(1, 1).map(|v| (v * 10.0).round() / 10.0),
+            Some(50.0)
+        );
+    }
+
+    #[test]
+    fn bytes_pretty_scales_units() {
+        assert_eq!(bytes_pretty(0), "0 B");
+        assert_eq!(bytes_pretty(512), "512 B");
+        assert_eq!(bytes_pretty(1536), "1.5 kB");
+    }
 }

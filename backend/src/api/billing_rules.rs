@@ -17,13 +17,22 @@ use crate::models::{BillingRule, CreateBillingRuleRequest, UpdateBillingRuleRequ
 use crate::AppState;
 
 pub async fn list_rules(State(state): State<Arc<AppState>>) -> AppResult<Json<Vec<BillingRule>>> {
-    let rules = sqlx::query_as(
-        &state
-            .db
-            .format_query("SELECT * FROM billing_rules ORDER BY sort_order DESC, id DESC"),
+    let plugin_enabled: i32 = sqlx::query_scalar(
+        "SELECT CAST(is_enabled AS INTEGER) FROM plugins WHERE name = 'volcengine_enhance' LIMIT 1",
     )
-    .fetch_all(&state.db.pool)
-    .await?;
+    .fetch_optional(&state.db.pool)
+    .await?
+    .unwrap_or(0);
+
+    let query_str = if plugin_enabled == 1 {
+        "SELECT * FROM billing_rules ORDER BY sort_order DESC, id DESC"
+    } else {
+        "SELECT * FROM billing_rules WHERE name NOT ILIKE '%MediaKit%' ORDER BY sort_order DESC, id DESC"
+    };
+
+    let rules = sqlx::query_as(&state.db.format_query(query_str))
+        .fetch_all(&state.db.pool)
+        .await?;
     Ok(Json(rules))
 }
 

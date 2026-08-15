@@ -77,6 +77,21 @@ pub struct ChannelConfig {
     /// 上游分类（复用 channel_categories）
     #[sqlx(default)]
     pub category_id: Option<i64>,
+    /// 上游系统：兼容 / 官方 / newapi / akeapi / 火山引擎 / 阿里云，空=未选
+    #[sqlx(default)]
+    pub upstream_system: String,
+    /// 已选同步分组名
+    #[sqlx(default)]
+    pub upstream_group: String,
+    /// 自动同步间隔分钟，0=关闭
+    #[sqlx(default)]
+    pub upstream_sync_interval_minutes: i32,
+    /// 同步时叠加到分组倍率的增量，0=不叠加
+    #[sqlx(default)]
+    pub upstream_sync_rate_add: f64,
+    /// 上次成功同步时间
+    #[sqlx(default)]
+    pub upstream_synced_at: Option<DbTs>,
 }
 
 impl ChannelConfig {
@@ -142,6 +157,14 @@ pub struct CreateChannelConfigRequest {
     #[serde(default = "default_status")]
     pub status: i32,
     pub category_id: Option<i64>,
+    #[serde(default)]
+    pub upstream_system: String,
+    #[serde(default)]
+    pub upstream_group: String,
+    #[serde(default)]
+    pub upstream_sync_interval_minutes: i32,
+    #[serde(default)]
+    pub upstream_sync_rate_add: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,6 +196,10 @@ pub struct UpdateChannelConfigRequest {
         deserialize_with = "crate::models::user::deserialize_some_option"
     )]
     pub category_id: Option<Option<i64>>,
+    pub upstream_system: Option<String>,
+    pub upstream_group: Option<String>,
+    pub upstream_sync_interval_minutes: Option<i32>,
+    pub upstream_sync_rate_add: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -213,6 +240,11 @@ pub struct ChannelConfigSafe {
     pub daily_reset_cooldown_minutes: i32,
     pub status: i32,
     pub category_id: Option<i64>,
+    pub upstream_system: String,
+    pub upstream_group: String,
+    pub upstream_sync_interval_minutes: i32,
+    pub upstream_sync_rate_add: f64,
+    pub upstream_synced_at: Option<String>,
 }
 
 impl ChannelConfigSafe {
@@ -256,6 +288,11 @@ impl ChannelConfigSafe {
             daily_reset_cooldown_minutes: c.daily_reset_cooldown_minutes,
             status: c.status,
             category_id: c.category_id,
+            upstream_system: c.upstream_system,
+            upstream_group: c.upstream_group,
+            upstream_sync_interval_minutes: c.upstream_sync_interval_minutes,
+            upstream_sync_rate_add: c.upstream_sync_rate_add,
+            upstream_synced_at: c.upstream_synced_at.map(|t| t.into_string()),
         }
     }
 }

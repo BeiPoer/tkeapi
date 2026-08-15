@@ -16,6 +16,7 @@ pub mod image;
 pub mod native;
 pub mod proxy;
 pub mod quota_memory;
+pub mod relay_settings;
 pub mod router;
 pub mod stream;
 pub mod task;
@@ -24,6 +25,7 @@ pub mod upstream_headers;
 pub mod url_utils;
 pub mod usage_extractor;
 pub mod usage_stats;
+pub mod vendor_callback;
 pub mod video;
 
 #[cfg(not(feature = "commercial_plugins"))]
@@ -57,9 +59,6 @@ pub mod response_formatter;
 pub mod tos_persist;
 
 use std::future::Future;
-use std::sync::OnceLock;
-use std::sync::RwLock;
-use std::time::{Duration, Instant};
 
 /// 连接保护：独立 task 执行 `fut`，结果经 oneshot 回传；客户端断开不影响 fut 跑完
 #[inline]
@@ -71,67 +70,6 @@ pub fn spawn_protected<T: Send + 'static>(
         let _ = tx.send(fut.await);
     });
     rx
-}
-
-struct ConfigCache {
-    pub timezone: String,
-    pub ha_channel_enabled: bool,
-    pub last_update: Instant,
-}
-
-static CONFIG_CACHE: OnceLock<RwLock<Option<ConfigCache>>> = OnceLock::new();
-
-fn get_config_cache() -> &'static RwLock<Option<ConfigCache>> {
-    CONFIG_CACHE.get_or_init(|| RwLock::new(None))
-}
-
-/// 高可用配置与时区缓存（单槽 + 60s TTL，体积固定，过期后下次读覆盖写入，无增长风险）
-pub async fn get_cached_config(state: &crate::AppState) -> (String, bool) {
-    let cache_lock = get_config_cache();
-    let now = Instant::now();
-
-    if let Ok(guard) = cache_lock.read() {
-        if let Some(ref cache) = *guard {
-            if now.duration_since(cache.last_update) < Duration::from_secs(60) {
-                return (cache.timezone.clone(), cache.ha_channel_enabled);
-            }
-        }
-    }
-
-    // 缓存失效，查库加载
-    let site_settings_val: Option<String> = sqlx::query_scalar(
-        &state
-            .db
-            .format_query("SELECT value FROM settings WHERE key = 'site_settings'"),
-    )
-    .fetch_optional(&state.db.pool)
-    .await
-    .unwrap_or(None);
-
-    let tz = site_settings_val
-        .and_then(|v| serde_json::from_str::<crate::models::SiteSettings>(&v).ok())
-        .map(|s| s.default_timezone)
-        .unwrap_or_else(|| "Asia/Shanghai".to_string());
-
-    let ha_enabled: Option<i64> =
-        sqlx::query_scalar(&state.db.format_query(
-            "SELECT is_enabled FROM plugins WHERE name = 'high_availability_channel'",
-        ))
-        .fetch_optional(&state.db.pool)
-        .await
-        .unwrap_or(None);
-
-    let ha = ha_enabled.unwrap_or(0) == 1;
-
-    if let Ok(mut guard) = cache_lock.write() {
-        *guard = Some(ConfigCache {
-            timezone: tz.clone(),
-            ha_channel_enabled: ha,
-            last_update: now,
-        });
-    }
-
-    (tz, ha)
 }
 
 /// 底座费用 × res_mul；倍率为 1 时原样返回（无 token 时的时长等计费兜底）
@@ -166,7 +104,7 @@ pub async fn calculate_relay_cost(
     model_name: &str,
     resolved_model: &str,
 ) -> (f64, String) {
-    let (_, is_ha_enabled) = get_cached_config(state).await;
+    let is_ha_enabled = relay_settings::get_cached_ha_enabled(&state.db).await;
 
     let umd = db_model
         .and_then(|m| crate::relay::proxy::parse_user_model_discount(&ctx.model_discounts, &m.mid));

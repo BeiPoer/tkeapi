@@ -10,13 +10,91 @@ use crate::models::{
     ChannelConfig, ChannelConfigListResponse, ChannelConfigSafe, CreateChannelConfigRequest,
     UpdateChannelConfigRequest,
 };
+use crate::services::upstream_rate_sync::{
+    applied_channel_rate, is_sync_due, newapi_pricing_url, parse_newapi_groups,
+    UpstreamGroupRatio, SYSTEM_NEWAPI,
+};
+use crate::time_system::DbTs;
 use crate::AppState;
 use axum::{
     extract::{Path, State},
     Json,
 };
+use chrono::Utc;
 use rand::Rng;
+use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Duration;
+
+fn sanitize_upstream_system(raw: &str) -> Result<String, AppError> {
+    let value = raw.trim();
+    if !crate::services::upstream_rate_sync::is_known_upstream_system(value) {
+        return Err(AppError::BadRequest("不支持的上游系统".into()));
+    }
+    Ok(value.to_string())
+}
+
+fn sanitize_sync_interval(minutes: i32) -> i32 {
+    minutes.clamp(0, 10_080)
+}
+
+fn sanitize_rate_add(value: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        0.0
+    }
+}
+
+fn sanitize_upstream_group(raw: &str) -> String {
+    raw.trim().to_string()
+}
+
+fn resolve_api_key(submitted: Option<&str>, stored: &str) -> String {
+    match submitted {
+        Some(key) if !key.trim().is_empty() && !key.contains("******") => key.trim().to_string(),
+        _ => stored.to_string(),
+    }
+}
+
+async fn fetch_newapi_groups(
+    http: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<UpstreamGroupRatio>, AppError> {
+    let url = newapi_pricing_url(base_url).map_err(AppError::BadRequest)?;
+    let mut req = http.get(&url).header("Accept", "application/json");
+    let key = api_key.trim();
+    if !key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+    let resp = crate::services::http_client::with_timeout(req, Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| AppError::UpstreamError(format!("拉取上游分组倍率失败: {e}")))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(AppError::UpstreamError(format!(
+            "上游定价接口 HTTP {}: {}",
+            status.as_u16(),
+            crate::relay::proxy::sanitize_error_message(&body)
+        )));
+    }
+    parse_newapi_groups(&body).map_err(AppError::UpstreamError)
+}
+
+fn apply_selected_group(
+    groups: &[UpstreamGroupRatio],
+    group_name: &str,
+    rate_add: f64,
+) -> Result<f64, AppError> {
+    let found = groups
+        .iter()
+        .find(|g| g.name == group_name)
+        .ok_or_else(|| AppError::BadRequest(format!("上游没有分组 {group_name}")))?;
+    Ok(applied_channel_rate(found.ratio, rate_add))
+}
 
 pub async fn list_channel_configs(
     State(state): State<Arc<AppState>>,
@@ -62,11 +140,16 @@ pub async fn create_channel_config(
     let daily_reset_hour = req.daily_reset_hour.unwrap_or(0).clamp(0, 23);
     let daily_reset_minute = req.daily_reset_minute.unwrap_or(0).clamp(0, 59);
     let daily_reset_cooldown_minutes = req.daily_reset_cooldown_minutes.unwrap_or(0).max(0);
+    let upstream_system = sanitize_upstream_system(&req.upstream_system)?;
+    let upstream_group = sanitize_upstream_group(&req.upstream_group);
+    let upstream_sync_interval_minutes =
+        sanitize_sync_interval(req.upstream_sync_interval_minutes);
+    let upstream_sync_rate_add = sanitize_rate_add(req.upstream_sync_rate_add);
 
     sqlx::query(
         &state.db.format_query(
-            "INSERT INTO channel_configs (name, provider_type, base_url, api_key, remark, yid, sort_order, rate, priority, weight, quota_limit, daily_quota_limit, weekly_quota_limit, monthly_quota_limit, daily_reset_hour, daily_reset_minute, daily_reset_cooldown_minutes, status, category_id) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO channel_configs (name, provider_type, base_url, api_key, remark, yid, sort_order, rate, priority, weight, quota_limit, daily_quota_limit, weekly_quota_limit, monthly_quota_limit, daily_reset_hour, daily_reset_minute, daily_reset_cooldown_minutes, status, category_id, upstream_system, upstream_group, upstream_sync_interval_minutes, upstream_sync_rate_add) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
     )
     .bind(&req.name)
@@ -88,6 +171,10 @@ pub async fn create_channel_config(
     .bind(daily_reset_cooldown_minutes)
     .bind(status)
     .bind(req.category_id)
+    .bind(&upstream_system)
+    .bind(&upstream_group)
+    .bind(upstream_sync_interval_minutes)
+    .bind(upstream_sync_rate_add)
     .execute(&state.db.pool)
     .await?;
 
@@ -166,12 +253,25 @@ pub async fn update_channel_config(
     if let Some(category_id) = req.category_id {
         config.category_id = category_id;
     }
+    if let Some(system) = req.upstream_system {
+        config.upstream_system = sanitize_upstream_system(&system)?;
+    }
+    if let Some(group) = req.upstream_group {
+        config.upstream_group = sanitize_upstream_group(&group);
+    }
+    if let Some(interval) = req.upstream_sync_interval_minutes {
+        config.upstream_sync_interval_minutes = sanitize_sync_interval(interval);
+    }
+    if let Some(add) = req.upstream_sync_rate_add {
+        config.upstream_sync_rate_add = sanitize_rate_add(add);
+    }
 
     sqlx::query(
         &state.db.format_query(
             "UPDATE channel_configs SET name = ?, provider_type = ?, base_url = ?, api_key = ?, remark = ?, \
              sort_order = ?, rate = ?, priority = ?, weight = ?, quota_limit = ?, daily_quota_limit = ?, weekly_quota_limit = ?, monthly_quota_limit = ?, \
-             daily_reset_hour = ?, daily_reset_minute = ?, daily_reset_cooldown_minutes = ?, status = ?, category_id = ? \
+             daily_reset_hour = ?, daily_reset_minute = ?, daily_reset_cooldown_minutes = ?, status = ?, category_id = ?, \
+             upstream_system = ?, upstream_group = ?, upstream_sync_interval_minutes = ?, upstream_sync_rate_add = ? \
              WHERE id = ?"
         )
     )
@@ -193,6 +293,10 @@ pub async fn update_channel_config(
     .bind(config.daily_reset_cooldown_minutes)
     .bind(config.status)
     .bind(config.category_id)
+    .bind(&config.upstream_system)
+    .bind(&config.upstream_group)
+    .bind(config.upstream_sync_interval_minutes)
+    .bind(config.upstream_sync_rate_add)
     .bind(id)
     .execute(&state.db.pool)
     .await?;
@@ -289,4 +393,124 @@ pub async fn reset_quota(
         id
     );
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FetchUpstreamGroupsRequest {
+    pub config_id: Option<i64>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub upstream_system: Option<String>,
+}
+
+pub async fn fetch_upstream_groups(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<FetchUpstreamGroupsRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let system = sanitize_upstream_system(req.upstream_system.as_deref().unwrap_or(SYSTEM_NEWAPI))?;
+    if system != SYSTEM_NEWAPI {
+        return Err(AppError::BadRequest("当前仅 newapi 支持拉取分组倍率".into()));
+    }
+
+    let mut base_url = req.base_url.unwrap_or_default();
+    let mut api_key = req.api_key.unwrap_or_default();
+    if let Some(id) = req.config_id {
+        let stored: ChannelConfig = sqlx::query_as(
+            &state
+                .db
+                .format_query("SELECT * FROM channel_configs WHERE id = ?"),
+        )
+        .bind(id)
+        .fetch_optional(&state.db.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Channel Config not found".to_string()))?;
+        if base_url.trim().is_empty() {
+            base_url = stored.base_url.clone();
+        }
+        api_key = resolve_api_key(Some(&api_key), &stored.api_key);
+    }
+
+    if api_key.trim().is_empty() || api_key.contains("******") {
+        return Err(AppError::BadRequest("请先填写请求鉴权密钥".into()));
+    }
+
+    let groups = fetch_newapi_groups(&state.http_client, &base_url, &api_key).await?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": groups.iter().map(|g| serde_json::json!({
+            "name": g.name,
+            "ratio": g.ratio,
+            "label": g.label,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+pub async fn run_upstream_rate_sync_tick(state: Arc<AppState>) {
+    let configs: Vec<ChannelConfig> = match sqlx::query_as(
+        &state.db.format_query(
+            "SELECT * FROM channel_configs WHERE upstream_system = ? AND upstream_group <> '' AND upstream_sync_interval_minutes > 0",
+        ),
+    )
+    .bind(SYSTEM_NEWAPI)
+    .fetch_all(&state.db.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("[UpstreamRateSync] 查询待同步渠道失败: {e}");
+            return;
+        }
+    };
+
+    let now = Utc::now();
+    for config in configs {
+        let synced = config
+            .upstream_synced_at
+            .as_ref()
+            .map(|t| t.as_str());
+        if !is_sync_due(synced, config.upstream_sync_interval_minutes, now) {
+            continue;
+        }
+        match fetch_newapi_groups(&state.http_client, &config.base_url, &config.api_key).await {
+            Ok(groups) => match apply_selected_group(
+                &groups,
+                &config.upstream_group,
+                config.upstream_sync_rate_add,
+            ) {
+                Ok(rate) => {
+                    if let Err(e) = sqlx::query(
+                        &state.db.format_query(
+                            "UPDATE channel_configs SET rate = ?, upstream_synced_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        ),
+                    )
+                    .bind(rate)
+                    .bind(DbTs::from_utc(now))
+                    .bind(config.id)
+                    .execute(&state.db.pool)
+                    .await
+                    {
+                        tracing::warn!(
+                            "[UpstreamRateSync] 写入渠道 {} 倍率失败: {e}",
+                            config.id
+                        );
+                    } else {
+                        tracing::info!(
+                            "[UpstreamRateSync] 渠道 {} 分组 {} 倍率同步为 {}",
+                            config.id,
+                            config.upstream_group,
+                            rate
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    "[UpstreamRateSync] 渠道 {} 分组未命中: {e}",
+                    config.id
+                ),
+            },
+            Err(e) => tracing::warn!(
+                "[UpstreamRateSync] 渠道 {} 拉取失败: {e}",
+                config.id
+            ),
+        }
+    }
 }

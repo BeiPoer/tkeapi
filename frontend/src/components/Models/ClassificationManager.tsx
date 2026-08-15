@@ -6,7 +6,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Modal, Table, Button, Space, Form, Input, InputNumber, Switch, message, Popconfirm } from 'antd';
+import { Modal, Table, Button, Space, Form, Input, InputNumber, Switch, message, Popconfirm, Tag } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import request from '../../utils/request';
@@ -22,6 +22,7 @@ interface ClassificationItem {
   is_active: boolean;
   is_system?: number;
   logo?: string;
+  model_count?: number;
 }
 
 interface ClassificationManagerProps {
@@ -143,6 +144,17 @@ const ClassificationManager: React.FC<ClassificationManagerProps> = ({
       render: (_: any, record: ClassificationItem) => isEn && record.name_en ? record.name_en : record.name,
     },
     {
+      title: t('models.model_count', '模型数量'),
+      dataIndex: 'model_count',
+      key: 'model_count',
+      width: 100,
+      render: (count: number) => (
+        <Tag color={(count && count > 0) ? 'blue' : 'default'} style={{ borderRadius: 10 }}>
+          {count ?? 0}
+        </Tag>
+      ),
+    },
+    {
       title: t('models.sort_order'),
       dataIndex: 'sort_order',
       key: 'sort_order',
@@ -187,7 +199,7 @@ const ClassificationManager: React.FC<ClassificationManagerProps> = ({
         footer={[
           <Button key="close" onClick={onClose}>{t('common.close')}</Button>
         ]}
-        width={600}
+        width={680}
       >
         <div style={{ marginBottom: 16 }}>
           <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>

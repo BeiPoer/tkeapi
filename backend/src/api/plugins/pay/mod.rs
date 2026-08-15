@@ -91,40 +91,8 @@ pub async fn create_order(
         &Uuid::new_v4().simple().to_string()[..8]
     );
 
-    // 回调基地址推断：生产环境微信/支付宝回调通过前端nginx反代到后端
-    // 优先级: PUBLIC_API_URL env > Origin header > Host header
-    let base_notify_url = std::env::var("PUBLIC_API_URL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            // 从请求 Origin 获取（浏览器自动携带完整协议+域名）
-            headers
-                .get("origin")
-                .and_then(|v| v.to_str().ok())
-                .filter(|s| !s.is_empty() && *s != "null")
-                .map(|s| s.to_string())
-        })
-        .or_else(|| {
-            // 从 X-Forwarded-Host（经过反向代理）或 Host 头获取
-            let host = headers
-                .get("x-forwarded-host")
-                .or_else(|| headers.get("host"))
-                .and_then(|v| v.to_str().ok())?;
-            let scheme = headers
-                .get("x-forwarded-proto")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or(
-                    if host.contains("localhost") || host.contains("127.0.0.1") {
-                        "http"
-                    } else {
-                        "https"
-                    },
-                );
-            Some(format!("{}://{}", scheme, host))
-        })
-        .unwrap_or_else(|| "http://localhost:3000".to_string())
-        .trim_end_matches('/')
-        .to_string();
+    // 回调基地址推断：优先级 PUBLIC_API_URL env > Origin header > Host header
+    let base_notify_url = crate::relay::vendor_callback::infer_base_url(&headers);
 
     tracing::info!(
         "[支付] 用户 {} 发起充值 {:.2} 元, 方式: {}, 订单号: {}, 回调基地址: {}",

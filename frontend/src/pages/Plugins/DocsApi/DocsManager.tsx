@@ -67,6 +67,7 @@ const DocsManager: React.FC<DocsManagerProps> = ({ apiPrefix = '/plugins/docs-ap
 
   const LANGUAGES = useMemo(() => [
     { key: 'zh', label: t('lang_zh_default') },
+    { key: 'zh-TW', label: '繁體中文' },
     { key: 'en', label: 'English' },
     { key: 'ja', label: '日本語' },
     { key: 'ko', label: '한국어' },
@@ -80,7 +81,7 @@ const DocsManager: React.FC<DocsManagerProps> = ({ apiPrefix = '/plugins/docs-ap
   const [loading, setLoading] = useState(false);
   const [selectedKey, setSelectedKey] = useState<number | null>(null);
   const [editingDoc, setEditingDoc] = useState<DocDetail | null>(null);
-  const [activeLang, setActiveLang] = useState<'zh' | 'en' | 'ja' | 'ko' | 'vi'>('zh');
+  const [activeLang, setActiveLang] = useState<'zh' | 'zh-TW' | 'en' | 'ja' | 'ko' | 'vi'>('zh');
   const [translating, setTranslating] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedKeys, setExpandedKeys] = useState<React.Key[]>([]);
@@ -468,7 +469,7 @@ const DocsManager: React.FC<DocsManagerProps> = ({ apiPrefix = '/plugins/docs-ap
     message.loading({ content: t('translate_loading'), key: 'translate-status', duration: 0 });
 
     try {
-      const targetLangs = ['en', 'ja', 'ko', 'vi'];
+      const targetLangs = ['zh-TW', 'en', 'ja', 'ko', 'vi'];
       const newTranslations: Record<string, { title: string; content?: string }> = {
         ...(editingDoc.translations || {}),
       };

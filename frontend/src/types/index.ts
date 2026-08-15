@@ -5,7 +5,7 @@
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
-// Types for the TokensByte frontend
+// Types for the Tkeapi frontend
 
 export interface User {
   id: string;
@@ -65,6 +65,7 @@ export interface UserLevel {
   max_token_count: number;
   allow_view_log_details: number;
   description: string;
+  sort_order?: number;
   created_at: string;
   user_count?: number;
 }
@@ -105,6 +106,7 @@ export interface ModelModel {
   remark?: string;
   description?: string;
   feature_attributes?: string;
+  is_system?: number;
   created_at: string;
   updated_at?: string;
 }
@@ -117,6 +119,7 @@ export interface ModelProvider {
   is_active: boolean;
   remark?: string;
   logo?: string;
+  model_count?: number;
   created_at: string;
   updated_at: string;
 }
@@ -129,6 +132,7 @@ export interface ModelType {
   is_active: boolean;
   logo?: string;
   default_features?: string;
+  model_count?: number;
   created_at: string;
   updated_at: string;
 }
@@ -311,6 +315,8 @@ export interface RequestLog {
   yid?: string;
   channel_name?: string;
   user_nickname?: string;
+  /** 用户管理员备注（管理端可见） */
+  user_admin_remark?: string;
   user_uid?: string;
   user_group?: string;
   user_level_name?: string;
@@ -332,6 +338,7 @@ export interface RequestLog {
   billing_web_search?: number;
   billing_pid?: string;
   forward_eid?: string;
+  /** 列表不返回；仅展开 `/logs/{id}/detail` */
   plugin_tag?: string;
   channel_config_id?: number;
   sub_channel_name?: string;
@@ -413,8 +420,10 @@ interface SiteSettings {
   description: string;
   favicon?: string;
   logo?: string;
+  /** 控制台 Logo/站点名点击跳转地址，留空则不可点击 */
+  logo_title_url?: string;
   login_title?: string;
-  /** 登录页标题点击跳转地址，留空则不可点击 */
+  /** 登录页标题点击跳转地址；留空则回退到 logo_title_url，仍空则不可点击 */
   login_title_url?: string;
   login_subtitle?: string;
   enable_multilingual?: boolean;
@@ -562,7 +571,9 @@ export interface AllSettings {
     sort_order: number;
     enabled: boolean;
     display_name?: string | null;
+    display_name_en?: string | null;
     subtitle?: string | null;
+    subtitle_en?: string | null;
     logo_url?: string | null;
     allinpay_methods?: string[];
   }[];
@@ -609,7 +620,9 @@ export interface AllSettings {
       sort_order: number;
       enabled: boolean;
       display_name?: string | null;
+      display_name_en?: string | null;
       subtitle?: string | null;
+      subtitle_en?: string | null;
       logo_url?: string | null;
       allinpay_wechat_enabled?: boolean;
       allinpay_alipay_enabled?: boolean;
@@ -617,6 +630,19 @@ export interface AllSettings {
   };
   google_oauth?: any;
   wechat_oauth?: any;
+  /** Relay 网关设置（仅管理端完整设置；公开接口不返回） */
+  relay?: {
+    /** 手动任务轮询是否请求上游；默认 true */
+    manual_poll_upstream?: boolean;
+    /** 后台 TaskPoller 周期（秒）；默认 30，范围 5–300 */
+    poll_tick_secs?: number;
+    /** 低余额限制未完成视频；默认 false */
+    video_inflight_enabled?: boolean;
+    video_inflight_tiers?: {
+      max_available?: number | null;
+      max_inflight?: number;
+    }[];
+  };
 }
 
 export interface ChannelConfig {
@@ -653,6 +679,15 @@ export interface ChannelConfig {
   status?: number;
   /** 上游分类（channel_categories.id） */
   category_id?: number | null;
+  /** 上游系统：兼容 / 官方 / newapi / akeapi / 火山引擎 / 阿里云 */
+  upstream_system?: string;
+  /** NewAPI 已选同步分组 */
+  upstream_group?: string;
+  /** 自动同步间隔分钟，0=关闭 */
+  upstream_sync_interval_minutes?: number;
+  /** 同步时叠加到分组倍率的增量 */
+  upstream_sync_rate_add?: number;
+  upstream_synced_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -741,6 +776,8 @@ export interface ReferralUser {
   total_recharge: number;
   current_month_system_recharge?: number;
   current_month_gift_recharge?: number;
+  current_month_system_cost?: number;
+  current_month_gift_cost?: number;
   remark?: string;
   pay_enabled: number;
 }

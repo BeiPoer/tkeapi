@@ -3144,6 +3144,16 @@ macro_rules! pg_migration_blocks {
         "COMMENT ON TABLE ha_usage_logs IS '高可用插件使用日志：log_id=logs.id，attempts=子渠过程JSON'"
     );
 
+    // ── 方舟监控：流水统计起点 + 热点查询索引 ──
+    once_migration!(pool, "ark_monitor_ledger_after_and_indexes_v1",
+        "ALTER TABLE ark_endpoint_bindings ADD COLUMN IF NOT EXISTS wallet_ledger_after TIMESTAMPTZ",
+        "COMMENT ON COLUMN ark_endpoint_bindings.wallet_ledger_after IS '方舟钱包流水统计起点：换绑用户/接入点时置为当前时间；NULL=统计全部历史流水'",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ark_bindings_account ON ark_endpoint_bindings (account_id)",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ark_video_tasks_ep_estimated ON ark_video_tasks (endpoint_id) WHERE is_estimated = TRUE AND status IN ('succeeded', 'success')",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ark_video_tasks_ep_confirmed ON ark_video_tasks (endpoint_id) WHERE is_estimated = FALSE AND status IN ('succeeded', 'success')",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_recharge_ark_monitor_user_created ON recharge_records (user_id, created_at) WHERE operator = 'ark_monitor' AND recharge_type IN ('ark_video_consume', 'ark_video_refund')"
+    );
+
     // ── 用户实名认证 KYC ──
     once_migration!(pool, "user_kyc_v1",
         r#"CREATE TABLE IF NOT EXISTS user_kyc (
@@ -3198,6 +3208,172 @@ macro_rules! pg_migration_blocks {
         SELECT 'Seedance2.5官方计费', 'tokens', 0.0, 0.0, 0.0, 0.0, 'seedance2.0', '{"enable_time_multipliers":false,"resolution_rates":{"480p":{"with_video":42,"without_video":70},"720p":{"with_video":42,"without_video":70}},"time_multipliers":[]}', 1, '73119', 'official'
         WHERE NOT EXISTS (SELECT 1 FROM billing_rules WHERE name = 'Seedance2.5官方计费')
         "#
+    );
+
+    // ComfyUI 接入：服务/工作流/任务表 + 系统增强插件种子（转发规则由插件运行时生成，不预置）
+    once_migration!(pool, "comfyui_bridge_v1",
+        r#"CREATE TABLE IF NOT EXISTS comfyui_servers (
+            id BIGSERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            base_url TEXT NOT NULL,
+            auth_header TEXT NOT NULL DEFAULT '',
+            timeout_secs INTEGER NOT NULL DEFAULT 120,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            remark TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS comfyui_workflows (
+            id BIGSERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            server_id BIGINT NOT NULL,
+            workflow_json TEXT NOT NULL DEFAULT '{}',
+            prompt_template TEXT NOT NULL DEFAULT '',
+            param_map TEXT NOT NULL DEFAULT '{}',
+            output_node_id TEXT NOT NULL DEFAULT '',
+            forward_rule_id BIGINT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            remark TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )"#,
+        "CREATE INDEX IF NOT EXISTS idx_comfyui_workflows_server ON comfyui_workflows(server_id)",
+        "CREATE INDEX IF NOT EXISTS idx_comfyui_workflows_rule ON comfyui_workflows(forward_rule_id)",
+        r#"CREATE TABLE IF NOT EXISTS comfyui_jobs (
+            log_id BIGINT PRIMARY KEY,
+            prompt_id TEXT NOT NULL,
+            workflow_id BIGINT NOT NULL,
+            server_id BIGINT NOT NULL,
+            output_url TEXT
+        )"#,
+        "CREATE INDEX IF NOT EXISTS idx_comfyui_jobs_prompt ON comfyui_jobs(prompt_id)",
+        "COMMENT ON TABLE comfyui_jobs IS 'ComfyUI 任务：log_id=logs.id'",
+        "COMMENT ON COLUMN comfyui_jobs.log_id IS '关联主日志表 logs.id'",
+        r#"INSERT INTO plugins (name, title, description, is_enabled, category, allowed_levels, created_at, updated_at)
+           VALUES (
+             'comfyui_bridge',
+             'ComfyUI 接入',
+             '管理 ComfyUI 服务地址与工作流，经 OpenAI 视频路由提交并轮询生成结果',
+             0,
+             'system',
+             'all',
+             CURRENT_TIMESTAMP,
+             CURRENT_TIMESTAMP
+           )
+           ON CONFLICT (name) DO UPDATE SET
+             title = EXCLUDED.title,
+             description = EXCLUDED.description,
+             category = EXCLUDED.category"#
+    );
+
+    // 工作流 ↔ 服务节点多对多；旧 server_id 回填后改为可空
+    once_migration!(pool, "comfyui_workflow_nodes_v1",
+        r#"CREATE TABLE IF NOT EXISTS comfyui_workflow_nodes (
+            workflow_id BIGINT NOT NULL,
+            server_id BIGINT NOT NULL,
+            PRIMARY KEY (workflow_id, server_id)
+        )"#,
+        "CREATE INDEX IF NOT EXISTS idx_comfyui_wf_nodes_server ON comfyui_workflow_nodes(server_id)",
+        r#"INSERT INTO comfyui_workflow_nodes (workflow_id, server_id)
+           SELECT id, server_id FROM comfyui_workflows
+           WHERE server_id IS NOT NULL
+           ON CONFLICT DO NOTHING"#,
+        "ALTER TABLE comfyui_workflows ALTER COLUMN server_id DROP NOT NULL"
+    );
+
+    once_migration!(pool, "comfyui_dispatch_v1",
+        "ALTER TABLE comfyui_servers ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE comfyui_servers ADD COLUMN IF NOT EXISTS weight INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE comfyui_servers ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0",
+        r#"CREATE TABLE IF NOT EXISTS comfyui_dispatch_rules (
+            id BIGSERIAL PRIMARY KEY,
+            code TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            remark TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )"#,
+        r#"INSERT INTO comfyui_dispatch_rules (code, name, remark, is_active, sort_order)
+           VALUES
+             ('priority_weight', '权重优先', '先取优先级最高的节点，同分再按权重随机', 1, 1),
+             ('random', '随机调用', '在已选且启用的节点中均匀随机', 1, 2),
+             ('sequential', '顺序调用', '按节点排序依次轮流', 1, 3),
+             ('least_busy', '空闲优先', '未完成任务最少的节点优先，同分再按权重优先', 1, 4)
+           ON CONFLICT (code) DO NOTHING"#
+    );
+
+    // ── 模型来源：系统预设 / 自定义 ──
+    once_migration!(pool, "models_is_system_v1",
+        "ALTER TABLE models ADD COLUMN IF NOT EXISTS is_system INTEGER NOT NULL DEFAULT 0",
+        "COMMENT ON COLUMN models.is_system IS '1=系统预设，0=自定义'",
+        "UPDATE models SET is_system = 1 WHERE mid IN ('vve-sd', 'vve-pf', 'vve-ft', 'vve-gt', 'vvs-er', 'vvs-ep', 'dbs-sr', 'dbs-fs')"
+    );
+
+    // ── 安装时写入系统预设模型（官方计费 + 转发规则）──
+    let preset_models_done: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sys_migration_history WHERE id = 'seed_system_preset_models_v1'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    if preset_models_done == 0 {
+        match crate::db::preset_models::seed_system_preset_models(pool).await {
+            Ok(n) => {
+                let _ = sqlx::query(
+                    "INSERT INTO sys_migration_history (id) VALUES ('seed_system_preset_models_v1')",
+                )
+                .execute(pool)
+                .await;
+                tracing::info!("系统预设模型种子写入完成，新增 {} 条", n);
+            }
+            Err(e) => {
+                tracing::error!("seed_system_preset_models_v1 失败，未标记完成以便重试: {e}");
+            }
+        }
+    }
+
+    once_migration!(pool, "channel_configs_upstream_rate_sync_v1",
+        "ALTER TABLE channel_configs ADD COLUMN IF NOT EXISTS upstream_system TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE channel_configs ADD COLUMN IF NOT EXISTS upstream_group TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE channel_configs ADD COLUMN IF NOT EXISTS upstream_sync_interval_minutes INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE channel_configs ADD COLUMN IF NOT EXISTS upstream_sync_rate_add DOUBLE PRECISION NOT NULL DEFAULT 0",
+        "ALTER TABLE channel_configs ADD COLUMN IF NOT EXISTS upstream_synced_at TIMESTAMPTZ",
+        "COMMENT ON COLUMN channel_configs.upstream_system IS '上游系统: 兼容/官方/newapi/akeapi/火山引擎/阿里云，空=未选'",
+        "COMMENT ON COLUMN channel_configs.upstream_group IS 'NewAPI 等已选同步分组名'",
+        "COMMENT ON COLUMN channel_configs.upstream_sync_interval_minutes IS '分组倍率自动同步间隔分钟，0=关闭'",
+        "COMMENT ON COLUMN channel_configs.upstream_sync_rate_add IS '同步时叠加到分组倍率上的增量，0=不叠加'",
+        "COMMENT ON COLUMN channel_configs.upstream_synced_at IS '上次成功同步分组倍率的时间'"
+    );
+
+    // task_id 按 id 倒序取最新一行；pending 轮询；旧单列索引由复合索引覆盖
+    once_migration!(pool, "logs_task_id_id_pending_poll_idx_v1",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_logs_task_id_id ON logs (task_id, id DESC)",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_logs_pending_poll ON logs (id ASC) WHERE is_completed = 0 AND status_code = 200",
+        "DROP INDEX CONCURRENTLY IF EXISTS idx_logs_task_id"
+    );
+
+    // 菜单配置：将 /wallet 的 label_zh 从「资产中心」更新为「我的钱包」
+    once_migration!(pool, "update_menu_wallet_label_to_my_wallet_20260815",
+        "UPDATE settings SET value = replace(
+            replace(value, '\"label_zh\":\"资产中心\"', '\"label_zh\":\"我的钱包\"'),
+            '\"label_zh\": \"资产中心\"', '\"label_zh\": \"我的钱包\"'
+        ) WHERE key = 'menu_config_settings'"
+    );
+
+    // 站点设置：版权信息默认值对齐为「© 2026 TkeAPI. All rights reserved.」
+    once_migration!(pool, "update_site_copyright_default_20260815",
+        "UPDATE settings SET value = replace(
+            replace(
+                replace(
+                    replace(value, '\"copyright\":\"© 2026 Tkeapi. All rights reserved.\"', '\"copyright\":\"© 2026 TkeAPI. All rights reserved.\"'),
+                    '\"copyright\": \"© 2026 Tkeapi. All rights reserved.\"', '\"copyright\": \"© 2026 TkeAPI. All rights reserved.\"'
+                ),
+                '\"copyright\":\"© 2026 MyCompany. All rights reserved.\"', '\"copyright\":\"© 2026 TkeAPI. All rights reserved.\"'
+            ),
+            '\"copyright\": \"© 2026 MyCompany. All rights reserved.\"', '\"copyright\": \"© 2026 TkeAPI. All rights reserved.\"'
+        ) WHERE key = 'site_settings'"
     );
 
     tracing::info!("PostgreSQL AnyPool migrations completed successfully");

@@ -96,6 +96,10 @@ impl MemoryQuotaGuard {
         }
     }
 
+    pub fn clear_all(&self) {
+        self.slots.clear();
+    }
+
     fn slot_key(token_id: i64, local_day: &str) -> String {
         format!("{}:{}", token_id, local_day)
     }

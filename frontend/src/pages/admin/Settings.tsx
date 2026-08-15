@@ -5,9 +5,9 @@
  * @license        MIT (https://www.tokensbyte.ai/)
  */
 
-import React, { useEffect, useState } from 'react';
-import { Card, Form, Input, Button, InputNumber, message, Typography, Space, Switch, Radio, Tabs, Select, Tag, Alert, Table, Spin, Upload, Modal, DatePicker, Divider } from 'antd';
-import { CloudServerOutlined, ApiOutlined, DatabaseOutlined, UploadOutlined } from '@ant-design/icons';
+import React, { useEffect, useRef, useState } from 'react';
+import { Card, Form, Input, Button, InputNumber, message, Typography, Space, Switch, Radio, Tabs, Select, Tag, Alert, Table, Spin, Upload, Modal, DatePicker, Divider, Descriptions, Row, Col } from 'antd';
+import { CloudServerOutlined, ApiOutlined, DatabaseOutlined, UploadOutlined, PlusOutlined, DeleteOutlined } from '@ant-design/icons';
 import * as Icons from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams, useNavigate } from 'react-router-dom';
@@ -15,6 +15,7 @@ import ReactQuill from 'react-quill-new';
 import 'react-quill-new/dist/quill.snow.css';
 import request from '../../utils/request';
 import useSettingsStore from '../../store/settings';
+import { enterFreshSetup } from '../../utils/freshSetup';
 import { toCalendarDateParam } from '../../utils/dateRangeParams';
 import dayjs from 'dayjs';
 
@@ -48,8 +49,21 @@ const TOS_REGION_GROUPS = [
 ];
 const ALL_TOS_REGIONS = TOS_REGION_GROUPS.flatMap(g => g.regions);
 
+/** 低余额视频在途默认档（与后端对齐） */
+const DEFAULT_VIDEO_INFLIGHT_TIERS: { max_available: number | null; max_inflight: number }[] = [
+  { max_available: 20, max_inflight: 1 },
+  { max_available: 50, max_inflight: 3 },
+];
+
+/** 后台轮询周期：与后端 RelaySettings 对齐（5–300，默认 30） */
+const clampPollTickSecs = (v: unknown) => Math.min(300, Math.max(5, Number(v) || 30));
+
+const DB_RESET_CONFIRM_TEXT = '确认清空当前数据';
+const DB_RESET_COUNTDOWN_SECS = 10;
+
 const ALL_LANGUAGES = [
   { code: 'zh', name: '简体中文', nativeName: 'Simplified Chinese', flag: '🇨🇳' },
+  { code: 'zh-TW', name: '繁體中文', nativeName: 'Traditional Chinese', flag: '🇭🇰' },
   { code: 'en', name: 'English', nativeName: '英语', flag: '🇺🇸' },
   { code: 'ja', name: '日本語', nativeName: '日语', flag: '🇯🇵' },
   { code: 'ko', name: '한국어', nativeName: '韩语', flag: '🇰🇷' },
@@ -62,58 +76,16 @@ const ALL_LANGUAGES = [
   { code: 'ar', name: 'العربية', nativeName: '阿拉伯语', flag: '🇸🇦' },
 ];
 
-// 登录页风格选择器组件 (卡片化缩略图选择)
+// 登录页风格选择器组件 (简洁单选切换)
 const LoginStyleSelector: React.FC<{
   value?: 'split' | 'classic';
   onChange?: (val: 'split' | 'classic') => void;
 }> = ({ value, onChange }) => {
-  const current = value || 'split';
   return (
-    <div className="flex gap-4">
-      {/* 经典风格 */}
-      <div 
-        onClick={() => onChange?.('classic')}
-        className={`relative cursor-pointer rounded-lg border-2 p-2 w-[140px] flex flex-col items-center gap-2 select-none transition-all
-          ${current === 'classic' 
-            ? 'border-zinc-900 dark:border-zinc-100 bg-zinc-50 dark:bg-zinc-900/60 shadow-xs' 
-            : 'border-zinc-200 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700 bg-background'
-          }`}
-      >
-        {/* 缩略图 */}
-        <div className="w-full h-16 rounded border border-zinc-200 dark:border-zinc-800 bg-background/50 flex items-center justify-center relative overflow-hidden">
-          {/* 居中表单 */}
-          <div className="w-10 h-7 rounded border border-zinc-200 dark:border-zinc-700 bg-background flex flex-col gap-1 p-1 items-center justify-center">
-            <div className="w-6 h-1 bg-zinc-300 dark:bg-zinc-600 rounded-xs" />
-            <div className="w-6 h-1 bg-zinc-300 dark:bg-zinc-600 rounded-xs" />
-          </div>
-        </div>
-        <span className={`text-xs font-medium ${current === 'classic' ? 'text-zinc-900 dark:text-zinc-50' : 'text-zinc-500'}`}>经典风格</span>
-      </div>
-
-      {/* 左右风格 */}
-      <div 
-        onClick={() => onChange?.('split')}
-        className={`relative cursor-pointer rounded-lg border-2 p-2 w-[140px] flex flex-col items-center gap-2 select-none transition-all
-          ${current === 'split' 
-            ? 'border-zinc-900 dark:border-zinc-100 bg-zinc-50 dark:bg-zinc-900/60 shadow-xs' 
-            : 'border-zinc-200 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700 bg-background'
-          }`}
-      >
-        {/* 缩略图 */}
-        <div className="w-full h-16 rounded border border-zinc-200 dark:border-zinc-800 bg-background/50 flex relative overflow-hidden">
-          {/* 左侧广告 */}
-          <div className="w-[40%] h-full bg-zinc-200 dark:bg-zinc-800 border-r border-zinc-200 dark:border-zinc-800" />
-          {/* 右侧表单 */}
-          <div className="w-[60%] h-full flex items-center justify-center">
-            <div className="w-7 h-5 rounded border border-zinc-200 dark:border-zinc-700 bg-background flex flex-col gap-0.5 p-0.5 items-center justify-center scale-90">
-              <div className="w-4 h-0.5 bg-zinc-300 dark:bg-zinc-600 rounded-xs" />
-              <div className="w-4 h-0.5 bg-zinc-300 dark:bg-zinc-600 rounded-xs" />
-            </div>
-          </div>
-        </div>
-        <span className={`text-xs font-medium ${current === 'split' ? 'text-zinc-900 dark:text-zinc-50' : 'text-zinc-500'}`}>左右风格</span>
-      </div>
-    </div>
+    <Radio.Group value={value || 'split'} onChange={(e) => onChange?.(e.target.value)} buttonStyle="solid">
+      <Radio.Button value="split">左右分栏风格</Radio.Button>
+      <Radio.Button value="classic">经典居中风格</Radio.Button>
+    </Radio.Group>
   );
 };
 
@@ -169,13 +141,22 @@ const Settings: React.FC = () => {
   const [uploadingLogo, setUploadingLogo] = useState(false);
 
   const [loading, setLoading] = useState(false);
-  const [serverTimeInfo, setServerTimeInfo] = useState<{ timezone: string; time: string } | null>(null);
+  const [serverUtcTime, setServerUtcTime] = useState<string | null>(null);
   const [basicSubTab, setBasicSubTab] = useState('site');
   const [dbSubTab, setDbSubTab] = useState('db');
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [syncDates, setSyncDates] = useState<[dayjs.Dayjs | null, dayjs.Dayjs | null]>([null, null]);
   const [syncingStats, setSyncingStats] = useState(false);
+  const [dbVerifying, setDbVerifying] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetPhrase, setResetPhrase] = useState('');
+  const [resetCountdown, setResetCountdown] = useState<number | null>(null);
+  const [resetting, setResetting] = useState(false);
+  const resetStartedRef = useRef(false);
+  const [dbInfo, setDbInfo] = useState<any>(null);
+  const [dbInfoLoading, setDbInfoLoading] = useState(false);
+  const [dbInfoError, setDbInfoError] = useState<string | null>(null);
 
   const handleManualSync = async () => {
     const [start, end] = syncDates;
@@ -202,6 +183,68 @@ const Settings: React.FC = () => {
       setSyncingStats(false);
     }
   };
+
+  const closeResetModal = () => {
+    if (resetting) return;
+    resetStartedRef.current = false;
+    setResetOpen(false);
+    setResetPhrase('');
+    setResetCountdown(null);
+  };
+
+  const handleVerifyDatabase = async () => {
+    setDbVerifying(true);
+    try {
+      const r = await (request.post('/settings/database/verify', {}) as any);
+      r.success ? message.success(r.message) : message.error(r.message);
+    } catch { /* 全局拦截器已统一处理 */ }
+    finally { setDbVerifying(false); }
+  };
+
+  const fetchDbInfo = async () => {
+    setDbInfoLoading(true);
+    setDbInfoError(null);
+    try {
+      const r = await (request.get('/settings/database/info') as any);
+      setDbInfo(r);
+    } catch (e: any) {
+      setDbInfo(null);
+      setDbInfoError(e?.response?.data?.error?.message || '无法读取数据库状态');
+    } finally {
+      setDbInfoLoading(false);
+    }
+  };
+
+  const executeDatabaseReset = async () => {
+    setResetting(true);
+    try {
+      const r = await (request.post(
+        '/settings/database/initialize',
+        { confirm: DB_RESET_CONFIRM_TEXT },
+        { skipErrorHandler: true } as any,
+      ) as any);
+      if (r.success) {
+        enterFreshSetup();
+        return;
+      }
+      message.error(r.message || '清空失败');
+      resetStartedRef.current = false;
+      setResetCountdown(null);
+    } catch (e: any) {
+      const status = e?.response?.status;
+      // 已发出清空：无响应或 5xx 时库可能已空，转入与全新安装相同的等待/初始化
+      if (!status || status >= 500) {
+        enterFreshSetup();
+        return;
+      }
+      message.error(e?.response?.data?.error?.message || '清空失败');
+      resetStartedRef.current = false;
+      setResetCountdown(null);
+    } finally {
+      setResetting(false);
+    }
+  };
+
   const [tosNetworkType, setTosNetworkType] = useState<'external' | 'internal'>('external');
   const [userLevels, setUserLevels] = useState<any[]>([]);
   const [menuItems, setMenuItems] = useState<any[]>([]);
@@ -216,6 +259,26 @@ const Settings: React.FC = () => {
 
   useEffect(() => { fetchSettings(); }, [tab]);
 
+  useEffect(() => {
+    if (resetCountdown === null) return;
+    if (resetCountdown === 0) {
+      if (resetStartedRef.current) return;
+      resetStartedRef.current = true;
+      void executeDatabaseReset();
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setResetCountdown((n) => (n === null ? n : n - 1));
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [resetCountdown]);
+
+  useEffect(() => {
+    if (tab === 'database' && dbSubTab === 'db') {
+      void fetchDbInfo();
+    }
+  }, [tab, dbSubTab]);
+
   const fetchSettings = async () => {
     try {
       setLoadingMenu(true);
@@ -224,11 +287,12 @@ const Settings: React.FC = () => {
         request.get('/user_levels') as any,
         request.get('/plugins') as any
       ]);
-      const { site, currency, login, registration, smtp, database: backendDatabase, agreement, storage, menu_config, server_timezone, server_time } = response;
-      if (server_timezone && server_time) {
-        setServerTimeInfo({ timezone: server_timezone, time: server_time });
+      const { site, currency, login, registration, smtp, database: backendDatabase, agreement, storage, menu_config, relay, server_time } = response;
+      if (server_time) {
+        setServerUtcTime(server_time);
       }
-      const defaultDatabase = { db_type: 'postgres', host: 'localhost', port: 5432, database: 'postgres', username: 'postgres', password: 'postgres', ssl_mode: false };
+      const defaultDatabase = { db_type: 'postgres', host: 'postgres', port: 5432, database: 'tokensapi', username: 'tokensapi', password: 'tokensapi', ssl_mode: false };
+      const loadedDatabase = { ...defaultDatabase, ...backendDatabase };
       const defaultAgreement = {
         tos_mode: 'link', tos_mode_en: 'link', tos_content: '', tos_content_en: '', tos_link: '', tos_link_en: '',
         privacy_mode: 'link', privacy_mode_en: 'link', privacy_content: '', privacy_content_en: '', privacy_link: '', privacy_link_en: '',
@@ -297,6 +361,7 @@ const Settings: React.FC = () => {
 
       form.setFieldsValue({
         ...site,
+        copyright: (site?.copyright !== undefined && site?.copyright !== null && site?.copyright !== '') ? site.copyright : '© 2026 TkeAPI. All rights reserved.',
         default_timezone: site?.default_timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
         admin_path: site?.admin_path || 'admin1688',
         ip_blacklist_enabled: site?.ip_blacklist_enabled === true,
@@ -313,9 +378,20 @@ const Settings: React.FC = () => {
           enable_user_kyc: registration?.enable_user_kyc === true,
         },
         smtp,
-        database: { ...defaultDatabase, ...backendDatabase },
+        database: loadedDatabase,
         storage: storage || {},
         agreement: agreement || defaultAgreement,
+        relay: {
+          manual_poll_upstream: relay?.manual_poll_upstream !== false,
+          poll_tick_secs: clampPollTickSecs(relay?.poll_tick_secs),
+          video_inflight_enabled: relay?.video_inflight_enabled === true,
+          video_inflight_tiers: Array.isArray(relay?.video_inflight_tiers) && relay.video_inflight_tiers.length > 0
+            ? relay.video_inflight_tiers.map((t: any) => ({
+                max_available: t.max_available ?? null,
+                max_inflight: typeof t.max_inflight === 'number' ? t.max_inflight : 1,
+              }))
+            : DEFAULT_VIDEO_INFLIGHT_TIERS.map((t) => ({ ...t })),
+        },
       });
     } catch (error) {
       console.error('Failed to fetch settings:', error);
@@ -325,8 +401,62 @@ const Settings: React.FC = () => {
     }
   };
 
+  const handleRepairFailedLogs = () => {
+    Modal.confirm({
+      title: '异常计费订单自动订正',
+      content: '系统将扫描最近5000条计费状态为200成功且计费明细包含“冻结”字样、但实际上上游返回失败的异常模型订单。确认要一键退还用户余额，并扣减对应的令牌、渠道用量吗？此操作包含并发防重锁定，不会重复扣减或退费。',
+      okText: '确认订正',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const r = await (request.post('/settings/repair-logs') as any);
+          if (r.success) {
+            Modal.success({
+              title: '自动订正成功',
+              width: 650,
+              content: (
+                <div>
+                  <div style={{ marginBottom: 16 }}>
+                    共计修复异常失败账单: <strong>{r.repaired_count}</strong> 笔，已退回用户普通余额: <strong>{r.refunded_balance}</strong>，退回赠送余额: <strong>{r.refunded_gift_balance}</strong>。同时已自动回滚对应的渠道与令牌的已用额度占用。
+                  </div>
+                  {r.details && r.details.length > 0 && (
+                    <div style={{ maxHeight: 260, overflowY: 'auto', border: '1px solid #f0f0f0', borderRadius: 8, padding: '8px 12px', background: '#fafafa' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                        <thead>
+                          <tr style={{ borderBottom: '2px solid #e8e8e8', color: '#595959', fontWeight: 600 }}>
+                            <th style={{ padding: '6px 4px', textAlign: 'left' }}>用户 ID</th>
+                            <th style={{ padding: '6px 4px', textAlign: 'left' }}>退回余额</th>
+                            <th style={{ padding: '6px 4px', textAlign: 'left' }}>退回赠送</th>
+                            <th style={{ padding: '6px 4px', textAlign: 'left' }}>异常原因</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {r.details.map((detail: any, idx: number) => (
+                            <tr key={idx} style={{ borderBottom: '1px solid #e8e8e8' }}>
+                              <td style={{ padding: '6px 4px', fontFamily: 'monospace', maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={detail.user_id}>{detail.user_id}</td>
+                              <td style={{ padding: '6px 4px', color: '#52c41a', fontWeight: 'bold' }}>+{detail.refund_balance.toFixed(6)}</td>
+                              <td style={{ padding: '6px 4px', color: '#1890ff', fontWeight: 'bold' }}>+{detail.refund_gift.toFixed(6)}</td>
+                              <td style={{ padding: '6px 4px', color: '#ff4d4f', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={detail.error_message}>{detail.error_message}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )
+            });
+          } else {
+            message.error(r.message || '订正失败');
+          }
+        } catch (e) {
+          message.error('请求接口失败');
+        }
+      }
+    });
+  };
+
   const handleSave = async () => {
-    setLoading(true);
     try {
       const values = form.getFieldsValue(true);
       let payload: any = {};
@@ -336,7 +466,9 @@ const Settings: React.FC = () => {
           ...settings?.site,
           name: values.name || '', logo: values.logo || '', title: values.title || '',
           keywords: values.keywords || '', description: values.description || '',
-          favicon: values.favicon || '', login_title: values.login_title || '',
+          favicon: values.favicon || '',
+          logo_title_url: (values.logo_title_url || '').trim(),
+          login_title: values.login_title || '',
           login_title_url: (values.login_title_url || '').trim(),
           login_subtitle: values.login_subtitle || '',
           login_style: values.login_style || 'split',
@@ -383,14 +515,22 @@ const Settings: React.FC = () => {
             sort_order: idx + 1
           }))
         };
+        payload.relay = {
+          manual_poll_upstream: values.relay?.manual_poll_upstream !== false,
+          poll_tick_secs: clampPollTickSecs(values.relay?.poll_tick_secs),
+          video_inflight_enabled: values.relay?.video_inflight_enabled === true,
+          video_inflight_tiers: (values.relay?.video_inflight_tiers || []).map((t: any) => ({
+            max_available: t?.max_available === undefined || t?.max_available === null || t?.max_available === ''
+              ? null
+              : Number(t.max_available),
+            max_inflight: Math.max(0, Number(t?.max_inflight) || 0),
+          })),
+        };
       } else if (tab === 'database') {
-        // 根据子 Tab (dbSubTab) 细分提交字段以解耦各自的保存逻辑，避免非数据库 Tab 保存时受数据库校验的拦截
         if (dbSubTab === 'db') {
-          payload.database = {
-            ...settings?.database,
-            ...values.database,
-          };
-        } else if (dbSubTab === 'storage' || dbSubTab === 'cleanup') {
+          return;
+        }
+        if (dbSubTab === 'storage' || dbSubTab === 'cleanup') {
           payload.storage = {
             ...settings?.storage,
             ...values.storage,
@@ -399,6 +539,7 @@ const Settings: React.FC = () => {
       }
 
       const oldAdminPath = settings?.site?.admin_path || 'admin1688';
+      setLoading(true);
       const updatedSettings = await (request.post('/settings', payload) as any);
       message.success(t('settings.save_success'));
       updateStoreSettings(updatedSettings);
@@ -437,12 +578,12 @@ const Settings: React.FC = () => {
   };
 
   const siteSettingsContent = (
-    <div style={{ maxWidth: 600 }}>
-      <Form.Item label={t('settings.site_name')} name="name" rules={[{ required: true }]}><Input placeholder="TokensByte" /></Form.Item>
-      <Form.Item label="站点 Logo" extra={<Text type="secondary">支持图片链接，建议尺寸 32x32 或 40x40，留空则仅显示站点名称文字，也可以点击右侧按钮直接上传本地图片</Text>}>
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+    <div style={{ maxWidth: 680 }}>
+      <Form.Item label={t('settings.site_name')} name="name" rules={[{ required: true }]}><Input placeholder="Tkeapi" /></Form.Item>
+      <Form.Item label="站点 Logo" extra={<Text type="secondary">支持图片链接，建议尺寸 32x32 或 40x40，留空则显示站点名称</Text>}>
+        <Space.Compact style={{ width: '100%' }}>
           <Form.Item name="logo" noStyle>
-            <Input placeholder="https://example.com/logo.png" style={{ flex: 1 }} />
+            <Input placeholder="https://example.com/logo.png" />
           </Form.Item>
           <Upload
             accept="image/*"
@@ -488,112 +629,101 @@ const Settings: React.FC = () => {
           >
             <Button icon={<UploadOutlined />} loading={uploadingLogo}>上传图片</Button>
           </Upload>
-        </div>
+        </Space.Compact>
         {logoUrl && (
-          <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
             <Text type="secondary" style={{ fontSize: 12 }}>预览:</Text>
-            <img src={logoUrl} alt="Logo Preview" style={{ maxHeight: 32, maxWidth: 120, objectFit: 'contain', borderRadius: 4, border: '1px solid var(--ant-color-border)', padding: '2px', background: '#fff' }} />
+            <img src={logoUrl} alt="Logo Preview" style={{ height: 26, maxWidth: 100, objectFit: 'contain', borderRadius: 4, border: '1px solid var(--ant-color-border)', padding: '2px', background: '#fff' }} />
           </div>
         )}
       </Form.Item>
-      <Form.Item label={t('settings.site_title')} name="title" rules={[{ required: true }]}><Input placeholder="TokensByte - LLM API Gateway" /></Form.Item>
-      <Form.Item label="站点图标 (Favicon)" name="favicon" extra={<Text type="secondary">支持 .ico / .png / .svg 格式的图片链接</Text>}>
+      <Form.Item
+        label="控制台 Logo 标题链接"
+        name="logo_title_url"
+        extra={<Text type="secondary">配置后，控制台侧栏/顶栏 Logo 与站点名可点击跳转；支持 https://… 或站内 /docs，留空则不可点击</Text>}
+      >
+        <Input placeholder="例如：https://example.com 或 /" />
+      </Form.Item>
+      <Form.Item label={t('settings.site_title')} name="title" rules={[{ required: true }]}><Input placeholder="Tkeapi - LLM API Gateway" /></Form.Item>
+      <Form.Item label="站点图标 (Favicon)" name="favicon" extra={<Text type="secondary">支持 .ico / .png / .svg 链接</Text>}>
         <Input placeholder="https://example.com/favicon.ico" />
       </Form.Item>
       <Form.Item label={t('settings.site_keywords')} name="keywords"><Input.TextArea rows={2} placeholder="LLM, API, Gateway" /></Form.Item>
-      <Form.Item label={t('settings.site_description')} name="description"><Input.TextArea rows={4} placeholder="Description..." /></Form.Item>
-      <Form.Item label="站点多语言" name="enable_multilingual" valuePropName="checked" extra={<Text type="secondary">开启后，页面右上角将显示语言切换按钮，用户可在已启用的语言间切换；关闭后全站固定使用下方默认语言，且不展示语言切换入口</Text>}>
+      <Form.Item label={t('settings.site_description')} name="description"><Input.TextArea rows={3} placeholder="Description..." /></Form.Item>
+      <Form.Item label="站点多语言" name="enable_multilingual" valuePropName="checked" extra={<Text type="secondary">开启后右上角显示语言切换；关闭则全站固定使用默认语言</Text>}>
         <Switch />
       </Form.Item>
       <Form.Item name="supported_languages" noStyle />
       {(() => {
-        // 获取当前系统实际载入的语言包列表 (例如: ['zh', 'en', 'ja', 'ko'])
         const implementedLangs = i18n.options.resources ? Object.keys(i18n.options.resources) : ['zh', 'en', 'ja', 'ko'];
         const defaultLangOptions = ALL_LANGUAGES
           .filter(l => implementedLangs.includes(l.code) && (enableMultilingual ? supportedLanguages.includes(l.code) : true))
           .map(l => ({ label: `${l.flag} ${l.name} (${l.nativeName})`, value: l.code }));
 
         return (
-          <div style={{ background: 'var(--ant-color-bg-layout)', border: '1px solid var(--ant-color-border)', borderRadius: 10, padding: '16px 20px', marginBottom: 16, marginTop: -8 }}>
-            {enableMultilingual ? (
-              <>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-                  <div>
-                    <Text strong style={{ fontSize: 14 }}>🌐 站点语言管理</Text>
-                    <div><Text type="secondary" style={{ fontSize: 12 }}>配置站点支持的语言，以及用户首次访问时使用的默认语言</Text></div>
-                  </div>
-                  <Button size="small" type="link" onClick={() => {
-                    const all = ALL_LANGUAGES.map(l => l.code).filter(code => implementedLangs.includes(code));
-                    form.setFieldsValue({ supported_languages: all });
-                  }}>全部启用</Button>
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
+          <div style={{ border: '1px solid var(--border-custom, var(--ant-color-border-secondary, rgba(128,128,128,0.2)))', borderRadius: 6, padding: '12px 14px', marginBottom: 14, marginTop: -4 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <Text strong style={{ fontSize: 13 }}>🌐 语言配置</Text>
+              {enableMultilingual && (
+                <Button size="small" type="link" style={{ padding: 0, height: 'auto' }} onClick={() => {
+                  const all = ALL_LANGUAGES.map(l => l.code).filter(code => implementedLangs.includes(code));
+                  form.setFieldsValue({ supported_languages: all });
+                }}>全部启用已翻译语言</Button>
+              )}
+            </div>
+            {enableMultilingual && (
+              <div style={{ marginBottom: 10 }}>
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>已启用的语言：</Text>
+                <Space wrap size={[6, 6]}>
                   {ALL_LANGUAGES.map(lang => {
                     const isImplemented = implementedLangs.includes(lang.code);
-                    // 如果未实现，强制当作未启用
-                    const isEnabled = isImplemented && supportedLanguages.includes(lang.code);
+                    const isChecked = isImplemented && supportedLanguages.includes(lang.code);
                     const isDefault = defaultLanguage === lang.code;
                     return (
-                      <div key={lang.code} style={{
-                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                        padding: '10px 14px', borderRadius: 8,
-                        background: isEnabled ? 'var(--ant-color-bg-container)' : 'transparent',
-                        border: isEnabled ? '1px solid var(--ant-color-primary-border)' : '1px solid var(--ant-color-border)',
-                        opacity: isImplemented ? (isEnabled ? 1 : 0.6) : 0.3,
-                        transition: 'all 0.2s ease',
-                      }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                          <span style={{ fontSize: 20 }}>{lang.flag}</span>
-                          <div>
-                            <Text strong style={{ fontSize: 13 }}>{lang.name}</Text>
-                            <div>
-                              <Text type="secondary" style={{ fontSize: 11 }}>
-                                {lang.nativeName}
-                                {!isImplemented && ' (未提供翻译)'}
-                              </Text>
-                            </div>
-                          </div>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          {isDefault && <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '18px', padding: '0 6px' }}>默认</Tag>}
-                          <Switch size="small" checked={isEnabled} disabled={!isImplemented && !isEnabled} onChange={(checked) => {
-                            let newLangs = [...supportedLanguages];
-                            if (checked) { newLangs.push(lang.code); } else {
-                              newLangs = newLangs.filter((l: string) => l !== lang.code);
-                              if (newLangs.length === 0) newLangs = ['zh'];
-                              if (defaultLanguage === lang.code) {
-                                form.setFieldsValue({ default_language: newLangs[0] });
-                              }
+                      <Tag.CheckableTag
+                        key={lang.code}
+                        checked={isChecked}
+                        disabled={!isImplemented}
+                        onChange={(checked) => {
+                          if (!isImplemented) return;
+                          let newLangs = [...supportedLanguages];
+                          if (checked) {
+                            newLangs.push(lang.code);
+                          } else {
+                            newLangs = newLangs.filter((l: string) => l !== lang.code);
+                            if (newLangs.length === 0) newLangs = ['zh'];
+                            if (defaultLanguage === lang.code) {
+                              form.setFieldsValue({ default_language: newLangs[0] });
                             }
-                            form.setFieldsValue({ supported_languages: newLangs });
-                          }} />
-                        </div>
-                      </div>
+                          }
+                          form.setFieldsValue({ supported_languages: newLangs });
+                        }}
+                        style={{
+                          padding: '2px 8px',
+                          fontSize: 12,
+                          cursor: isImplemented ? 'pointer' : 'not-allowed',
+                          opacity: isImplemented ? 1 : 0.6,
+                          border: isChecked ? '1px solid transparent' : '1px dashed var(--border-custom, rgba(128,128,128,0.3))'
+                        }}
+                      >
+                        {lang.flag} {lang.name} {isDefault && '(默认)'}
+                      </Tag.CheckableTag>
                     );
                   })}
-                </div>
-              </>
-            ) : (
-              <div style={{ marginBottom: 16 }}>
-                <Text strong style={{ fontSize: 14 }}>🌐 站点语言</Text>
-                <div><Text type="secondary" style={{ fontSize: 12 }}>多语言已关闭，全站固定使用下方默认语言，右上角不显示语言切换</Text></div>
+                </Space>
               </div>
             )}
-            <div style={{ marginTop: enableMultilingual ? 16 : 0, paddingTop: enableMultilingual ? 16 : 0, borderTop: enableMultilingual ? '1px dashed var(--ant-color-border)' : undefined }}>
-              <Form.Item label="站点默认语言" name="default_language" style={{ marginBottom: 0 }}
-                extra={<Text type="secondary">{enableMultilingual ? '新用户首次访问或未手动切换语言时使用此语言' : '关闭多语言时，全站将固定使用此语言'}</Text>}>
-                <Select
-                  style={{ width: 240 }}
-                  options={defaultLangOptions}
-                  onChange={(code: string) => {
-                    // 关闭多语言时，同步把支持语言收敛为默认语言
-                    if (!enableMultilingual) {
-                      form.setFieldsValue({ supported_languages: [code] });
-                    }
-                  }}
-                />
-              </Form.Item>
-            </div>
+            <Form.Item label="默认语言" name="default_language" style={{ marginBottom: 0 }}>
+              <Select
+                style={{ width: 220 }}
+                options={defaultLangOptions}
+                onChange={(code: string) => {
+                  if (!enableMultilingual) {
+                    form.setFieldsValue({ supported_languages: [code] });
+                  }
+                }}
+              />
+            </Form.Item>
           </div>
         );
       })()}
@@ -601,42 +731,9 @@ const Settings: React.FC = () => {
         label="站点默认时区"
         name="default_timezone"
         extra={
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
-            <Text type="secondary">
-              用于全站统计归档、渠道额度日切、兑换码等共享业务的自然日；用户未设置个人时区时，也作为展示与计费日切的默认值。不影响底层数据存储（系统固定按 UTC 运行与落库）。
-            </Text>
-            {serverTimeInfo && (
-              <div
-                style={{
-                  background: 'var(--ant-color-bg-layout)',
-                  padding: '8px 12px',
-                  borderRadius: 6,
-                  display: 'inline-block',
-                  width: 'fit-content',
-                  border: '1px solid var(--ant-color-border)',
-                }}
-              >
-                <Space direction="vertical" size={2}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    系统运行时区（固定，不可改）：{' '}
-                    <Text strong>{serverTimeInfo.timezone || 'UTC'}</Text>
-                  </Text>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    系统当前时间（UTC）：{' '}
-                    <Text strong>
-                      {serverTimeInfo.time}
-                      {serverTimeInfo.timezone === 'UTC' || !serverTimeInfo.timezone
-                        ? ' UTC'
-                        : ''}
-                    </Text>
-                  </Text>
-                  <Text type="secondary" style={{ fontSize: 11, opacity: 0.85 }}>
-                    灰框为系统底层时钟（固定 UTC，不可改）；上方下拉为站点业务时区（展示、统计与共享业务日切）。
-                  </Text>
-                </Space>
-              </div>
-            )}
-          </div>
+          <Text type="secondary">
+            业务展示与统计自然日切时区。系统底层时钟固定 UTC（当前：{serverUtcTime || '—'} UTC）。
+          </Text>
         }
       >
         <Select
@@ -654,31 +751,27 @@ const Settings: React.FC = () => {
         label="显示时区后缀"
         name="show_timezone"
         valuePropName="checked"
-        extra={
-          <Text type="secondary">
-            开启后，用户端/管理端在展示绝对时间（含时分秒）时追加偏移标记，例如 (UTC+5)。仅影响展示，不改变存储与计费日切逻辑。
-          </Text>
-        }
+        extra={<Text type="secondary">开启后在展示绝对时间时追加 (UTC+8) 等偏移标记</Text>}
       >
         <Switch />
       </Form.Item>
-      <Form.Item label="允许主题切换" name="enable_theme_toggle" valuePropName="checked" extra={<Text type="secondary">开启后，用户可在页面右上角切换亮色/暗色模式；关闭后则始终使用默认主题</Text>}>
+      <Form.Item label="允许主题切换" name="enable_theme_toggle" valuePropName="checked" extra={<Text type="secondary">开启后用户可切换亮暗模式；关闭则固定使用默认主题</Text>}>
         <Switch />
       </Form.Item>
-      <Form.Item label="站点默认主题" name="default_theme" extra={<Text type="secondary">新用户首次访问时使用的主题，已手动切换过的用户不受影响</Text>}>
-        <Radio.Group>
+      <Form.Item label="站点默认主题" name="default_theme">
+        <Radio.Group buttonStyle="solid">
           <Radio.Button value="dark">🌙 暗色模式</Radio.Button>
           <Radio.Button value="light">☀️ 亮色模式</Radio.Button>
         </Radio.Group>
       </Form.Item>
-      <Form.Item label="版权信息" name="copyright" extra={<Text type="secondary">用于在登录页面底部显示，留空则不显示。例如：© 2026 MyCompany. All rights reserved.</Text>}>
-        <Input placeholder="© 2026 MyCompany. All rights reserved." />
+      <Form.Item label="版权信息" name="copyright" extra={<Text type="secondary">展示在登录页及底部，留空则不显示</Text>}>
+        <Input placeholder="© 2026 TkeAPI. All rights reserved." />
       </Form.Item>
     </div>
   );
 
   const securitySettingsContent = (
-    <div style={{ maxWidth: 600 }}>
+    <div style={{ maxWidth: 680 }}>
       <Form.Item
         label="管理后台访问路径"
         name="admin_path"
@@ -686,18 +779,18 @@ const Settings: React.FC = () => {
           { required: true, message: '请输入管理后台访问路径' },
           { pattern: /^[a-zA-Z0-9_\-]+$/, message: '路径仅支持字母、数字、下划线和中划线' }
         ]}
-        extra={<Text type="secondary">修改后，管理后台的入口将更改为新的路径，例如：/admin1688。默认值为 admin1688。</Text>}
+        extra={<Text type="secondary">修改后后台入口变为新路径，如 /admin1688，默认 admin1688</Text>}
       >
         <Input placeholder="admin1688" />
       </Form.Item>
 
-      <Divider style={{ margin: '24px 0 16px' }}>注册 IP 黑名单拦截</Divider>
+      <Divider style={{ margin: '16px 0 12px' }}>注册 IP 黑名单拦截</Divider>
 
       <Form.Item
         label="开启注册 IP 黑名单"
         name="ip_blacklist_enabled"
         valuePropName="checked"
-        extra={<Text type="secondary">开启后，包含在黑名单内的 IP 将被禁止发送验证码及提交注册。</Text>}
+        extra={<Text type="secondary">开启后黑名单内的 IP 禁止发送验证码和注册</Text>}
       >
         <Switch />
       </Form.Item>
@@ -713,16 +806,10 @@ const Settings: React.FC = () => {
             <Form.Item
               label="黑名单 IP / CIDR 网段列表"
               name="ip_blacklist_text"
-              extra={
-                <Text type="secondary">
-                  每行输入一个 IP 地址或 CIDR 网段。例如：<br />
-                  192.168.1.100<br />
-                  10.0.0.0/8
-                </Text>
-              }
+              extra={<Text type="secondary">每行一个 IP 或 CIDR 网段，例如：192.168.1.100 或 10.0.0.0/8</Text>}
             >
               <Input.TextArea
-                rows={5}
+                rows={4}
                 placeholder={'192.168.1.100\n10.0.0.0/8'}
               />
             </Form.Item>
@@ -732,22 +819,105 @@ const Settings: React.FC = () => {
     </div>
   );
 
+  const relaySettingsContent = (
+    <div style={{ maxWidth: 720 }}>
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 14 }}
+        message="手动轮询仅影响客户端 GET；后台自动轮询与计费不变。低余额视频限制与「余额不足」区分；保存后即时生效。"
+      />
+      <Form.Item
+        label="手动轮询请求上游"
+        name={['relay', 'manual_poll_upstream']}
+        valuePropName="checked"
+        extra={<Text type="secondary">开：未完成任务打上游。关：优先返回 logs 缓存；无缓存再兜底上游</Text>}
+      >
+        <Switch />
+      </Form.Item>
+      <Form.Item
+        label="后台自动轮询周期"
+        name={['relay', 'poll_tick_secs']}
+        extra={<Text type="secondary">TaskPoller 间隔（秒），建议 15–60，范围 5–300，默认 30</Text>}
+        rules={[{ required: true, message: '必填' }]}
+      >
+        <InputNumber min={5} max={300} step={5} addonAfter="秒" style={{ width: 180 }} />
+      </Form.Item>
+
+      <Divider style={{ margin: '16px 0 12px' }}>低余额限制未完成视频</Divider>
+      <Form.Item
+        label="启用限制"
+        name={['relay', 'video_inflight_enabled']}
+        valuePropName="checked"
+        extra={<Text type="secondary">开启后按可用额限制未完成视频路数；可用额低于填金额，路数 0=不限制</Text>}
+      >
+        <Switch />
+      </Form.Item>
+      <Form.List name={['relay', 'video_inflight_tiers']}>
+        {(fields, { add, remove }) => (
+          <>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 4, paddingRight: 32 }}>
+              <Text type="secondary" style={{ fontSize: 12, width: 160 }}>可用额低于（元）</Text>
+              <Text type="secondary" style={{ fontSize: 12, width: 180 }}>最大未完成视频路数</Text>
+            </div>
+            {fields.map((field) => (
+              <div key={field.key} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 6 }}>
+                <Form.Item
+                  {...field}
+                  name={[field.name, 'max_available']}
+                  style={{ marginBottom: 0, width: 160 }}
+                >
+                  <InputNumber min={0} step={1} style={{ width: '100%' }} placeholder="其余则留空" />
+                </Form.Item>
+                <Form.Item
+                  {...field}
+                  name={[field.name, 'max_inflight']}
+                  style={{ marginBottom: 0, width: 180 }}
+                  rules={[{ required: true, message: '必填' }]}
+                >
+                  <InputNumber min={0} step={1} style={{ width: '100%' }} placeholder="0=不限制" />
+                </Form.Item>
+                <Button
+                  type="text"
+                  danger
+                  icon={<DeleteOutlined />}
+                  disabled={fields.length <= 1}
+                  onClick={() => remove(field.name)}
+                  style={{ marginTop: 2 }}
+                />
+              </div>
+            ))}
+            <Button
+              type="dashed"
+              size="small"
+              icon={<PlusOutlined />}
+              onClick={() => add({ max_available: 20, max_inflight: 1 })}
+              style={{ marginTop: 2 }}
+            >
+              新增档
+            </Button>
+          </>
+        )}
+      </Form.List>
+    </div>
+  );
+
   const loginSettingsContent = (
-    <div style={{ maxWidth: 600 }}>
+    <div style={{ maxWidth: 680 }}>
       <Form.Item label="登录页标题" name="login_title" extra={<Text type="secondary">留空则使用站点名称</Text>}>
-        <Input placeholder="例如：TokensByte" />
+        <Input placeholder="例如：Tkeapi" />
       </Form.Item>
       <Form.Item
         label="登录页标题链接"
         name="login_title_url"
-        extra={<Text type="secondary">配置后，登录页标题、Logo及Logo文字可点击跳转；支持完整网址（https://…）或站内路径（/docs）。留空则不可点击</Text>}
+        extra={<Text type="secondary">配置后标题和 Logo 可点击跳转；留空则使用「控制台 Logo 标题链接」</Text>}
       >
-        <Input placeholder="例如：https://example.com 或 /" />
+        <Input placeholder="留空则使用控制台 Logo 标题链接" />
       </Form.Item>
       <Form.Item label="登录页副标题" name="login_subtitle" extra={<Text type="secondary">留空则使用默认文字</Text>}>
         <Input placeholder="例如：Next-gen LLM API Gateway" />
       </Form.Item>
-      <Form.Item label="登录页风格" name="login_style" extra={<Text type="secondary">配置登录和注册页面的布局结构。经典风格将输入表单直接居中显示，隐藏左侧装饰区域；左右风格则是两栏布局。</Text>}>
+      <Form.Item label="登录页风格" name="login_style" extra={<Text type="secondary">经典居中将表单直接居中；左右风格为双栏布局</Text>}>
         <LoginStyleSelector />
       </Form.Item>
 
@@ -759,15 +929,15 @@ const Settings: React.FC = () => {
             <Form.Item 
               label="左下角广告语" 
               name="login_quote" 
-              extra={<Text type="secondary">配置“左右风格”左下角所显示的名言或广告语，留空时系统默认展示“下一代大语言模型 API 统一网关...”</Text>}
+              extra={<Text type="secondary">左右风格左侧宣传语，留空使用系统默认</Text>}
             >
-              <Input.TextArea rows={3} placeholder="配置登录页左侧大背景底部所展示的宣传语，字数不宜过多" />
+              <Input.TextArea rows={2} placeholder="配置登录页左侧大背景底部所展示的宣传语" />
             </Form.Item>
           );
         }}
       </Form.Item>
 
-      <Typography.Title level={5} style={{ marginTop: 24, marginBottom: 16 }}>{t('settings.login_title')}</Typography.Title>
+      <Divider style={{ margin: '16px 0 12px' }}>第三方与登录方式</Divider>
 
       <Form.Item label={t('settings.enable_username_login')} name={['login', 'enable_username_login']} valuePropName="checked">
         <Switch />
@@ -792,7 +962,7 @@ const Settings: React.FC = () => {
   );
 
   const registrationSettingsContent = (
-    <div style={{ maxWidth: 600 }}>
+    <div style={{ maxWidth: 680 }}>
       <Form.Item label={t('settings.enable_username_reg')} name={['registration', 'enable_username_registration']} valuePropName="checked"><Switch /></Form.Item>
       <Form.Item label={t('settings.enable_email_reg')} name={['registration', 'enable_email_registration']} valuePropName="checked"><Switch /></Form.Item>
       <Form.Item label={t('settings.enable_mobile_registration')} name={['registration', 'enable_mobile_registration']} valuePropName="checked"
@@ -801,25 +971,25 @@ const Settings: React.FC = () => {
       </Form.Item>
       <Form.Item label={t('settings.enable_password_recovery')} name={['registration', 'enable_password_recovery']} valuePropName="checked"><Switch /></Form.Item>
 
-      <Typography.Title level={5} style={{ marginTop: 24, marginBottom: 16 }}>用户实名认证（KYC）</Typography.Title>
+      <Divider style={{ margin: '16px 0 12px' }}>用户实名认证 (KYC)</Divider>
       <Form.Item
         label="开启用户实名"
         name={['registration', 'enable_user_kyc']}
         valuePropName="checked"
-        extra={<Text type="secondary">开启后，用户可在个人中心提交账号实名认证；管理后台用户编辑中可随时查看与录入实名信息。</Text>}
+        extra={<Text type="secondary">开启后用户可在个人中心提交实名认证</Text>}
       >
         <Switch />
       </Form.Item>
 
-      <Typography.Title level={5} style={{ marginTop: 24, marginBottom: 16 }}>账号绑定策略</Typography.Title>
-      <Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
-        开启下方任一开关后即启用绑定提示：未满足条件的用户登录用户端会弹窗提醒（可关闭，当天不再弹）。执行方式决定是否同时拦截创建 API 令牌。手机号 / 邮箱不可重复绑定；管理员账号不受此限制。
+      <Divider style={{ margin: '16px 0 12px' }}>账号绑定策略</Divider>
+      <Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: 12 }}>
+        开启后，未满足条件的用户登录会弹窗提醒。执行方式决定是否在创建 API 令牌时硬拦截。
       </Text>
       <Form.Item
         label="必须绑定手机"
         name={['registration', 'require_bind_mobile']}
         valuePropName="checked"
-        extra={<Text type="secondary">纳入绑定策略后，需短信通道可用才能完成绑定。<GoLink to={`/${adminPath}/message-notification`} text={t('settings.goto_settings')} /></Text>}
+        extra={<Text type="secondary">需短信通道可用。<GoLink to={`/${adminPath}/message-notification`} text={t('settings.goto_settings')} /></Text>}
       >
         <Switch />
       </Form.Item>
@@ -827,7 +997,7 @@ const Settings: React.FC = () => {
         label="必须绑定邮箱"
         name={['registration', 'require_bind_email']}
         valuePropName="checked"
-        extra={<Text type="secondary">纳入绑定策略后，需邮件通道可用才能完成绑定。<GoLink to={`/${adminPath}/message-notification`} text={t('settings.goto_settings')} /></Text>}
+        extra={<Text type="secondary">需邮件通道可用。<GoLink to={`/${adminPath}/message-notification`} text={t('settings.goto_settings')} /></Text>}
       >
         <Switch />
       </Form.Item>
@@ -838,7 +1008,6 @@ const Settings: React.FC = () => {
           if (!needMobile && !needEmail) return null;
           const both = !!(needMobile && needEmail);
           const mode = getFieldValue(['registration', 'bind_enforcement']) || 'all';
-          // 单通道时「满足其一」无意义，自动回落到 all
           if (!both && mode === 'any') {
             setTimeout(() => setFieldsValue({ registration: { ...getFieldValue('registration'), bind_enforcement: 'all' } }), 0);
           }
@@ -847,15 +1016,8 @@ const Settings: React.FC = () => {
               label="执行方式"
               name={['registration', 'bind_enforcement']}
               initialValue="all"
-              extra={
-                <Text type="secondary">
-                  {both
-                    ? '「全部都要 / 满足其一」会在创建 API 令牌时硬拦截；「仅弹窗提示」只在登录后提醒，可关闭且当天不再弹，不拦截创建令牌。'
-                    : '「创建令牌前必须绑定」会硬拦截创建令牌；「仅弹窗提示」只提醒，可关闭且当天不再弹。'}
-                </Text>
-              }
             >
-              <Radio.Group>
+              <Radio.Group buttonStyle="solid">
                 {both ? (
                   <>
                     <Radio.Button value="all">全部都要</Radio.Button>
@@ -871,16 +1033,16 @@ const Settings: React.FC = () => {
         }}
       </Form.Item>
 
-      <Typography.Title level={5} style={{ marginTop: 24, marginBottom: 16 }}>安全策略</Typography.Title>
+      <Divider style={{ margin: '16px 0 12px' }}>安全策略</Divider>
 
       <Form.Item label={t('settings.ip_rate_limit_enabled')} name={['registration', 'ip_rate_limit_enabled']} valuePropName="checked"
-        extra={<Text type="secondary">开启后限制同一 IP 每天注册次数（手机号注册由于需真实短信验证，不受此限制）</Text>}>
+        extra={<Text type="secondary">限制同一 IP 每天注册次数（手机号注册不受此限）</Text>}>
         <Switch />
       </Form.Item>
       <Form.Item noStyle dependencies={[['registration', 'ip_rate_limit_enabled']]}>
         {({ getFieldValue }) => getFieldValue(['registration', 'ip_rate_limit_enabled']) ? (
           <Form.Item label={t('settings.ip_daily_limit')} name={['registration', 'ip_daily_limit']}>
-            <InputNumber min={1} max={100} addonAfter={t('settings.ip_daily_limit_unit')} style={{ width: 200 }} />
+            <InputNumber min={1} max={100} addonAfter={t('settings.ip_daily_limit_unit')} style={{ width: 180 }} />
           </Form.Item>
         ) : null}
       </Form.Item>
@@ -906,22 +1068,21 @@ const Settings: React.FC = () => {
   );
 
   const agreementSettingsContent = (
-    <div style={{ maxWidth: 800 }}>
-      <div style={{ marginBottom: 24, padding: '16px', background: 'var(--ant-color-bg-container)', border: '1px solid var(--ant-color-border-secondary)', borderRadius: '8px' }}>
-        <Typography.Title level={5} style={{ marginTop: 0, marginBottom: 16 }}>全局协议控制 (Global Agreement Control)</Typography.Title>
-        <Form.Item label="启用服务条款" name={['agreement', 'tos_enabled']} valuePropName="checked" extra={<Typography.Text type="secondary">开启后，用户在登录和注册时会显示并需要同意服务条款</Typography.Text>}>
+    <div style={{ maxWidth: 780 }}>
+      <div style={{ display: 'flex', gap: 32, marginBottom: 16 }}>
+        <Form.Item label="启用服务条款" name={['agreement', 'tos_enabled']} valuePropName="checked" style={{ marginBottom: 0 }}>
           <Switch />
         </Form.Item>
-        <Form.Item label="启用隐私协议" name={['agreement', 'privacy_enabled']} valuePropName="checked" extra={<Typography.Text type="secondary">开启后，用户在登录和注册时会显示并需要同意隐私协议</Typography.Text>}>
+        <Form.Item label="启用隐私协议" name={['agreement', 'privacy_enabled']} valuePropName="checked" style={{ marginBottom: 0 }}>
           <Switch />
         </Form.Item>
       </div>
 
       <Tabs defaultActiveKey="zh">
         <Tabs.TabPane tab="简体中文 (默认)" key="zh">
-          <Typography.Title level={5}>服务条款 (Terms of Service)</Typography.Title>
+          <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 8 }}>服务条款 (Terms of Service)</Text>
           <Form.Item label="显示方式" name={['agreement', 'tos_mode']}>
-            <Radio.Group>
+            <Radio.Group buttonStyle="solid">
               <Radio.Button value="link">网页链接</Radio.Button>
               <Radio.Button value="text">站内富文本</Radio.Button>
             </Radio.Group>
@@ -932,15 +1093,15 @@ const Settings: React.FC = () => {
                 <Input placeholder="https://example.com/terms" />
               </Form.Item>
             ) : (
-              <Form.Item label="内容" name={['agreement', 'tos_content']}>
-                <ReactQuill theme="snow" style={{ height: 300, marginBottom: 50, backgroundColor: 'var(--ant-color-bg-container)', color: 'var(--ant-color-text)' }} />
+              <Form.Item label="条款内容" name={['agreement', 'tos_content']}>
+                <ReactQuill theme="snow" style={{ height: 220, marginBottom: 42, backgroundColor: 'var(--ant-color-bg-container)', color: 'var(--ant-color-text)' }} />
               </Form.Item>
             )}
           </Form.Item>
 
-          <Typography.Title level={5} style={{ marginTop: 40 }}>隐私协议 (Privacy Policy)</Typography.Title>
+          <Text strong style={{ fontSize: 13, display: 'block', marginTop: 20, marginBottom: 8 }}>隐私协议 (Privacy Policy)</Text>
           <Form.Item label="显示方式" name={['agreement', 'privacy_mode']}>
-            <Radio.Group>
+            <Radio.Group buttonStyle="solid">
               <Radio.Button value="link">网页链接</Radio.Button>
               <Radio.Button value="text">站内富文本</Radio.Button>
             </Radio.Group>
@@ -951,17 +1112,17 @@ const Settings: React.FC = () => {
                 <Input placeholder="https://example.com/privacy" />
               </Form.Item>
             ) : (
-              <Form.Item label="内容" name={['agreement', 'privacy_content']}>
-                <ReactQuill theme="snow" style={{ height: 300, marginBottom: 50, backgroundColor: 'var(--ant-color-bg-container)', color: 'var(--ant-color-text)' }} />
+              <Form.Item label="协议内容" name={['agreement', 'privacy_content']}>
+                <ReactQuill theme="snow" style={{ height: 220, marginBottom: 42, backgroundColor: 'var(--ant-color-bg-container)', color: 'var(--ant-color-text)' }} />
               </Form.Item>
             )}
           </Form.Item>
         </Tabs.TabPane>
 
         <Tabs.TabPane tab="English" key="en">
-          <Typography.Title level={5}>Terms of Service</Typography.Title>
+          <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 8 }}>Terms of Service</Text>
           <Form.Item label="Display Mode" name={['agreement', 'tos_mode_en']}>
-            <Radio.Group>
+            <Radio.Group buttonStyle="solid">
               <Radio.Button value="link">Link URL</Radio.Button>
               <Radio.Button value="text">Rich Text</Radio.Button>
             </Radio.Group>
@@ -973,14 +1134,14 @@ const Settings: React.FC = () => {
               </Form.Item>
             ) : (
               <Form.Item label="Content (English)" name={['agreement', 'tos_content_en']}>
-                <ReactQuill theme="snow" style={{ height: 300, marginBottom: 50, backgroundColor: 'var(--ant-color-bg-container)', color: 'var(--ant-color-text)' }} />
+                <ReactQuill theme="snow" style={{ height: 220, marginBottom: 42, backgroundColor: 'var(--ant-color-bg-container)', color: 'var(--ant-color-text)' }} />
               </Form.Item>
             )}
           </Form.Item>
 
-          <Typography.Title level={5} style={{ marginTop: 40 }}>Privacy Policy</Typography.Title>
+          <Text strong style={{ fontSize: 13, display: 'block', marginTop: 20, marginBottom: 8 }}>Privacy Policy</Text>
           <Form.Item label="Display Mode" name={['agreement', 'privacy_mode_en']}>
-            <Radio.Group>
+            <Radio.Group buttonStyle="solid">
               <Radio.Button value="link">Link URL</Radio.Button>
               <Radio.Button value="text">Rich Text</Radio.Button>
             </Radio.Group>
@@ -992,7 +1153,7 @@ const Settings: React.FC = () => {
               </Form.Item>
             ) : (
               <Form.Item label="Content (English)" name={['agreement', 'privacy_content_en']}>
-                <ReactQuill theme="snow" style={{ height: 300, marginBottom: 50, backgroundColor: 'var(--ant-color-bg-container)', color: 'var(--ant-color-text)' }} />
+                <ReactQuill theme="snow" style={{ height: 220, marginBottom: 42, backgroundColor: 'var(--ant-color-bg-container)', color: 'var(--ant-color-text)' }} />
               </Form.Item>
             )}
           </Form.Item>
@@ -1164,47 +1325,54 @@ const Settings: React.FC = () => {
   );
 
   const dataCleanupContent = (
-    <div style={{ maxWidth: 600 }}>
+    <div style={{ maxWidth: 720 }}>
       <Alert
         type="info"
         showIcon
-        style={{ marginBottom: 20 }}
-        message="两级策略：① 详情清理只清空请求/响应大字段，行仍留在热表；② 行归档把超期整行迁入 logs_archive 并从热表删除。仪表盘历史统计走 usage_daily_stats，归档前请先校准同步。"
+        style={{ marginBottom: 14 }}
+        message="日志清理只清空请求/响应大字段；行归档将超期行迁入 logs_archive。火山素材清理转换素材缓存（本地+云端每日维护）。"
       />
-      <Form.Item
-        label="日志详情保留天数"
-        name={['storage', 'log_retention_days']}
-        extra={<Text type="secondary">设为 0 表示永不清理大字段；默认 30 天</Text>}
-        style={{ marginBottom: 24 }}
-      >
-        <InputNumber min={0} max={3650} style={{ width: 200 }} addonAfter="天" placeholder="30" />
-      </Form.Item>
-      <Form.Item
-        label="日志行归档天数（热表）"
-        name={['storage', 'log_row_retention_days']}
-        extra={
-          <Text type="secondary">
-            超期行迁入 logs_archive（系统自动 +2 天缓冲）。0=不归档（默认）。大数据量站点建议 90，且 ≥ 详情保留天数。
-          </Text>
-        }
-        style={{ marginBottom: 24 }}
-      >
-        <InputNumber min={0} max={3650} style={{ width: 200 }} addonAfter="天" placeholder="0" />
-      </Form.Item>
 
-      <Card 
-        title="历史使用数据每日统计校准与补录" 
-        size="small" 
-        style={{ borderRadius: 8, marginTop: 16 }}
-      >
-        <div style={{ marginBottom: 12 }}>
-          <Text type="secondary" style={{ fontSize: 13, display: 'block' }}>
-            系统在每天凌晨会自动增量同步历史日志到汇总表。如果您发现某些天的费用或Token数统计有误，或者想补录过去某段时间的数据，可以在下方选择日期范围手动触发同步（在后台静默分批处理，不影响网站使用）。
-          </Text>
-        </div>
-        <Space direction="vertical" style={{ width: '100%' }} size="middle">
+      <Row gutter={16}>
+        <Col span={8}>
+          <Form.Item
+            label="日志详情保留天数"
+            name={['storage', 'log_retention_days']}
+            extra={<Text type="secondary">0 永不清理，默认 30</Text>}
+          >
+            <InputNumber min={0} max={3650} style={{ width: '100%' }} addonAfter="天" placeholder="30" />
+          </Form.Item>
+        </Col>
+        <Col span={8}>
+          <Form.Item
+            label="日志行归档天数"
+            name={['storage', 'log_row_retention_days']}
+            extra={<Text type="secondary">0 不归档，建议 90</Text>}
+          >
+            <InputNumber min={0} max={3650} style={{ width: '100%' }} addonAfter="天" placeholder="0" />
+          </Form.Item>
+        </Col>
+        <Col span={8}>
+          <Form.Item
+            label="火山素材保留天数"
+            name={['storage', 'volc_asset_retention_days']}
+            extra={<Text type="secondary">转换素材缓存，默认 30</Text>}
+          >
+            <InputNumber min={0} max={365} style={{ width: '100%' }} addonAfter="天" placeholder="30" />
+          </Form.Item>
+        </Col>
+      </Row>
+
+      <Divider style={{ margin: '14px 0 16px' }} />
+
+      <div style={{ marginBottom: 16 }}>
+        <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 4 }}>历史使用数据每日统计校准与补录</Text>
+        <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
+          每天凌晨自动增量同步历史日志到汇总表。若发现特定日期统计有偏差或需补录，可手动触发后台异步校准。
+        </Text>
+        <Space wrap>
           <DatePicker.RangePicker
-            style={{ width: '100%' }}
+            style={{ width: 260 }}
             value={syncDates}
             onChange={(val) => setSyncDates(val ? [val[0], val[1]] : [null, null])}
             disabledDate={(current) => current && current > dayjs().endOf('day')}
@@ -1219,182 +1387,230 @@ const Settings: React.FC = () => {
             开始同步与校准
           </Button>
         </Space>
-      </Card>
+      </div>
+
+      <Divider style={{ margin: '14px 0 16px' }} />
+
+      <div>
+        <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 4 }}>异常计费订正</Text>
+        <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
+          扫描最近 5000 条「状态 200 含冻结但上游失败」的订单并退款回滚用量。未确认账单异常请勿执行。
+        </Text>
+        <Button danger onClick={handleRepairFailedLogs}>执行异常计费订正</Button>
+      </div>
     </div>
   );
 
   const storageSettingsContent = (
-    <div style={{ maxWidth: 600 }}>
+    <div style={{ maxWidth: 760 }}>
       {testResult && (
-        <div style={{ marginBottom: 16 }}>
-          <Alert
-            type={testResult.success ? 'success' : 'error'}
-            showIcon
-            message={testResult.success ? '连接成功' : '连接失败'}
-            description={testResult.message}
-          />
-        </div>
+        <Alert
+          type={testResult.success ? 'success' : 'error'}
+          showIcon
+          style={{ marginBottom: 14 }}
+          message={testResult.success ? '连接成功' : '连接失败'}
+          description={testResult.message}
+        />
       )}
 
-      <Form.Item label="Access Key" name={['storage', 'tos_access_key']} rules={[{ required: true, message: '请输入 Access Key' }]}>
-        <Input placeholder="火山引擎 Access Key" />
-      </Form.Item>
-      <Form.Item label="Secret Key" name={['storage', 'tos_secret_key']} rules={[{ required: true, message: '请输入 Secret Key' }]}>
-        <Input.Password placeholder="火山引擎 Secret Key" />
-      </Form.Item>
+      <Row gutter={16}>
+        <Col span={12}>
+          <Form.Item label="Access Key" name={['storage', 'tos_access_key']} rules={[{ required: true, message: '请输入 Access Key' }]}>
+            <Input placeholder="火山引擎 Access Key" />
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item label="Secret Key" name={['storage', 'tos_secret_key']} rules={[{ required: true, message: '请输入 Secret Key' }]}>
+            <Input.Password placeholder="火山引擎 Secret Key" />
+          </Form.Item>
+        </Col>
 
-      <Form.Item label="数据地域" name={['storage', 'tos_region']} rules={[{ required: true, message: '请选择数据地域' }]}>
-        <Select
-          placeholder="选择数据地域"
-          showSearch
-          optionFilterProp="label"
-          onChange={(value: string) => {
-            const found = ALL_TOS_REGIONS.find(r => r.region === value);
-            if (found) {
-              const ep = tosNetworkType === 'internal' ? found.endpointInternal : found.endpointExternal;
-              form.setFieldsValue({ storage: { ...form.getFieldValue('storage'), tos_endpoint: ep } });
-            }
-          }}
-        >
-          {TOS_REGION_GROUPS.map(g => (
-            <Select.OptGroup key={g.group} label={<span style={{ fontWeight: 600, fontSize: 13 }}>{g.group}</span>}>
-              {g.regions.map(r => (
-                <Select.Option key={r.region} value={r.region} label={`${r.label} ${r.region}`}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span>{r.label}</span>
-                    <span style={{ color: 'var(--ant-color-text-secondary)', fontSize: 12 }}>{r.region.replace(/^bp-/, '')}</span>
-                  </div>
-                </Select.Option>
+        <Col span={12}>
+          <Form.Item label="数据地域" name={['storage', 'tos_region']} rules={[{ required: true, message: '请选择数据地域' }]}>
+            <Select
+              placeholder="选择数据地域"
+              showSearch
+              optionFilterProp="label"
+              onChange={(value: string) => {
+                const found = ALL_TOS_REGIONS.find(r => r.region === value);
+                if (found) {
+                  const ep = tosNetworkType === 'internal' ? found.endpointInternal : found.endpointExternal;
+                  form.setFieldsValue({ storage: { ...form.getFieldValue('storage'), tos_endpoint: ep } });
+                }
+              }}
+            >
+              {TOS_REGION_GROUPS.map(g => (
+                <Select.OptGroup key={g.group} label={<span style={{ fontWeight: 600, fontSize: 13 }}>{g.group}</span>}>
+                  {g.regions.map(r => (
+                    <Select.Option key={r.region} value={r.region} label={`${r.label} ${r.region}`}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span>{r.label}</span>
+                        <span style={{ color: 'var(--ant-color-text-secondary)', fontSize: 12 }}>{r.region.replace(/^bp-/, '')}</span>
+                      </div>
+                    </Select.Option>
+                  ))}
+                </Select.OptGroup>
               ))}
-            </Select.OptGroup>
-          ))}
-        </Select>
-      </Form.Item>
+            </Select>
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item label="网络类型">
+            <Radio.Group
+              value={tosNetworkType}
+              onChange={(e) => {
+                const newType = e.target.value as 'external' | 'internal';
+                setTosNetworkType(newType);
+                const currentRegion = form.getFieldValue(['storage', 'tos_region']);
+                if (currentRegion) {
+                  const found = ALL_TOS_REGIONS.find(r => r.region === currentRegion);
+                  if (found) {
+                    const ep = newType === 'internal' ? found.endpointInternal : found.endpointExternal;
+                    form.setFieldsValue({ storage: { ...form.getFieldValue('storage'), tos_endpoint: ep } });
+                  }
+                }
+              }}
+              optionType="button"
+              buttonStyle="solid"
+            >
+              <Radio.Button value="external">外网</Radio.Button>
+              <Radio.Button value="internal">内网</Radio.Button>
+            </Radio.Group>
+          </Form.Item>
+        </Col>
 
-      <Form.Item label="网络类型">
-        <Radio.Group
-          value={tosNetworkType}
-          onChange={(e) => {
-            const newType = e.target.value as 'external' | 'internal';
-            setTosNetworkType(newType);
-            const currentRegion = form.getFieldValue(['storage', 'tos_region']);
-            if (currentRegion) {
-              const found = ALL_TOS_REGIONS.find(r => r.region === currentRegion);
-              if (found) {
-                const ep = newType === 'internal' ? found.endpointInternal : found.endpointExternal;
-                form.setFieldsValue({ storage: { ...form.getFieldValue('storage'), tos_endpoint: ep } });
-              }
-            }
-          }}
-          optionType="button"
-          buttonStyle="solid"
-        >
-          <Radio.Button value="external">外网</Radio.Button>
-          <Radio.Button value="internal">内网</Radio.Button>
-        </Radio.Group>
-      </Form.Item>
+        <Col span={12}>
+          <Form.Item label="Endpoint" name={['storage', 'tos_endpoint']} rules={[{ required: true, message: '请选择地域后自动填充' }]}>
+            <Input placeholder="选择地域后自动填充" />
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item label="Bucket 存储桶" name={['storage', 'tos_bucket']} rules={[{ required: true, message: '请输入 Bucket 名称' }]}>
+            <Input placeholder="对象存储桶名称" />
+          </Form.Item>
+        </Col>
 
-      <Form.Item label="Endpoint" name={['storage', 'tos_endpoint']} rules={[{ required: true, message: '请选择地域后自动填充' }]} extra={<Text type="secondary" style={{ fontSize: 11 }}>选择地域和网络类型后自动填充，也可手动修改</Text>}>
-        <Input placeholder="选择地域后自动填充" />
-      </Form.Item>
+        <Col span={12}>
+          <Form.Item label="路径前缀" name={['storage', 'tos_path_prefix']} extra={<Text type="secondary">选填，如 assets/</Text>}>
+            <Input placeholder="如 assets/" />
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item label="自定义域名" name={['storage', 'tos_custom_domain']} extra={<Text type="secondary">选填，CDN 加速域名</Text>}>
+            <Input placeholder="如 https://cdn.example.com" />
+          </Form.Item>
+        </Col>
+      </Row>
 
-      <Form.Item label="Bucket" name={['storage', 'tos_bucket']} rules={[{ required: true, message: '请输入 Bucket 名称' }]}>
-        <Input placeholder="对象存储桶名称" />
-      </Form.Item>
-
-      <Form.Item label="路径前缀" name={['storage', 'tos_path_prefix']} extra={<Text type="secondary" style={{ fontSize: 11 }}>选填，如 assets/</Text>}>
-        <Input placeholder="如 assets/" />
-      </Form.Item>
-
-      <Form.Item label="自定义域名" name={['storage', 'tos_custom_domain']} extra={<Text type="secondary" style={{ fontSize: 11 }}>选填，CDN 加速域名</Text>}>
-        <Input placeholder="如 https://cdn.example.com" />
-      </Form.Item>
-
-      <Space style={{ marginBottom: 16 }}>
-        <Button onClick={handleTestConnection} loading={testing}>测试连接</Button>
+      <Space style={{ marginTop: 4, marginBottom: 8 }}>
+        <Button onClick={handleTestConnection} loading={testing}>测试 TOS 连接</Button>
       </Space>
     </div>
   );
 
   const dbSettingsContent = (
-    <div style={{ maxWidth: 600 }}>
-      <Form.Item label="数据库类型" name={['database', 'db_type']} rules={[{ required: true }]}>
-        <Radio.Group><Radio.Button value="postgres">PostgreSQL</Radio.Button></Radio.Group>
-      </Form.Item>
-      <Form.Item label="数据库地址 (Host)" name={['database', 'host']} rules={[{ required: true }]}><Input placeholder="localhost" /></Form.Item>
-      <Form.Item label="端口 (Port)" name={['database', 'port']} rules={[{ required: true }]}><InputNumber style={{ width: '100%' }} placeholder="5432" /></Form.Item>
-      <Form.Item label="数据库名称" name={['database', 'database']} rules={[{ required: true }]}><Input placeholder="postgres" /></Form.Item>
-      <Form.Item label="用户名" name={['database', 'username']} rules={[{ required: true }]}><Input placeholder="postgres" /></Form.Item>
-      <Form.Item label="密码" name={['database', 'password']}><Input.Password placeholder="postgres" /></Form.Item>
-      <Form.Item label="启用 SSL" name={['database', 'ssl_mode']} valuePropName="checked"><Switch /></Form.Item>
-      <Space style={{ marginBottom: 16 }}>
-        <Button onClick={async () => {
-          try { const v = await form.validateFields(); const r = await (request.post('/settings/database/verify', v.database) as any); r.success ? message.success(r.message) : message.error(r.message); } catch { /* 全局拦截器已统一处理 */ }
-        }}>测试连接</Button>
-        <Button danger onClick={async () => {
-          try { const v = await form.validateFields(); const r = await (request.post('/settings/database/initialize', v.database) as any); r.success ? message.success(r.message) : message.error(r.message); } catch { /* 全局拦截器已统一处理 */ }
-        }}>初始化数据库</Button>
-        <Button onClick={async () => {
-          try { const r = await (request.post('/settings/database/backup') as any); r.success ? message.success(r.message) : message.error(r.message); } catch { /* 全局拦截器已统一处理 */ }
-        }}>执行备份</Button>
+    <div style={{ maxWidth: 760 }}>
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 14 }}
+        message="当前数据库连接与运行状态（只读）"
+        description="此处展示系统当前生效的 PostgreSQL 连接与运行状态。采集只读目录与共享内存统计，打开本页或点刷新时查一次，不轮询、不扫业务大表。更改连接请修改 DATABASE_URL 或数据目录 .database_url 后重启。「初始化并清空数据库」会清空全部业务数据，随后与全新安装一样设置超级管理员。"
+      />
+
+      {dbInfoError && (
+        <Alert type="warning" showIcon message={dbInfoError} style={{ marginBottom: 12 }} />
+      )}
+
+      <Spin spinning={dbInfoLoading && !dbInfo}>
+        <Descriptions
+          bordered
+          size="small"
+          column={{ xs: 1, sm: 2, md: 2 }}
+          style={{ marginBottom: 16 }}
+          labelStyle={{ width: '150px', fontWeight: 500 }}
+        >
+          <Descriptions.Item label="数据库类型">
+            <Tag color="blue">PostgreSQL</Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="连接地址 (Host:Port)">
+            <Text code>{form.getFieldValue(['database', 'host']) || 'postgres'}:{form.getFieldValue(['database', 'port']) || 5432}</Text>
+          </Descriptions.Item>
+          <Descriptions.Item label="数据库名称">
+            <Text code>{form.getFieldValue(['database', 'database']) || 'tokensapi'}</Text>
+          </Descriptions.Item>
+          <Descriptions.Item label="用户名">
+            <Text code>{form.getFieldValue(['database', 'username']) || 'tokensapi'}</Text>
+          </Descriptions.Item>
+          <Descriptions.Item label="SSL 连接">
+            {form.getFieldValue(['database', 'ssl_mode']) ? <Tag color="success">已开启</Tag> : <Tag>未开启</Tag>}
+          </Descriptions.Item>
+          <Descriptions.Item label="数据库版本">
+            {dbInfo?.server_version || '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="运行状态 / 运行时长">
+            {dbInfo?.uptime ? <Tag color="processing">{dbInfo.uptime}</Tag> : '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="启动时间 (UTC)">
+            {dbInfo?.started_at_utc || '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="数据存储大小">
+            <Text strong>{dbInfo?.size_pretty || '—'}</Text>
+          </Descriptions.Item>
+          <Descriptions.Item label="数据表数量">
+            {dbInfo?.table_count !== undefined ? `${dbInfo.table_count} 张表` : '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="字符编码">
+            {dbInfo?.encoding || 'UTF8'}
+          </Descriptions.Item>
+          <Descriptions.Item label="当前连接 / 上限">
+            {dbInfo?.backends !== undefined ? `${dbInfo.backends} / ${dbInfo.max_connections}` : '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="缓存命中率">
+            {typeof dbInfo?.cache_hit_pct === 'number' ? `${dbInfo.cache_hit_pct}%` : '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="事务提交 / 回滚">
+            {dbInfo?.xact_commit !== undefined
+              ? `${Number(dbInfo.xact_commit).toLocaleString()} / ${Number(dbInfo.xact_rollback).toLocaleString()}`
+              : '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="死锁次数">
+            {dbInfo?.deadlocks !== undefined ? Number(dbInfo.deadlocks).toLocaleString() : '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="临时文件占用">
+            {dbInfo?.temp_pretty || '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="计数起始 (UTC)">
+            {dbInfo?.stats_reset_utc || '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="站点进程已运行">
+            {dbInfo?.process_uptime ? <Tag color="processing">{dbInfo.process_uptime}</Tag> : '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="站点进程启动 (UTC)">
+            {dbInfo?.process_started_at_utc || '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="应用连接池" span={2}>
+            {dbInfo?.pool_size !== undefined
+              ? `使用中 ${Number(dbInfo.pool_size) - Number(dbInfo.pool_idle || 0)}，空闲 ${dbInfo.pool_idle}，合计 ${dbInfo.pool_size}`
+              : '—'}
+          </Descriptions.Item>
+        </Descriptions>
+      </Spin>
+
+      <Space wrap style={{ marginBottom: 8 }}>
+        <Button onClick={handleVerifyDatabase} loading={dbVerifying}>测试数据库连接</Button>
+        <Button onClick={() => void fetchDbInfo()} loading={dbInfoLoading}>刷新状态</Button>
         <Button
           danger
+          disabled={resetting}
           onClick={() => {
-            Modal.confirm({
-              title: '异常计费订单自动订正',
-              content: '系统将扫描最近5000条计费状态为200成功且计费明细包含“冻结”字样、但实际上上游返回失败的异常模型订单。确认要一键退还用户余额，并扣减对应的令牌、渠道用量吗？此操作包含并发防重锁定，不会重复扣减或退费。',
-              okText: '确认订正',
-              cancelText: '取消',
-              onOk: async () => {
-                try {
-                  const r = await (request.post('/settings/repair-logs') as any);
-                  if (r.success) {
-                    Modal.success({
-                      title: '自动订正成功',
-                      width: 650,
-                      content: (
-                        <div>
-                          <div style={{ marginBottom: 16 }}>
-                            共计修复异常失败账单: <strong>{r.repaired_count}</strong> 笔，已退回用户普通余额: <strong>{r.refunded_balance}</strong>，退回赠送余额: <strong>{r.refunded_gift_balance}</strong>。同时已自动回滚对应的渠道与令牌的已用额度占用。
-                          </div>
-                          {r.details && r.details.length > 0 && (
-                            <div style={{ maxHeight: 260, overflowY: 'auto', border: '1px solid #f0f0f0', borderRadius: 8, padding: '8px 12px', background: '#fafafa' }}>
-                              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                                <thead>
-                                  <tr style={{ borderBottom: '2px solid #e8e8e8', color: '#595959', fontWeight: 600 }}>
-                                    <th style={{ padding: '6px 4px', textAlign: 'left' }}>用户 ID</th>
-                                    <th style={{ padding: '6px 4px', textAlign: 'left' }}>退回余额</th>
-                                    <th style={{ padding: '6px 4px', textAlign: 'left' }}>退回赠送</th>
-                                    <th style={{ padding: '6px 4px', textAlign: 'left' }}>异常原因</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {r.details.map((detail: any, idx: number) => (
-                                    <tr key={idx} style={{ borderBottom: '1px solid #e8e8e8' }}>
-                                      <td style={{ padding: '6px 4px', fontFamily: 'monospace', maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={detail.user_id}>{detail.user_id}</td>
-                                      <td style={{ padding: '6px 4px', color: '#52c41a', fontWeight: 'bold' }}>+{detail.refund_balance.toFixed(6)}</td>
-                                      <td style={{ padding: '6px 4px', color: '#1890ff', fontWeight: 'bold' }}>+{detail.refund_gift.toFixed(6)}</td>
-                                      <td style={{ padding: '6px 4px', color: '#ff4d4f', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={detail.error_message}>{detail.error_message}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-                        </div>
-                      )
-                    });
-                  } else {
-                    message.error(r.message || '订正失败');
-                  }
-                } catch (e) {
-                  message.error('请求接口失败');
-                }
-              }
-            });
+            resetStartedRef.current = false;
+            setResetPhrase('');
+            setResetCountdown(null);
+            setResetOpen(true);
           }}
         >
-          异常计费订正
+          初始化并清空数据库
         </Button>
       </Space>
     </div>
@@ -1407,17 +1623,26 @@ const Settings: React.FC = () => {
           margin-bottom: 12px;
         }
         .settings-compact-form .ant-form-item-label {
-          padding-bottom: 4px;
+          padding-bottom: 2px;
+        }
+        .settings-compact-form .ant-form-item-label > label {
+          font-size: 13px;
+          font-weight: 500;
+        }
+        .settings-compact-form .ant-form-item-extra {
+          font-size: 12px;
+          margin-top: 2px;
+          line-height: 1.4;
         }
         .settings-compact-form .ant-card-body {
-          padding-top: 12px;
+          padding: 16px 20px;
         }
         .settings-compact-form .ant-tabs-nav {
-          margin-bottom: 12px;
+          margin-bottom: 14px;
         }
       `}</style>
       <Form className="settings-compact-form" form={form} layout="vertical" autoComplete="off"
-        initialValues={{ database: { db_type: 'postgres', host: 'localhost', port: 5432, database: 'postgres', username: 'postgres', password: 'postgres', ssl_mode: false } }}>
+        initialValues={{ database: { db_type: 'postgres', host: 'postgres', port: 5432, database: 'tokensapi', username: 'tokensapi', password: 'tokensapi', ssl_mode: false } }}>
 
         {tab === 'basic' && (
           <Tabs activeKey={basicSubTab} onChange={setBasicSubTab} items={[
@@ -1427,6 +1652,7 @@ const Settings: React.FC = () => {
             { key: 'registration', label: '注册设置', children: registrationSettingsContent },
             { key: 'agreement', label: '站点协议', children: agreementSettingsContent },
             { key: 'menu', label: '菜单配置', children: menuSettingsContent },
+            { key: 'relay', label: '模型调用设置', children: relaySettingsContent },
           ]} />
         )}
 
@@ -1439,10 +1665,64 @@ const Settings: React.FC = () => {
           ]} />
         )}
 
-        <Form.Item style={{ marginTop: 24 }}>
-          <Button type="primary" onClick={handleSave} loading={loading} size="large">{t('common.save')}</Button>
-        </Form.Item>
+        {!(tab === 'database' && dbSubTab === 'db') && (
+          <Form.Item style={{ marginTop: 16 }}>
+            <Button type="primary" onClick={handleSave} loading={loading}>{t('common.save')}</Button>
+          </Form.Item>
+        )}
       </Form>
+      <Modal
+        title={resetCountdown === null ? '初始化并清空当前数据库' : '即将清空当前数据'}
+        open={resetOpen}
+        onCancel={closeResetModal}
+        maskClosable={false}
+        closable={!resetting}
+        confirmLoading={resetting}
+        okText={resetCountdown === null ? '开始倒计时' : undefined}
+        okButtonProps={{
+          danger: true,
+          disabled: resetPhrase.trim() !== DB_RESET_CONFIRM_TEXT || resetting,
+          style: resetCountdown !== null ? { display: 'none' } : undefined,
+        }}
+        cancelText="取消"
+        cancelButtonProps={{ disabled: resetting }}
+        onOk={() => {
+          if (resetPhrase.trim() !== DB_RESET_CONFIRM_TEXT) return;
+          resetStartedRef.current = false;
+          setResetCountdown(DB_RESET_COUNTDOWN_SECS);
+        }}
+      >
+        {resetCountdown === null ? (
+          <div>
+            <Alert
+              type="error"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="此操作会清空当前数据库的全部业务数据（用户、令牌、日志、渠道等），并重建空表结构。"
+              description="连接配置不会改变。完成后将进入与全新安装相同的超级管理员设置页。此操作不可撤销。"
+            />
+            <div style={{ marginBottom: 8 }}>请输入「{DB_RESET_CONFIRM_TEXT}」以继续：</div>
+            <Input
+              value={resetPhrase}
+              placeholder={DB_RESET_CONFIRM_TEXT}
+              onChange={(e) => setResetPhrase(e.target.value)}
+              disabled={resetting}
+              autoComplete="off"
+            />
+          </div>
+        ) : (
+          <div>
+            <Alert
+              type="warning"
+              showIcon
+              message={resetting ? '正在清空当前数据库…' : `将在 ${resetCountdown} 秒后开始清空当前数据`}
+              description={resetting
+                ? '清空完成后将自动进入全新安装，请设置首个超级管理员。请勿关闭页面。'
+                : '倒计时期间可点击取消中止。倒计时结束后将真正执行，不可再撤销。'}
+            />
+          </div>
+        )}
+      </Modal>
     </Card>
   );
 };

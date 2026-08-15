@@ -17,8 +17,10 @@ axum = { version = "0.8", features = ["multipart"] }
 # tower 由 axum / tower-http 传递引入；勿再 features=["full"]
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 
-# Async runtime（default 已含 rt-multi-thread/macros/net/time/sync/io-util；补 fs+signal）
-tokio = { version = "1", features = ["fs", "signal"] }
+# Async runtime（tokio default=[]）。features 是并集：已启用的再写一遍不增加编译量。
+# 必留 rt-multi-thread：#[tokio::main] 需要；曾靠 ve-tos→hyper0.14 传递，去 SDK 后会丢。
+# macros/net/time/sync/io-util 已由 axum/reqwest 打开，此处只补本 crate 直接缺口。
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "signal"] }
 tokio-stream = "0.1"
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 
@@ -60,7 +62,6 @@ aes-gcm = "0.10"
 base64 = "0.22"
 
 # Utils
-async-trait = "0.1"
 thiserror = "2"
 anyhow = "1"
 regex = "1"
@@ -78,9 +79,6 @@ form_urlencoded = "1"
 rsa = { version = "0.9", features = ["sha1", "sha2", "pem"] }
 sha1 = { version = "0.10", default-features = false, features = ["oid"] }
 md-5 = "0.10"
-
-# Volcengine TOS（会传递引入 reqwest 0.11，与上方 0.12 并存属上游约束，勿强行删）
-ve-tos-rust-sdk = { version = "2.9", features = ["tokio-runtime"] }
 
 # Template engine (portal static HTML generation)
 tera = "1"

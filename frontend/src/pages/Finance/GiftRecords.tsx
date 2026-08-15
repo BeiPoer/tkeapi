@@ -13,6 +13,7 @@ import request from '../../utils/request';
 import useSettingsStore from '../../store/settings';
 import { formatApiDateTime } from '../../utils/timedisplay';
 import { toTimeRangeParams } from '../../utils/dateRangeParams';
+import { rechargeTypeLabel } from '../../utils/rechargeType';
 import dayjs from 'dayjs';
 
 const { Title, Text } = Typography;
@@ -109,10 +110,9 @@ const GiftRecords: React.FC = () => {
       title: '类型',
       dataIndex: 'recharge_type',
       key: 'recharge_type',
-      render: (type: string) => {
-        const label = t(`finance.recharge_type_${type}`) || t('finance.recharge_type_other');
-        return <Tag color="gold">🎁 {label}</Tag>;
-      },
+      render: (type: string) => (
+        <Tag color="gold">🎁 {rechargeTypeLabel(type)}</Tag>
+      ),
     },
     {
       title: '用户推荐人',
@@ -205,7 +205,7 @@ const GiftRecords: React.FC = () => {
                 size="small"
                 style={{ width: '100%', borderRadius: 8, boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}
                 title={<Text strong>{record.username}</Text>}
-                extra={<Tag color="gold">🎁 {t(`finance.recharge_type_${record.recharge_type}`) || t('finance.recharge_type_other')}</Tag>}
+                extra={<Tag color="gold">🎁 {rechargeTypeLabel(record.recharge_type)}</Tag>}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
                   <Text type="secondary" style={{ fontSize: 12 }}>UID</Text>

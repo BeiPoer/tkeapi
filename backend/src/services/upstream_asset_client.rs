@@ -193,14 +193,44 @@ struct UpstreamDeleteJob {
     asset_ids: Vec<String>,
 }
 
+/// DeleteAsset 条间间隔，与方舟清理一致，避免打满上游流控。
+const UPSTREAM_DELETE_GAP_MS: u64 = 500;
+
 /// 删库前解析凭证并异步 DeleteAsset；失败仅 info，不阻塞本地删除。
-/// `items` 为 `(asset_id, plugin_ns)`。
+/// `items` 为 `(asset_id, plugin_ns)`。条间节流；遇限流停止剩余。
 pub async fn spawn_best_effort_delete_items(
     http: reqwest::Client,
     db: crate::db::Database,
     operator_uid: String,
     items: Vec<(String, String)>,
 ) {
+    let jobs = prepare_delete_jobs(&db, items).await;
+    if jobs.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        let _ = run_delete_jobs(&http, &db, &operator_uid, jobs).await;
+    });
+}
+
+/// 同步节流 DeleteAsset；`true` 表示遇限流应停止本轮清理（勿再删本地）。
+pub async fn delete_items_throttled(
+    http: reqwest::Client,
+    db: crate::db::Database,
+    operator_uid: &str,
+    items: Vec<(String, String)>,
+) -> bool {
+    let jobs = prepare_delete_jobs(&db, items).await;
+    if jobs.is_empty() {
+        return false;
+    }
+    run_delete_jobs(&http, &db, operator_uid, jobs).await
+}
+
+async fn prepare_delete_jobs(
+    db: &crate::db::Database,
+    items: Vec<(String, String)>,
+) -> Vec<UpstreamDeleteJob> {
     let mut by_ns: HashMap<String, HashSet<String>> = HashMap::new();
     for (aid, ns) in items {
         let id = normalize_ark_asset_id(&aid);
@@ -209,7 +239,7 @@ pub async fn spawn_best_effort_delete_items(
         }
     }
     if by_ns.is_empty() {
-        return;
+        return Vec::new();
     }
 
     let mut ns_binding: Vec<(String, i64, HashSet<String>)> = Vec::with_capacity(by_ns.len());
@@ -230,10 +260,10 @@ pub async fn spawn_best_effort_delete_items(
         ns_binding.push((ns, binding_id, aids));
     }
     if ns_binding.is_empty() {
-        return;
+        return Vec::new();
     }
 
-    let creds = load_binding_endpoints(&db, &binding_ids).await;
+    let creds = load_binding_endpoints(db, &binding_ids).await;
     let mut jobs = Vec::with_capacity(ns_binding.len());
     for (ns, binding_id, aids) in ns_binding {
         let Some((endpoint, api_key)) = creds.get(&binding_id).cloned() else {
@@ -252,36 +282,59 @@ pub async fn spawn_best_effort_delete_items(
             asset_ids: aids.into_iter().collect(),
         });
     }
-    if jobs.is_empty() {
-        return;
-    }
+    jobs
+}
 
-    tokio::spawn(async move {
-        for job in jobs {
-            let ctx = UpstreamCallCtx {
-                http: &http,
-                db: &db,
-                user_id: &operator_uid,
-                plugin_name: &job.plugin_ns,
-                endpoint_base: &job.endpoint,
-                api_key: &job.api_key,
-            };
-            for aid in job.asset_ids {
-                let body = json!({ "Id": aid });
-                match call_action_logged(&ctx, "DeleteAsset", &body).await {
-                    Ok(_) => tracing::info!(
-                        "[UpstreamAsset] DeleteAsset 成功: {} (绑定#{})",
-                        aid,
-                        job.binding_id
-                    ),
-                    Err(e) => tracing::info!(
+/// 执行 DeleteAsset；`true` = 遇限流已中止。
+async fn run_delete_jobs(
+    http: &reqwest::Client,
+    db: &crate::db::Database,
+    operator_uid: &str,
+    jobs: Vec<UpstreamDeleteJob>,
+) -> bool {
+    let gap = std::time::Duration::from_millis(UPSTREAM_DELETE_GAP_MS);
+    let mut first = true;
+    for job in jobs {
+        let ctx = UpstreamCallCtx {
+            http,
+            db,
+            user_id: operator_uid,
+            plugin_name: &job.plugin_ns,
+            endpoint_base: &job.endpoint,
+            api_key: &job.api_key,
+        };
+        for aid in job.asset_ids {
+            if !first {
+                tokio::time::sleep(gap).await;
+            }
+            first = false;
+            let body = json!({ "Id": aid });
+            match call_action_logged(&ctx, "DeleteAsset", &body).await {
+                Ok(_) => tracing::info!(
+                    "[UpstreamAsset] DeleteAsset 成功: {} (绑定#{})",
+                    aid,
+                    job.binding_id
+                ),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if crate::services::volcengine::VolcClient::is_api_rate_limited(&msg) {
+                        tracing::info!(
+                            "[UpstreamAsset] DeleteAsset 限流，本轮停止: {} (绑定#{}) - {}",
+                            aid,
+                            job.binding_id,
+                            msg
+                        );
+                        return true;
+                    }
+                    tracing::info!(
                         "[UpstreamAsset] DeleteAsset 失败(不影响本地删除): {} (绑定#{}) - {}",
                         aid,
                         job.binding_id,
-                        e
-                    ),
+                        msg
+                    );
                 }
             }
         }
-    });
+    }
+    false
 }
