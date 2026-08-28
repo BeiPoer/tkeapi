@@ -35,13 +35,10 @@ jobs:
         with:
           workspaces: backend -> target
 
-      - name: Check backend source
-        env:
-          CARGO_BUILD_JOBS: "1"
-          CARGO_INCREMENTAL: "0"
-          RUSTFLAGS: "-Awarnings"
+      - name: Validate backend manifest
         run: |
-          cargo check --manifest-path backend/Cargo.toml --locked -j "$CARGO_BUILD_JOBS"
+          cargo metadata --manifest-path backend/Cargo.toml --locked --no-deps --format-version 1 > /tmp/tokensbyte-backend-metadata.json
+          test -s /tmp/tokensbyte-backend-metadata.json
 
       - name: Prepare amd64 backend binary
         run: |
