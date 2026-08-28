@@ -39,6 +39,7 @@ Openai-GPT/Google-Gemini/Anthropic-Claude/XAI-Grok  全线支持
     - [1）一键启动](#1一键启动)
     - [2）交互式部署（推荐）](#2交互式部署推荐)
     - [3）自定义 / 外部数据库](#3自定义--外部数据库)
+    - [4）GitHub Actions 预构建](#4github-actions-预构建)
     - [模式对照](#模式对照)
   - [使用入门](#使用入门)
   - [本地开发](#本地开发)
@@ -74,15 +75,23 @@ Openai-GPT/Google-Gemini/Anthropic-Claude/XAI-Grok  全线支持
 
 ## 快速部署
 
-**环境**：Docker 20.10+、Compose 2.x；建议 4C / 8G / 50GB。
+**环境**：Docker 20.10+、Compose 2.x；建议 4C / 8G / 50GB。生产镜像由 GitHub Actions 构建，服务器只负责拉取和运行。
 
 ### 1）一键启动
 
 ```bash
 git clone <repository-url>
 cd tokensbyte
-docker compose up -d --build
+cp .env.example .env       # 修改数据库密码、JWT_SECRET 等生产配置
+docker compose pull
+docker compose up -d --no-build
 ```
+
+默认拉取 `ghcr.io/beipoer/tokensbyte-backend:latest` 和
+`ghcr.io/beipoer/tokensbyte-frontend:latest`，目标架构为 `linux/amd64`。
+如果使用自己的 fork，请在 `.env` 中把 `BACKEND_IMAGE` 和 `FRONTEND_IMAGE` 改为自己的 GHCR 镜像名。
+如果 GHCR 镜像是私有的，先执行 `docker login ghcr.io`（需要具有
+`read:packages` 权限的 GitHub PAT）。
 
 - 前台：`http://localhost:8080`
 - 管理端：`http://localhost:8080/admin1688`
@@ -102,10 +111,32 @@ chmod +x deploy.sh && ./deploy.sh
 
 ```bash
 cp .env.example .env   # 按注释修改
-docker compose up -d
+docker compose pull
+docker compose up -d --no-build
 ```
 
 使用外部 PostgreSQL：改 `DATABASE_URL`，并在 `docker-compose.yml` 中停用内置 `postgres` 服务。
+
+### 4）GitHub Actions 预构建
+
+`.github/workflows/build-images.yml` 会在 `main` 分支有新提交时自动运行，也可以在 GitHub 的
+Actions 页面手动运行。工作流只构建并推送 `linux/amd64` 镜像，后端使用 Docker BuildKit 的
+Cargo 缓存，前端先生成 `dist` 再打包进 Nginx 镜像。
+
+服务器更新时执行：
+
+```bash
+docker compose pull
+docker compose up -d --no-build
+```
+
+不要在服务器上使用 `docker compose up -d --build`，否则会重新编译 Rust。若确实需要从源码构建，
+先生成前端静态文件，再执行：
+
+```bash
+(cd frontend && npm install --ignore-scripts && npm run build)
+docker compose up -d --build
+```
 
 ### 模式对照
 

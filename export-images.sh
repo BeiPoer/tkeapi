@@ -115,6 +115,9 @@ else
 fi
 
 export PROJECT_NAME
+# 离线导出需要可由 docker load 直接使用的本地镜像名，覆盖生产 Compose 的 GHCR 默认值。
+export BACKEND_IMAGE="${PROJECT_NAME}-backend:latest"
+export FRONTEND_IMAGE="${PROJECT_NAME}-frontend:latest"
 if [ "${SKIP_BUILD:-0}" = "1" ]; then
     echo "⏭️  SKIP_BUILD=1：跳过构建，导出本地已有镜像"
 else

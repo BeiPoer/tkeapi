@@ -60,6 +60,8 @@ cargo install cargo-zigbuild
 docker load -i tokensbyte-os-backend-x86_64.tar
 docker load -i tokensbyte-os-frontend-x86_64.tar
 
-# 2. 启动服务
-docker compose up -d
+# 2. 使用导入的本地镜像启动（不拉取、不在服务器构建）
+BACKEND_IMAGE=tokensbyte-os-backend:latest \
+FRONTEND_IMAGE=tokensbyte-os-frontend:latest \
+docker compose up -d --no-build --pull never
 ```

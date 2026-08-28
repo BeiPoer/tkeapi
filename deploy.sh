@@ -187,7 +187,9 @@ case $mode in
         echo "🚀 启动生产环境..."
         # 导出项目名环境变量
         export PROJECT_NAME="${PROJECT_NAME}"
-        docker compose up -d
+        echo "📥 正在拉取 GitHub Actions 构建的预制镜像..."
+        docker compose pull
+        docker compose up -d --no-build
         echo ""
         echo "✅ 生产环境部署完成！"
         echo ""

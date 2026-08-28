@@ -1,10 +1,11 @@
 # TokensByte Docker Compose 配置
 # ──────────────────────────────────────────────────
-# 一键启动: docker compose up -d
+# 生产启动: docker compose pull && docker compose up -d --no-build
+# 本地源码构建: (cd frontend && npm install --ignore-scripts && npm run build) && docker compose up -d --build
 #
 # 优先级: .env 文件 > compose 内默认值
-# 镜像策略: pull_policy=never 使用本地镜像，不自动构建
-# 如需重新构建: docker compose build 或改 pull_policy: missing
+# 默认使用 GitHub Actions 发布到 GHCR 的 linux/amd64 预构建镜像
+# 如需本地构建，设置 BACKEND_IMAGE/FRONTEND_IMAGE 后执行 --build
 # ──────────────────────────────────────────────────
 #
 # ── 切换为外部数据库 ──────────────────────────────
@@ -39,7 +40,7 @@ services:
       retries: 5
 
   backend:
-    image: ${PROJECT_NAME:-tokensbyte}-backend:latest
+    image: ${BACKEND_IMAGE:-ghcr.io/beipoer/tokensbyte-backend:latest}
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -51,7 +52,7 @@ services:
         CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-1}
         # 1=启用 Cargo BuildKit cache；交叉架构(QEMU)时导出脚本会置 0 防 segfault
         ENABLE_CARGO_CACHE: ${ENABLE_CARGO_CACHE:-1}
-    pull_policy: missing
+    pull_policy: always
     container_name: ${PROJECT_NAME:-tokensbyte}-backend
     stop_grace_period: 120s
     environment:
@@ -98,13 +99,13 @@ services:
           cpus: '0.5'
 
   frontend:
-    image: ${PROJECT_NAME:-tokensbyte}-frontend:latest
+    image: ${FRONTEND_IMAGE:-ghcr.io/beipoer/tokensbyte-frontend:latest}
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
         DOCKER_IMAGE_PREFIX: ${DOCKER_IMAGE_PREFIX:-}
-    pull_policy: missing
+    pull_policy: always
     container_name: ${PROJECT_NAME:-tokensbyte}-frontend
     ports:
       - "${FRONTEND_PORT:-8080}:80"
