@@ -60,14 +60,16 @@ jobs:
           CARGO_BUILD_JOBS: "1"
           CARGO_BUILD_PIPELINING: "false"
           CARGO_INCREMENTAL: "0"
-          CARGO_PROFILE_RELEASE_CODEGEN_BACKEND: "cranelift"
-          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
-          CARGO_PROFILE_RELEASE_LTO: "false"
-          CARGO_PROFILE_RELEASE_DEBUG: "0"
+          CARGO_PROFILE_DEV_CODEGEN_BACKEND: "cranelift"
+          CARGO_PROFILE_DEV_OPT_LEVEL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_DEV_INCREMENTAL: "false"
+          CARGO_PROFILE_DEV_STRIP: "symbols"
+          CARGO_PROFILE_DEV_PANIC: "abort"
           RUSTFLAGS: "-Awarnings -Zthreads=1 -Zmir-opt-level=0 -Zinline-mir=false -Zshare-generics=y -C opt-level=0 -C debuginfo=0 -C panic=abort"
         run: |
-          cargo +nightly build -Zcodegen-backend --manifest-path backend/Cargo.toml --release --locked -j "$CARGO_BUILD_JOBS"
-          cp backend/target/release/tokensbyte-server backend/tokensbyte-server
+          cargo +nightly build -Zcodegen-backend --manifest-path backend/Cargo.toml --profile dev --locked -j "$CARGO_BUILD_JOBS"
+          cp backend/target/debug/tokensbyte-server backend/tokensbyte-server
           chmod +x backend/tokensbyte-server
 
       - name: Set up Docker Buildx
