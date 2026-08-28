@@ -37,9 +37,8 @@ jobs:
           CARGO_INCREMENTAL: "0"
           RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
         run: |
-          cargo rustc --manifest-path backend/Cargo.toml --release --bin tokensbyte-server \
-            -j "$CARGO_BUILD_JOBS" -- -C opt-level=0 -C codegen-units=1
-          cp backend/target/release/tokensbyte-server tokensbyte-server-bin
+          cargo build --manifest-path backend/Cargo.toml --profile dev -j "$CARGO_BUILD_JOBS"
+          cp backend/target/debug/tokensbyte-server tokensbyte-server-bin
           chmod +x tokensbyte-server-bin
 
       - name: Set up Docker Buildx
