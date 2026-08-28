@@ -1,0 +1,17 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libssl3 \
+    libsqlite3-0 \
+    ca-certificates \
+    postgresql-client \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY tokensbyte-server /app/tokensbyte-server
+RUN chmod +x /app/tokensbyte-server && mkdir -p /app/data
+
+EXPOSE 3000
+STOPSIGNAL SIGTERM
+CMD ["/app/tokensbyte-server"]
