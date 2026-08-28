@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Install native build dependencies
         run: |
@@ -35,17 +35,24 @@ jobs:
         with:
           workspaces: backend -> target
 
+      - name: Inspect build resources
+        run: |
+          free -h
+          nproc
+          if [ -f /sys/fs/cgroup/memory.max ]; then cat /sys/fs/cgroup/memory.max; fi
+          if [ -f /sys/fs/cgroup/memory.swap.max ]; then cat /sys/fs/cgroup/memory.swap.max; fi
+
       - name: Build backend binary on runner
         env:
           CARGO_BUILD_JOBS: "1"
           CARGO_INCREMENTAL: "0"
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "256"
-          CARGO_PROFILE_RELEASE_OPT_LEVEL: "1"
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
           CARGO_PROFILE_RELEASE_LTO: "false"
           CARGO_PROFILE_RELEASE_DEBUG: "0"
-          RUSTFLAGS: "-C codegen-units=256 -C opt-level=1 -C debuginfo=0 -C linker=clang -C link-arg=-fuse-ld=mold"
+          RUSTFLAGS: "-Zthreads=1 -C codegen-units=256 -C opt-level=0 -C debuginfo=0 -C panic=abort -C linker=clang -C link-arg=-fuse-ld=mold"
         run: |
-          cargo build --manifest-path backend/Cargo.toml --release --locked -j "$CARGO_BUILD_JOBS"
+          cargo +nightly build --manifest-path backend/Cargo.toml --release --locked -j "$CARGO_BUILD_JOBS"
           cp backend/target/release/tokensbyte-server backend/tokensbyte-server
           chmod +x backend/tokensbyte-server
 
