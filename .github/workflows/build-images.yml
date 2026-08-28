@@ -25,6 +25,9 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@nightly
 
+      - name: Install Cranelift codegen backend
+        run: rustup component add rustc-codegen-cranelift-preview --toolchain nightly
+
       - name: Install native build dependencies
         run: |
           sudo apt-get update
@@ -57,13 +60,13 @@ jobs:
           CARGO_BUILD_JOBS: "1"
           CARGO_BUILD_PIPELINING: "false"
           CARGO_INCREMENTAL: "0"
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "256"
+          CARGO_PROFILE_RELEASE_CODEGEN_BACKEND: "cranelift"
           CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
           CARGO_PROFILE_RELEASE_LTO: "false"
           CARGO_PROFILE_RELEASE_DEBUG: "0"
-          RUSTFLAGS: "-Awarnings -Zthreads=1 -Zmir-opt-level=0 -Zinline-mir=false -Zshare-generics=y -C codegen-units=256 -C opt-level=0 -C debuginfo=0 -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld"
+          RUSTFLAGS: "-Awarnings -Zthreads=1 -Zmir-opt-level=0 -Zinline-mir=false -Zshare-generics=y -C opt-level=0 -C debuginfo=0 -C panic=abort"
         run: |
-          cargo +nightly build --manifest-path backend/Cargo.toml --release --locked -j "$CARGO_BUILD_JOBS"
+          cargo +nightly build -Zcodegen-backend --manifest-path backend/Cargo.toml --release --locked -j "$CARGO_BUILD_JOBS"
           cp backend/target/release/tokensbyte-server backend/tokensbyte-server
           chmod +x backend/tokensbyte-server
 
