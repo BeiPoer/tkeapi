@@ -42,9 +42,20 @@ jobs:
           if [ -f /sys/fs/cgroup/memory.max ]; then cat /sys/fs/cgroup/memory.max; fi
           if [ -f /sys/fs/cgroup/memory.swap.max ]; then cat /sys/fs/cgroup/memory.swap.max; fi
 
+      - name: Serialize Rust compiler processes
+        run: |
+          cat > "$RUNNER_TEMP/serial-rustc" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec flock "${RUNNER_TEMP:-/tmp}/tokensbyte-rustc.lock" "$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/serial-rustc"
+          echo "RUSTC_WRAPPER=$RUNNER_TEMP/serial-rustc" >> "$GITHUB_ENV"
+
       - name: Build backend binary on runner
         env:
           CARGO_BUILD_JOBS: "1"
+          CARGO_BUILD_PIPELINING: "false"
           CARGO_INCREMENTAL: "0"
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "256"
           CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
