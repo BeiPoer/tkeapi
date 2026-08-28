@@ -120,8 +120,10 @@ docker compose up -d --no-build
 ### 4）GitHub Actions 预构建
 
 `.github/workflows/build-images.yml` 会在 `main` 分支有新提交时自动运行，也可以在 GitHub 的
-Actions 页面手动运行。工作流只构建并推送 `linux/amd64` 镜像，后端使用 Docker BuildKit 的
-Cargo 缓存，前端先生成 `dist` 再打包进 Nginx 镜像。
+Actions 页面手动运行。工作流只构建并推送 `linux/amd64` 镜像，前端先生成 `dist` 再打包进 Nginx
+镜像。后端源码会先执行 `cargo check --locked`；由于 GitHub Free Runner 的内存限制不足以稳定
+完成本项目的 LLVM 最终代码生成，镜像阶段复用仓库中已验证的 amd64 二进制并仅做 thin 打包。
+后端源文件变化后，工作流会主动失败，避免发布过期二进制。
 
 服务器更新时执行：
 

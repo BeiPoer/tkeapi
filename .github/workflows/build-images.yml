@@ -23,65 +23,41 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Install Cranelift codegen backend
-        run: rustup component add rustc-codegen-cranelift-preview --toolchain nightly
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld libssl-dev pkg-config
+          sudo apt-get install -y pkg-config
 
       - name: Cache Cargo build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend -> target
 
-      - name: Inspect build resources
-        run: |
-          free -h
-          nproc
-          if [ -f /sys/fs/cgroup/memory.max ]; then cat /sys/fs/cgroup/memory.max; fi
-          if [ -f /sys/fs/cgroup/memory.swap.max ]; then cat /sys/fs/cgroup/memory.swap.max; fi
-
-      - name: Serialize Rust compiler processes
-        run: |
-          cat > "$RUNNER_TEMP/serial-rustc" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          exec flock "${RUNNER_TEMP:-/tmp}/tokensbyte-rustc.lock" "$@"
-          EOF
-          chmod +x "$RUNNER_TEMP/serial-rustc"
-          echo "RUSTC_WRAPPER=$RUNNER_TEMP/serial-rustc" >> "$GITHUB_ENV"
-
-      - name: Configure Cranelift for Cargo
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml <<'EOF'
-          [unstable]
-          codegen-backend = true
-
-          [profile.dev]
-          codegen-backend = "cranelift"
-          EOF
-
-      - name: Build backend binary on runner
+      - name: Check backend source
         env:
           CARGO_BUILD_JOBS: "1"
-          CARGO_BUILD_PIPELINING: "false"
           CARGO_INCREMENTAL: "0"
-          CARGO_PROFILE_DEV_CODEGEN_BACKEND: "cranelift"
-          CARGO_PROFILE_DEV_OPT_LEVEL: "0"
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_DEV_INCREMENTAL: "false"
-          CARGO_PROFILE_DEV_STRIP: "symbols"
-          CARGO_PROFILE_DEV_PANIC: "abort"
-          RUSTFLAGS: "-Awarnings -Zcodegen-backend=cranelift -C opt-level=0 -C debuginfo=0 -C panic=abort"
+          RUSTFLAGS: "-Awarnings"
         run: |
-          cargo +nightly build -Zcodegen-backend --manifest-path backend/Cargo.toml --profile dev --locked -vv -j "$CARGO_BUILD_JOBS"
-          cp backend/target/debug/tokensbyte-server backend/tokensbyte-server
-          chmod +x backend/tokensbyte-server
+          cargo check --manifest-path backend/Cargo.toml --locked -j "$CARGO_BUILD_JOBS"
+
+      - name: Prepare amd64 backend binary
+        run: |
+          prebuilt_source_commit="0fc20ccd6fa4c36413eba456f6b2997c49092488"
+          if ! git diff --quiet "$prebuilt_source_commit" -- backend/src backend/build.rs; then
+            echo "backend source changed after the checked-in amd64 binary was produced"
+            echo "build a new amd64 binary or use a larger/self-hosted runner"
+            exit 1
+          fi
+          docker load --input dockerimage/tkeapi-backend-20260815_153537.tar
+          container_id="$(docker create tkeapi-backend:latest)"
+          trap 'docker rm "$container_id" >/dev/null 2>&1 || true' EXIT
+          docker cp "$container_id:/app/tokensbyte-server" backend/tokensbyte-server
+          docker rm "$container_id" >/dev/null
+          test -x backend/tokensbyte-server
+          test "$(docker image inspect tkeapi-backend:latest --format '{{.Architecture}}')" = amd64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
