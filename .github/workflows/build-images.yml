@@ -34,11 +34,11 @@ jobs:
       - name: Build backend binary on runner
         env:
           CARGO_BUILD_JOBS: "1"
-          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+          CARGO_INCREMENTAL: "0"
           RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
         run: |
-          cargo build --manifest-path backend/Cargo.toml --release -j "$CARGO_BUILD_JOBS"
+          cargo rustc --manifest-path backend/Cargo.toml --release --bin tokensbyte-server \
+            -j "$CARGO_BUILD_JOBS" -- -C opt-level=0 -C codegen-units=1
           cp backend/target/release/tokensbyte-server tokensbyte-server-bin
           chmod +x tokensbyte-server-bin
 
