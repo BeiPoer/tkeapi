@@ -28,7 +28,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y mold clang libssl-dev pkg-config
+          sudo apt-get install -y libssl-dev pkg-config
 
       - name: Cache Cargo build
         uses: Swatinem/rust-cache@v2
@@ -50,7 +50,7 @@ jobs:
           CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
           CARGO_PROFILE_RELEASE_LTO: "false"
           CARGO_PROFILE_RELEASE_DEBUG: "0"
-          RUSTFLAGS: "-Zthreads=1 -C codegen-units=256 -C opt-level=0 -C debuginfo=0 -C panic=abort -C linker=clang -C link-arg=-fuse-ld=mold"
+          RUSTFLAGS: "-Zthreads=1 -C codegen-units=256 -C opt-level=0 -C debuginfo=0 -C panic=abort -C linker=rust-lld"
         run: |
           cargo +nightly build --manifest-path backend/Cargo.toml --release --locked -j "$CARGO_BUILD_JOBS"
           cp backend/target/release/tokensbyte-server backend/tokensbyte-server
