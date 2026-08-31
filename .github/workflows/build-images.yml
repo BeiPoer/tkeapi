@@ -17,6 +17,7 @@ concurrency:
 jobs:
   build-backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -41,7 +42,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: backend/tokensbyte-server
-          key: tokensbyte-backend-bin-${{ hashFiles('backend/src/**', 'backend/build.rs', 'backend/Cargo.toml', 'backend/Cargo.lock', 'frontend/src/pages/Plugins/SitePortal/locales/portal/**', 'frontend/src/pages/Plugins/SitePortal/whats-token-homepage.html') }}
+          key: tokensbyte-backend-bin-v2-${{ hashFiles('backend/src/**', 'backend/build.rs', 'backend/Cargo.toml', 'backend/Cargo.lock', 'frontend/src/pages/Plugins/SitePortal/locales/portal/**', 'frontend/src/pages/Plugins/SitePortal/whats-token-homepage.html') }}
 
       - name: Validate backend manifest
         run: |
@@ -78,10 +79,25 @@ jobs:
               export CARGO_PROFILE_RELEASE_OPT_LEVEL=0
               export CARGO_PROFILE_RELEASE_LTO=false
               export CARGO_PROFILE_RELEASE_DEBUG=false
-              export RUSTFLAGS="-Zmir-opt-level=0 -Zinline-mir=false -C codegen-units=1024 -C opt-level=0 -C debuginfo=0 -C linker=clang -C link-arg=-fuse-ld=lld"
+              export RUSTFLAGS="-Zmir-opt-level=0 -Zinline-mir=false -C codegen-units=1024 -C opt-level=0 -C debuginfo=0 -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=--no-threads"
+              set +e
               cargo +nightly -Zcodegen-backend build \
                 --manifest-path backend/Cargo.toml \
-                --release --locked --config unstable.codegen-backend=true -j 1
+                --release --locked --config unstable.codegen-backend=true --bin tokensbyte-server -j 1 &
+              build_pid=$!
+              while kill -0 "$build_pid" 2>/dev/null; do
+                sleep 30
+                if kill -0 "$build_pid" 2>/dev/null; then
+                  echo "backend build still running ($(date -u '+%Y-%m-%dT%H:%M:%SZ'))"
+                  free -h
+                fi
+              done
+              wait "$build_pid"
+              build_status=$?
+              set -e
+              if [ "$build_status" -ne 0 ]; then
+                exit "$build_status"
+              fi
               cp backend/target/release/tokensbyte-server backend/tokensbyte-server
             fi
           fi
