@@ -18,7 +18,7 @@ use std::collections::HashMap;
 /// 转发规则解析结果
 #[derive(Debug, Clone)]
 pub struct ResolvedForward {
-    /// 目标协议类型: "openai", "volcengine", "volcengine_chat", "gemini", "gemini_image", "anthropic", "kling", "kling_video", "jimeng_image", "jimeng_video", "minimax_image", "minimax_video"
+    /// 目标协议类型: "openai", "volcengine", "volcengine_chat", "gemini", "gemini_image", "anthropic", "kling", "kling_video", "jimeng_image", "jimeng_video", "minimax_image", "minimax_video", "bytefor_video", "atp_video", "tencent_vod_video", "globalaiopc_video"
     pub target_type: String,
     /// 上游路径 e.g. "/api/v3/chat/completions"
     pub upstream_path: String,
@@ -823,6 +823,9 @@ pub async fn transform_request_body(
 
         // Bytefor 视频生成：将 OpenAI 兼容格式转换为 Bytefor 视频生成 API 格式
         "bytefor_video" => build_bytefor_video_body(model, body),
+
+        // GlobalAI OPC 视频生成：将 OpenAI 兼容字段转换为模型中心任务格式
+        "globalaiopc_video" => build_globalaiopc_video_body(model, body),
 
         // ATP Token 视频生成：将 OpenAI / 阿里百炼 格式请求转换为 ATP Token omni media tasks 格式
         // 参考文档：https://atptoken.ai/zh-cn/docs/media-video
@@ -1657,6 +1660,14 @@ pub fn infer_forward_from_base_url(
             }
             "图片" => make_forward("minimax_image", "/v1/image_generation", "bearer"),
             _ => default_openai_forward("/v1/chat/completions"),
+        }
+    } else if url_lower.contains("globalaiopc") || url_lower.contains("aizfw.cn") {
+        if category == "视频" {
+            let mut r = make_forward("globalaiopc_video", "/v2/model-center/tasks", "bearer");
+            r.poll_path = Some("/v2/model-center/tasks/${task_id}".to_string());
+            r
+        } else {
+            default_openai_forward(super::proxy::category_endpoint(Some(category)))
         }
     } else if url_lower.contains("atptoken.ai") {
         if category == "视频" {
@@ -4206,6 +4217,183 @@ fn build_bytefor_video_body(model: &str, body: &serde_json::Value) -> serde_json
     }
 
     fwd
+}
+
+// ── GlobalAI OPC 视频请求体构建 ────────────────────────────────
+//
+// GlobalAI OPC 模型中心接口：
+//   POST /v2/model-center/tasks
+//   { model, prompt, reference_images, reference_videos, reference_audios,
+//     first_image, last_image, duration, aspect_ratio, resolution, ... }
+//
+// 统一入口仍使用 images/image_urls/videos/audios；这里负责把它们转换为
+// GlobalAI OPC 的字段名，并保留用户直接传入的原生字段。
+const GLOBALAIOPC_VIDEO_PASSTHROUGH_KEYS: &[&str] = &[
+    "prompt",
+    "reference_images",
+    "reference_videos",
+    "reference_audios",
+    "duration",
+    "aspect_ratio",
+    "resolution",
+    "seed",
+    "first_image",
+    "last_image",
+    "generate_audio",
+    "tools",
+    "watermark",
+];
+
+fn build_globalaiopc_video_body(model: &str, body: &serde_json::Value) -> serde_json::Value {
+    let mut result = serde_json::Map::new();
+    result.insert("model".to_string(), serde_json::json!(model));
+
+    // 原生字段优先，避免同时传入统一字段和 GlobalAI OPC 字段时产生重复素材。
+    for key in GLOBALAIOPC_VIDEO_PASSTHROUGH_KEYS {
+        if let Some(value) = body.get(*key) {
+            result.insert((*key).to_string(), value.clone());
+        }
+    }
+
+    // OpenAI 兼容 ratio → GlobalAI OPC aspect_ratio。
+    if !result.contains_key("aspect_ratio") {
+        if let Some(ratio) = body.get("ratio") {
+            result.insert("aspect_ratio".to_string(), ratio.clone());
+        }
+    }
+
+    // OpenAI 兼容 images/image_urls：
+    // 1 张 → first_image，2 张 → first_image + last_image，3+ 张 → reference_images。
+    // 带 role/type 的对象可显式指定首帧、尾帧或参考图。
+    let images = collect_media_values(body, &["images", "image_urls"]);
+    if !images.is_empty() {
+        let defaults = infer_image_default_roles(images.len());
+        let mut first_image: Option<String> = None;
+        let mut last_image: Option<String> = None;
+        let mut reference_images: Vec<String> = Vec::new();
+
+        for (idx, item) in images.iter().enumerate() {
+            let default_role = defaults.get(idx).copied().unwrap_or("reference_image");
+            let (url, role) = parse_media_item(item, default_role);
+            let Some(url) = url.filter(|url| !url.is_empty()) else {
+                continue;
+            };
+            match role.to_ascii_lowercase().as_str() {
+                "first_frame" | "first" => first_image = Some(url.to_string()),
+                "last_frame" | "end_frame" | "last" | "tail" => {
+                    last_image = Some(url.to_string())
+                }
+                "reference_image" | "refer_image" | "reference" => {
+                    reference_images.push(url.to_string())
+                }
+                _ => reference_images.push(url.to_string()),
+            }
+        }
+
+        if !result.contains_key("first_image") {
+            if let Some(url) = first_image {
+                result.insert("first_image".to_string(), serde_json::json!(url));
+            }
+        }
+        if !result.contains_key("last_image") {
+            if let Some(url) = last_image {
+                result.insert("last_image".to_string(), serde_json::json!(url));
+            }
+        }
+        if !result.contains_key("reference_images") && !reference_images.is_empty() {
+            result.insert(
+                "reference_images".to_string(),
+                serde_json::json!(reference_images),
+            );
+        }
+    }
+
+    // 参考视频/音频只接受 GlobalAI OPC 的数组字段；具体资源限制由上游校验。
+    if !result.contains_key("reference_videos") {
+        let urls = collect_image_urls(body, &["videos"]);
+        if !urls.is_empty() {
+            result.insert("reference_videos".to_string(), serde_json::json!(urls));
+        }
+    }
+    if !result.contains_key("reference_audios") {
+        let urls = collect_image_urls(body, &["audios"]);
+        if !urls.is_empty() {
+            result.insert("reference_audios".to_string(), serde_json::json!(urls));
+        }
+    }
+
+    // GlobalAI OPC 将 duration 标记为必填，官方默认值为 5 秒。
+    result
+        .entry("duration".to_string())
+        .or_insert_with(|| serde_json::json!(5));
+
+    serde_json::Value::Object(result)
+}
+
+#[cfg(test)]
+mod globalaiopc_video_tests {
+    use super::{build_globalaiopc_video_body, infer_forward_from_base_url};
+    use serde_json::json;
+
+    #[test]
+    fn maps_openai_video_fields_to_globalaiopc() {
+        let body = json!({
+            "model": "wrong-model",
+            "prompt": "a dog running",
+            "images": ["https://example.com/first.png", "https://example.com/last.png"],
+            "videos": ["https://example.com/motion.mp4"],
+            "audios": ["https://example.com/voice.mp3"],
+            "ratio": "9:16",
+            "resolution": "1080p",
+            "duration": 7,
+            "watermark": false
+        });
+
+        let actual = build_globalaiopc_video_body("sd_2.0_special", &body);
+        assert_eq!(actual["model"], "sd_2.0_special");
+        assert_eq!(actual["first_image"], "https://example.com/first.png");
+        assert_eq!(actual["last_image"], "https://example.com/last.png");
+        assert_eq!(actual["reference_videos"], json!(["https://example.com/motion.mp4"]));
+        assert_eq!(actual["reference_audios"], json!(["https://example.com/voice.mp3"]));
+        assert_eq!(actual["aspect_ratio"], "9:16");
+        assert_eq!(actual["duration"], 7);
+        assert!(actual.get("images").is_none());
+        assert!(actual.get("ratio").is_none());
+    }
+
+    #[test]
+    fn keeps_native_media_fields_and_explicit_roles() {
+        let body = json!({
+            "prompt": "subject reference",
+            "images": [
+                {"url": "https://example.com/subject.png", "role": "reference_image"},
+                {"url": "https://example.com/end.png", "type": "last_frame"}
+            ],
+            "reference_images": ["https://example.com/native-ref.png"],
+            "first_image": "https://example.com/native-first.png"
+        });
+
+        let actual = build_globalaiopc_video_body("sd_2.0_special", &body);
+        assert_eq!(actual["reference_images"], json!(["https://example.com/native-ref.png"]));
+        assert_eq!(actual["first_image"], "https://example.com/native-first.png");
+        assert_eq!(actual["last_image"], "https://example.com/end.png");
+        assert_eq!(actual["duration"], 5);
+    }
+
+    #[test]
+    fn infers_globalaiopc_from_api_host() {
+        let resolved = infer_forward_from_base_url(
+            "https://zcbservice.aizfw.cn/kyyReactApiServer",
+            "视频",
+            None,
+        );
+        assert_eq!(resolved.target_type, "globalaiopc_video");
+        assert_eq!(resolved.upstream_path, "/v2/model-center/tasks");
+        assert_eq!(
+            resolved.poll_path.as_deref(),
+            Some("/v2/model-center/tasks/${task_id}")
+        );
+    }
 }
 
 // ── 火山引擎 AI MediaKit 插件辅助处理 ──

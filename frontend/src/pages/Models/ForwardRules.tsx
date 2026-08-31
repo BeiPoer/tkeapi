@@ -511,7 +511,7 @@ const ForwardRules: React.FC = () => {
         <CText>target_type</CText>：目标协议类型。常用 <CText>openai</CText>、<CText>anthropic</CText>、
         <CText>gemini</CText>、<CText>volcengine</CText>、<CText>dashscope</CText>、<CText>kling</CText>、<CText>kling_video</CText>、
         <CText>minimax_image</CText>、<CText>minimax_video</CText>、
-        <CText>tencent_vod_video</CText>、<CText>tencent_vod_image</CText> 等。
+        <CText>tencent_vod_video</CText>、<CText>tencent_vod_image</CText>、<CText>globalaiopc_video</CText> 等。
         <CText>kling_video</CText> 渠道密钥填官方 API Key（Bearer 直传，不生成 JWT）；
         <CText>kling</CText> 仍为 <CText>access_key:secret_key</CText> 自动签 JWT。
       </>,

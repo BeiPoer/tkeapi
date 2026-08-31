@@ -238,6 +238,21 @@ fn count_image_list_fields(body: &Value) -> i32 {
         .unwrap_or(0)
 }
 
+/// 统计兼容字符串、对象和数组的媒体字段数量（GlobalAI OPC 原生字段使用）。
+fn count_media_field(body: &Value, key: &str) -> i32 {
+    let Some(value) = body.get(key) else {
+        return 0;
+    };
+    if value.as_str().is_some_and(|s| !s.is_empty()) || value.is_object() {
+        1
+    } else {
+        value
+            .as_array()
+            .map(|items| items.len() as i32)
+            .unwrap_or(0)
+    }
+}
+
 pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
     let mut has_video = false;
     let mut has_audio = false;
@@ -261,6 +276,10 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
         .and_then(|m| m.as_array())
         .is_some_and(|mods| mods.iter().any(|m| m.as_str() == Some("audio")));
     has_audio |= body.get("generate_audio").and_then(|v| v.as_bool()) == Some(true);
+
+    // GlobalAI OPC 原生字段：reference_videos / reference_audios。
+    has_video |= field_media_present(body, "reference_videos");
+    has_audio |= field_media_present(body, "reference_audios");
 
     if let Some(msgs) = body.get("messages").and_then(|m| m.as_array()) {
         for msg in msgs {
@@ -377,11 +396,16 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
     let (tencent_refs, tencent_video) = scan_tencent_file_infos(body);
     has_video |= tencent_video;
 
+    let globalaiopc_image_refs = count_media_field(body, "reference_images")
+        + count_media_field(body, "first_image")
+        + count_media_field(body, "last_image");
+
     let mut has_image_ref = field_media_present(body, "image")
         || field_media_present(body, "image_tail")
         || nonempty_array_field(body, "image_urls")
         || nonempty_array_field(body, "image_list")
         || nonempty_array_field(body, "subject_image_list")
+        || globalaiopc_image_refs > 0
         || body.get("image_reference").is_some_and(|v| !v.is_null())
         || tencent_refs > 0
         || contents_images > 0;
@@ -401,6 +425,8 @@ pub fn extract_request_features(body: &Value) -> ExtractedFeatures {
                 from_lists
             } else if contents_images > 0 {
                 contents_images
+            } else if globalaiopc_image_refs > 0 {
+                globalaiopc_image_refs
             } else {
                 tencent_refs
             }
@@ -578,6 +604,14 @@ impl ExtractedFeatures {
         // 合并终态通用特征（如 input_images / size）；已有 resolution 不被覆盖
         self.merge(extract_request_features(resp_json));
         // 厂商终态覆盖放在 merge 之后，确保不被冲掉
+        // GlobalAI OPC：实际生成时长使用根级 camelCase 字段。
+        if let Some(d) = resp_json
+            .get("actualDuration")
+            .or_else(|| resp_json.get("actual_duration"))
+            .and_then(parse_json_f64)
+        {
+            self.duration_seconds = Some(d);
+        }
         if let Some(d) = extract_kling_video_duration(resp_json) {
             self.duration_seconds = Some(d);
         }

@@ -3376,6 +3376,13 @@ macro_rules! pg_migration_blocks {
         ) WHERE key = 'site_settings'"
     );
 
+    // GlobalAI OPC 模型中心视频任务转发规则
+    once_migration!(pool, "globalaiopc_video_forward_rule_v1",
+        r#"INSERT INTO forward_rules (name, rule_type, description, config_json, category, is_system, eid)
+        SELECT 'GlobalAI OPC 视频生成', 'globalaiopc', '将标准视频生成请求转换为 GlobalAI OPC 模型中心任务格式，支持异步提交与轮询', '{"target_type":"globalaiopc_video","path_rewrite":{"old":"/v1/video/generations","new":"/v2/model-center/tasks"},"poll_path":"/v2/model-center/tasks/${task_id}","auth_type":"bearer"}', '视频', 1, '1' || lpad((floor(random() * 10000)::int)::text, 4, '0')
+        WHERE NOT EXISTS (SELECT 1 FROM forward_rules WHERE name = 'GlobalAI OPC 视频生成')"#
+    );
+
     tracing::info!("PostgreSQL AnyPool migrations completed successfully");
     Ok(())
     }};

@@ -349,6 +349,10 @@ pub fn find_urls(v: &Value) -> Vec<String> {
     if let Some(u) = v.get("video_url").and_then(|u| u.as_str()) {
         push_unique(&mut urls, u);
     }
+    // GlobalAI OPC 模型中心：完成任务时返回根级 result_url。
+    if let Some(u) = v.get("result_url").and_then(|u| u.as_str()) {
+        push_unique(&mut urls, u);
+    }
     // 火山引擎 AI MediaKit 画质增强与字幕擦除：从响应中提取生成的视频地址 (/result/video_url)
     if let Some(u) = v.pointer("/result/video_url").and_then(|u| u.as_str()) {
         push_unique(&mut urls, u);
@@ -975,4 +979,38 @@ pub fn format_as_openai_error(v: &Value) -> Option<String> {
         return None;
     }
     Some(to_json(&json!({ "error": openai_error_object(v) })))
+}
+
+#[cfg(test)]
+mod globalaiopc_response_tests {
+    use super::format_openai;
+    use serde_json::Value;
+
+    #[test]
+    fn formats_globalaiopc_result_url_as_openai_video_data() {
+        let raw = r#"{
+            "id":"task_123",
+            "object":"video",
+            "created":1774836724,
+            "model":"sd_2.0_special",
+            "status":"completed",
+            "progress":100,
+            "result_url":"https://example.com/result-without-extension",
+            "video_url":"https://example.com/result.mp4",
+            "actualDuration":5,
+            "error":null
+        }"#;
+
+        let formatted = format_openai("视频", raw, true, Some("task_123"));
+        let value: Value = serde_json::from_str(&formatted).expect("formatted response must be JSON");
+        assert_eq!(value["status"], "completed");
+        let urls = value["data"]
+            .as_array()
+            .expect("formatted response must contain data")
+            .iter()
+            .filter_map(|item| item.get("url").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(urls.contains(&"https://example.com/result-without-extension"));
+        assert!(urls.contains(&"https://example.com/result.mp4"));
+    }
 }
