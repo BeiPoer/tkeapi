@@ -79,7 +79,7 @@ jobs:
               export CARGO_PROFILE_RELEASE_OPT_LEVEL=0
               export CARGO_PROFILE_RELEASE_LTO=false
               export CARGO_PROFILE_RELEASE_DEBUG=false
-              export RUSTFLAGS="-Zmir-opt-level=0 -Zinline-mir=false -C codegen-units=1024 -C opt-level=0 -C debuginfo=0 -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=--no-threads"
+              export RUSTFLAGS="-Zmir-opt-level=0 -Zinline-mir=false -C codegen-units=1024 -C opt-level=0 -C debuginfo=0 -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld"
               set +e
               cargo +nightly -Zcodegen-backend build \
                 --manifest-path backend/Cargo.toml \
