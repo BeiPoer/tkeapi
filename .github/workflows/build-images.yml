@@ -25,17 +25,23 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config
+          sudo apt-get install -y clang lld libssl-dev pkg-config
 
       - name: Cache Cargo build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend -> target
+
+      - name: Cache amd64 backend binary
+        uses: actions/cache@v4
+        with:
+          path: backend/tokensbyte-server
+          key: tokensbyte-backend-bin-${{ hashFiles('backend/src/**', 'backend/build.rs', 'backend/Cargo.toml', 'backend/Cargo.lock', 'frontend/src/pages/Plugins/SitePortal/locales/portal/**', 'frontend/src/pages/Plugins/SitePortal/whats-token-homepage.html') }}
 
       - name: Validate backend manifest
         run: |
@@ -44,19 +50,42 @@ jobs:
 
       - name: Prepare amd64 backend binary
         run: |
-          prebuilt_source_commit="0fc20ccd6fa4c36413eba456f6b2997c49092488"
-          if ! git diff --quiet "$prebuilt_source_commit" -- backend/src backend/build.rs; then
-            echo "backend source changed after the checked-in amd64 binary was produced"
-            echo "build a new amd64 binary or use a larger/self-hosted runner"
-            exit 1
+          if [ -x backend/tokensbyte-server ]; then
+            echo "using cached amd64 backend binary"
+          else
+            prebuilt_source_commit="0fc20ccd6fa4c36413eba456f6b2997c49092488"
+            if git diff --quiet "$prebuilt_source_commit" -- backend/src backend/build.rs; then
+              echo "backend source unchanged; extracting the checked-in amd64 binary"
+              docker load --input dockerimage/tkeapi-backend-20260815_153537.tar
+              container_id="$(docker create tkeapi-backend:latest)"
+              trap 'docker rm "$container_id" >/dev/null 2>&1 || true' EXIT
+              docker cp "$container_id:/app/tokensbyte-server" backend/tokensbyte-server
+              docker rm "$container_id" >/dev/null
+              test "$(docker image inspect tkeapi-backend:latest --format '{{.Architecture}}')" = amd64
+            else
+              echo "backend source changed; building an updated amd64 binary"
+              if ! swapon --show --noheadings | grep -q .; then
+                sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+                sudo chmod 600 /swapfile
+                sudo mkswap /swapfile
+                sudo swapon /swapfile
+              fi
+              free -h
+              rustup component add rustc-codegen-cranelift-preview --toolchain nightly
+              export CARGO_INCREMENTAL=0
+              export CARGO_PROFILE_RELEASE_CODEGEN_BACKEND=cranelift
+              export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1024
+              export CARGO_PROFILE_RELEASE_OPT_LEVEL=0
+              export CARGO_PROFILE_RELEASE_LTO=false
+              export CARGO_PROFILE_RELEASE_DEBUG=false
+              export RUSTFLAGS="-Zmir-opt-level=0 -Zinline-mir=false -C codegen-units=1024 -C opt-level=0 -C debuginfo=0 -C linker=clang -C link-arg=-fuse-ld=lld"
+              cargo +nightly -Zcodegen-backend build \
+                --manifest-path backend/Cargo.toml \
+                --release --locked --config unstable.codegen-backend=true -j 1
+              cp backend/target/release/tokensbyte-server backend/tokensbyte-server
+            fi
           fi
-          docker load --input dockerimage/tkeapi-backend-20260815_153537.tar
-          container_id="$(docker create tkeapi-backend:latest)"
-          trap 'docker rm "$container_id" >/dev/null 2>&1 || true' EXIT
-          docker cp "$container_id:/app/tokensbyte-server" backend/tokensbyte-server
-          docker rm "$container_id" >/dev/null
           test -x backend/tokensbyte-server
-          test "$(docker image inspect tkeapi-backend:latest --format '{{.Architecture}}')" = amd64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
