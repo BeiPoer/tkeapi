@@ -121,9 +121,10 @@ docker compose up -d --no-build
 
 `.github/workflows/build-images.yml` 会在 `main` 分支有新提交时自动运行，也可以在 GitHub 的
 Actions 页面手动运行。工作流只构建并推送 `linux/amd64` 镜像，前端先生成 `dist` 再打包进 Nginx
-镜像。后端会先执行 `cargo metadata --locked --no-deps` 校验清单与锁文件；由于 GitHub Free Runner
-的资源限制不足以稳定完成本项目的 LLVM 最终代码生成，镜像阶段复用仓库中已验证的 amd64 二进制并仅做 thin 打包。
-后端源文件变化后，工作流会主动失败，避免发布过期二进制。
+镜像，并使用 `package-lock.json` + `npm ci` 保证依赖可复现。后端会先执行
+`cargo metadata --locked --no-deps` 校验清单与锁文件，再按源码哈希复用 amd64 二进制缓存；缓存未命中时，
+工作流会清理临时 runner 的无关 SDK、扩展磁盘 swap，并用单进程 Cranelift 生成当前源码对应的二进制，
+最后通过 thin 镜像打包。旧二进制不会在源码变化后被继续发布。
 
 服务器更新时执行：
 

@@ -12,12 +12,12 @@ permissions:
 
 concurrency:
   group: build-images-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build-backend:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -39,6 +39,7 @@ jobs:
           workspaces: backend -> target
 
       - name: Cache amd64 backend binary
+        id: backend-binary-cache
         uses: actions/cache@v4
         with:
           path: backend/tokensbyte-server
@@ -48,6 +49,77 @@ jobs:
         run: |
           cargo metadata --manifest-path backend/Cargo.toml --locked --no-deps --format-version 1 > /tmp/tokensbyte-backend-metadata.json
           test -s /tmp/tokensbyte-backend-metadata.json
+
+      - name: Prepare memory for backend build
+        if: steps.backend-binary-cache.outputs.cache-hit != 'true'
+        run: |
+          for sdk_path in \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache \
+            /usr/local/share/boost \
+            /usr/local/share/chromium \
+            /usr/share/swift \
+            /opt/az \
+            /usr/local/aws-cli; do
+            if [ -e "$sdk_path" ]; then
+              sudo rm -rf -- "$sdk_path"
+            fi
+          done
+          sudo apt-get clean
+          sudo docker system prune --all --force >/dev/null 2>&1 || true
+
+          # The monolithic backend crate peaks near 46 GiB of virtual memory.
+          target_swap_kib=$((36 * 1024 * 1024))
+          minimum_swap_kib=$((32 * 1024 * 1024))
+          created_swap_kib=0
+
+          create_swap_file() {
+            local swap_dir="$1"
+            local swap_name="$2"
+            local reserve_kib="$3"
+            local available_kib allocatable_kib remaining_kib swap_kib swap_file
+            available_kib="$(df --output=avail -k "$swap_dir" | tail -n 1 | tr -d ' ')"
+            allocatable_kib=$((available_kib - reserve_kib))
+            remaining_kib=$((target_swap_kib - created_swap_kib))
+            if [ "$allocatable_kib" -le 0 ] || [ "$remaining_kib" -le 0 ]; then
+              return
+            fi
+            swap_kib="$allocatable_kib"
+            if [ "$swap_kib" -gt "$remaining_kib" ]; then
+              swap_kib="$remaining_kib"
+            fi
+            if [ "$swap_kib" -lt $((1024 * 1024)) ]; then
+              return
+            fi
+            swap_file="$swap_dir/$swap_name"
+            sudo fallocate -l "${swap_kib}K" "$swap_file"
+            sudo chmod 600 "$swap_file"
+            sudo mkswap "$swap_file" >/dev/null
+            sudo swapon --priority 100 "$swap_file"
+            created_swap_kib=$((created_swap_kib + swap_kib))
+          }
+
+          runner_device="$(df --output=source "$RUNNER_TEMP" | tail -n 1 | tr -d ' ')"
+          if [ -d /mnt ]; then
+            mnt_device="$(df --output=source /mnt | tail -n 1 | tr -d ' ')"
+            if [ "$mnt_device" != "$runner_device" ]; then
+              create_swap_file /mnt tokensbyte-build.swap $((2 * 1024 * 1024))
+            fi
+          fi
+          create_swap_file "$RUNNER_TEMP" tokensbyte-build.swap $((10 * 1024 * 1024))
+
+          if [ "$created_swap_kib" -lt "$minimum_swap_kib" ]; then
+            echo "::error::Only $((created_swap_kib / 1024 / 1024)) GiB of additional swap could be created; 32 GiB is required"
+            df -h
+            exit 1
+          fi
+          sudo sysctl -w vm.swappiness=100
+          df -h
+          free -h
+          swapon --show
 
       - name: Prepare amd64 backend binary
         run: |
@@ -62,11 +134,11 @@ jobs:
             export RUSTC_WRAPPER="$RUNNER_TEMP/serial-rustc"
             export CARGO_INCREMENTAL=0
             export CARGO_PROFILE_RELEASE_CODEGEN_BACKEND=cranelift
-            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1024
+            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=256
             export CARGO_PROFILE_RELEASE_OPT_LEVEL=0
             export CARGO_PROFILE_RELEASE_LTO=false
             export CARGO_PROFILE_RELEASE_DEBUG=false
-            export RUSTFLAGS="-Zthreads=1 -Zmir-opt-level=0 -Zinline-mir=false -C codegen-units=1024 -C opt-level=0 -C debuginfo=0 -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld"
+            export RUSTFLAGS="-Zthreads=1 -Zmir-opt-level=0 -Zinline-mir=false -Zshare-generics=y -C codegen-units=256 -C opt-level=0 -C debuginfo=0 -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld"
             set +e
             cargo +nightly -Zcodegen-backend build \
               --manifest-path backend/Cargo.toml \
@@ -131,11 +203,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Build frontend assets
         working-directory: frontend
         run: |
-          npm install --ignore-scripts --no-audit --no-fund --package-lock=false
+          npm ci --ignore-scripts --no-audit --no-fund
           npm run build
 
       - name: Set up Docker Buildx
