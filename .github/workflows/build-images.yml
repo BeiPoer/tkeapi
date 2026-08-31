@@ -73,13 +73,20 @@ jobs:
               fi
               free -h
               rustup component add rustc-codegen-cranelift-preview --toolchain nightly
+              cat > "$RUNNER_TEMP/serial-rustc" <<'EOF'
+              #!/usr/bin/env bash
+              set -euo pipefail
+              exec flock "${RUNNER_TEMP:-/tmp}/tokensbyte-rustc.lock" "$@"
+              EOF
+              chmod +x "$RUNNER_TEMP/serial-rustc"
+              export RUSTC_WRAPPER="$RUNNER_TEMP/serial-rustc"
               export CARGO_INCREMENTAL=0
               export CARGO_PROFILE_RELEASE_CODEGEN_BACKEND=cranelift
               export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1024
               export CARGO_PROFILE_RELEASE_OPT_LEVEL=0
               export CARGO_PROFILE_RELEASE_LTO=false
               export CARGO_PROFILE_RELEASE_DEBUG=false
-              export RUSTFLAGS="-Zmir-opt-level=0 -Zinline-mir=false -C codegen-units=1024 -C opt-level=0 -C debuginfo=0 -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld"
+              export RUSTFLAGS="-Zthreads=1 -Zmir-opt-level=0 -Zinline-mir=false -C codegen-units=1024 -C opt-level=0 -C debuginfo=0 -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld"
               set +e
               cargo +nightly -Zcodegen-backend build \
                 --manifest-path backend/Cargo.toml \
