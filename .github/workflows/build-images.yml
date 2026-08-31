@@ -54,53 +54,42 @@ jobs:
           if [ -x backend/tokensbyte-server ]; then
             echo "using cached amd64 backend binary"
           else
-            prebuilt_source_commit="0fc20ccd6fa4c36413eba456f6b2997c49092488"
-            if git diff --quiet "$prebuilt_source_commit" -- backend/src backend/build.rs; then
-              echo "backend source unchanged; extracting the checked-in amd64 binary"
-              docker load --input dockerimage/tkeapi-backend-20260815_153537.tar
-              container_id="$(docker create tkeapi-backend:latest)"
-              trap 'docker rm "$container_id" >/dev/null 2>&1 || true' EXIT
-              docker cp "$container_id:/app/tokensbyte-server" backend/tokensbyte-server
-              docker rm "$container_id" >/dev/null
-              test "$(docker image inspect tkeapi-backend:latest --format '{{.Architecture}}')" = amd64
-            else
-              echo "backend source changed; building an updated amd64 binary"
-              free -h
-              rustup component add rustc-codegen-cranelift-preview --toolchain nightly
-              cat > "$RUNNER_TEMP/serial-rustc" <<'EOF'
-              #!/usr/bin/env bash
-              set -euo pipefail
-              exec flock "${RUNNER_TEMP:-/tmp}/tokensbyte-rustc.lock" "$@"
-              EOF
-              chmod +x "$RUNNER_TEMP/serial-rustc"
-              export RUSTC_WRAPPER="$RUNNER_TEMP/serial-rustc"
-              export CARGO_INCREMENTAL=0
-              export CARGO_PROFILE_RELEASE_CODEGEN_BACKEND=cranelift
-              export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1024
-              export CARGO_PROFILE_RELEASE_OPT_LEVEL=0
-              export CARGO_PROFILE_RELEASE_LTO=false
-              export CARGO_PROFILE_RELEASE_DEBUG=false
-              export RUSTFLAGS="-Zthreads=1 -Zmir-opt-level=0 -Zinline-mir=false -C codegen-units=1024 -C opt-level=0 -C debuginfo=0 -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld"
-              set +e
-              cargo +nightly -Zcodegen-backend build \
-                --manifest-path backend/Cargo.toml \
-                --release --locked --config unstable.codegen-backend=true --bin tokensbyte-server -j 1 &
-              build_pid=$!
-              while kill -0 "$build_pid" 2>/dev/null; do
-                sleep 30
-                if kill -0 "$build_pid" 2>/dev/null; then
-                  echo "backend build still running ($(date -u '+%Y-%m-%dT%H:%M:%SZ'))"
-                  free -h
-                fi
-              done
-              wait "$build_pid"
-              build_status=$?
-              set -e
-              if [ "$build_status" -ne 0 ]; then
-                exit "$build_status"
+            echo "backend binary cache miss; building from the checked-out source"
+            free -h
+            rustup component add rustc-codegen-cranelift-preview --toolchain nightly
+            cat > "$RUNNER_TEMP/serial-rustc" <<'EOF'
+            #!/usr/bin/env bash
+            set -euo pipefail
+            exec flock "${RUNNER_TEMP:-/tmp}/tokensbyte-rustc.lock" "$@"
+            EOF
+            chmod +x "$RUNNER_TEMP/serial-rustc"
+            export RUSTC_WRAPPER="$RUNNER_TEMP/serial-rustc"
+            export CARGO_INCREMENTAL=0
+            export CARGO_PROFILE_RELEASE_CODEGEN_BACKEND=cranelift
+            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1024
+            export CARGO_PROFILE_RELEASE_OPT_LEVEL=0
+            export CARGO_PROFILE_RELEASE_LTO=false
+            export CARGO_PROFILE_RELEASE_DEBUG=false
+            export RUSTFLAGS="-Zthreads=1 -Zmir-opt-level=0 -Zinline-mir=false -C codegen-units=1024 -C opt-level=0 -C debuginfo=0 -C panic=abort -C linker=clang -C link-arg=-fuse-ld=lld"
+            set +e
+            cargo +nightly -Zcodegen-backend build \
+              --manifest-path backend/Cargo.toml \
+              --release --locked --config unstable.codegen-backend=true --bin tokensbyte-server -j 1 &
+            build_pid=$!
+            while kill -0 "$build_pid" 2>/dev/null; do
+              sleep 30
+              if kill -0 "$build_pid" 2>/dev/null; then
+                echo "backend build still running ($(date -u '+%Y-%m-%dT%H:%M:%SZ'))"
+                free -h
               fi
-              cp backend/target/release/tokensbyte-server backend/tokensbyte-server
+            done
+            wait "$build_pid"
+            build_status=$?
+            set -e
+            if [ "$build_status" -ne 0 ]; then
+              exit "$build_status"
             fi
+            cp backend/target/release/tokensbyte-server backend/tokensbyte-server
           fi
           test -x backend/tokensbyte-server
 
